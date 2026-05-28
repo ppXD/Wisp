@@ -1,5 +1,6 @@
 //! The VAD-segmented transcription pipeline.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use wisp_audio::{to_mono_16k, TARGET_SAMPLE_RATE};
@@ -57,8 +58,22 @@ impl Pipeline {
         source: &mut dyn AudioSource,
         sink: &mut dyn FnMut(TranscriptEvent),
     ) -> Result<()> {
-        while let Some(frame) = source.next_frame()? {
-            self.process_frame(&frame, sink)?;
+        self.run_until(source, sink, &AtomicBool::new(false))
+    }
+
+    /// Like [`run`](Self::run) but also stops once `stop` is set — for live sources that never end
+    /// on their own. The in-progress utterance is finalized before returning either way.
+    pub fn run_until(
+        &mut self,
+        source: &mut dyn AudioSource,
+        sink: &mut dyn FnMut(TranscriptEvent),
+        stop: &AtomicBool,
+    ) -> Result<()> {
+        while !stop.load(Ordering::Relaxed) {
+            match source.next_frame()? {
+                Some(frame) => self.process_frame(&frame, sink)?,
+                None => break,
+            }
         }
         self.finalize(sink)
     }
