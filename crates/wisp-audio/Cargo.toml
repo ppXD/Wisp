@@ -1,0 +1,18 @@
+[package]
+name = "wisp-audio"
+version = "0.0.0"
+description = "Audio capture sources and DSP for Wisp"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+hound = "3"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
