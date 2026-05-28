@@ -913,6 +913,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wisp-pipeline"
+version = "0.0.0"
+dependencies = [
+ "wisp-audio",
+ "wisp-core",
+]
+
+[[package]]
 name = "wit-bindgen"
 version = "0.51.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

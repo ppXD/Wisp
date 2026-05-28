@@ -1,0 +1,19 @@
+[package]
+name = "wisp-pipeline"
+version = "0.0.0"
+description = "Streaming transcription pipeline for Wisp"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+wisp-audio = { path = "../wisp-audio" }
+
+[dev-dependencies]
+# Enables the mock AudioSource/AsrEngine for hermetic pipeline tests.
+wisp-core = { path = "../wisp-core", features = ["testing"] }
+
+[lints]
+workspace = true
