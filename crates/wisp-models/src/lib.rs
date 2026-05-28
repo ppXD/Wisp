@@ -7,10 +7,12 @@
 //! The catalog *data* (which models exist, their URLs and checksums) is injected into
 //! [`FsModelStore`]; sourcing a built-in catalog is handled separately.
 
+pub mod catalog;
 pub mod checksum;
 pub mod download;
 pub mod store;
 
+pub use catalog::builtin_catalog;
 pub use download::FileDownloader;
 #[cfg(feature = "http")]
 pub use download::HttpDownloader;

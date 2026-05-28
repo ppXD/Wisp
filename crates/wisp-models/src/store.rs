@@ -52,17 +52,42 @@ impl FsModelStore {
         self.model_dir(id).join(COMPLETE_MARKER).is_file()
     }
 
+    /// Returns the local directory for `id` if it is fully installed, else `None`.
+    pub fn local_path(&self, id: &ModelId) -> Option<PathBuf> {
+        if self.is_complete(id) {
+            Some(self.model_dir(id))
+        } else {
+            None
+        }
+    }
+
+    /// Verifies `path` against `file`'s checksum, treating an empty checksum as "unpinned" —
+    /// skipped with a warning (see [`fetch_file`](Self::fetch_file)).
+    fn verify(&self, path: &Path, file: &ModelFile) -> Result<()> {
+        if file.sha256.is_empty() {
+            return Ok(());
+        }
+        verify_file(path, &file.sha256)
+    }
+
     fn fetch_file(&self, dir: &Path, file: &ModelFile) -> Result<()> {
         let dest = dir.join(&file.name);
 
-        if dest.is_file() && verify_file(&dest, &file.sha256).is_ok() {
+        if dest.is_file() && self.verify(&dest, file).is_ok() {
             return Ok(());
+        }
+
+        if file.sha256.is_empty() {
+            eprintln!(
+                "wisp-models: downloading {} without a pinned checksum (unverified)",
+                file.name
+            );
         }
 
         let part = dir.join(format!("{}.part", file.name));
         self.downloader.download(&file.url, &part)?;
 
-        if let Err(e) = verify_file(&part, &file.sha256) {
+        if let Err(e) = self.verify(&part, file) {
             let _ = fs::remove_file(&part);
             return Err(e);
         }
@@ -240,6 +265,33 @@ mod tests {
         assert!(!dir.join("bad.bin").exists());
         assert!(!dir.join("bad.bin.part").exists());
         assert!(store.installed().unwrap().is_empty());
+    }
+
+    #[test]
+    fn empty_checksum_skips_verification() {
+        let url = "https://example/u.bin";
+        let bytes = b"unpinned".to_vec();
+        let desc = ModelDescriptor {
+            id: ModelId("u".into()),
+            family: ModelFamily::SenseVoice,
+            quant: Quant::Q8,
+            display_name: "u".into(),
+            files: vec![ModelFile {
+                name: "u.bin".into(),
+                url: url.into(),
+                sha256: String::new(),
+                size_bytes: bytes.len() as u64,
+            }],
+            languages: vec![],
+        };
+        let (downloader, calls) = fake_for(url, &bytes);
+        let root = tempfile::tempdir().unwrap();
+        let store = FsModelStore::new(root.path(), vec![desc], Box::new(downloader));
+
+        let dir = store.ensure(&ModelId("u".into())).unwrap();
+        assert!(dir.join("u.bin").is_file());
+        assert!(store.local_path(&ModelId("u".into())).is_some());
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[test]

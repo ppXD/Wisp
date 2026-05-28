@@ -14,6 +14,8 @@ pub enum ModelFamily {
     Whisper,
     /// NVIDIA Parakeet transducer models.
     Parakeet,
+    /// sherpa-onnx SenseVoice (single-file multilingual model).
+    SenseVoice,
 }
 
 /// Quantization level of a model's weights.

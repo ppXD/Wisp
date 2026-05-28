@@ -1,20 +1,33 @@
 //! Wisp desktop app — a thin Tauri shell over `wisp_pipeline::Session`.
 //!
-//! `start_session` builds a microphone-driven pipeline using the sherpa-onnx SenseVoice engine
-//! and forwards transcript segments to the webview; `stop_session` stops it.
+//! Commands: list/download/select models (backed by `wisp_models::FsModelStore`) and
+//! start/stop a transcription session driven by the selected model. Transcript segments are
+//! forwarded to the webview as events.
 
-use std::sync::Mutex;
+use std::path::Path;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use wisp_audio::MicSource;
+use wisp_core::engine::AsrEngine;
+use wisp_core::error::{Result as WispResult, WispError};
+use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_sherpa::SenseVoiceEngine;
+use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
 use wisp_pipeline::{EnergyVad, Pipeline, Session, DEFAULT_SILENCE_HANGOVER};
 
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
+
+/// Shared application state.
+struct AppState {
+    store: Arc<FsModelStore>,
+    session: Mutex<Option<Session>>,
+    active: Mutex<Option<ModelId>>,
+}
 
 /// Serializable transcript segment delivered to the UI.
 #[derive(Clone, Serialize)]
@@ -43,10 +56,78 @@ impl From<&TranscriptSegment> for SegmentDto {
     }
 }
 
-/// Shared application state: the currently running session, if any.
-#[derive(Default)]
-struct AppState {
-    session: Mutex<Option<Session>>,
+/// A catalog model with its install/active status, for the picker UI.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelInfoDto {
+    id: String,
+    name: String,
+    size_bytes: u64,
+    languages: Vec<String>,
+    installed: bool,
+    active: bool,
+}
+
+/// Builds the ASR engine for a downloaded model based on its family.
+fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn AsrEngine>> {
+    match descriptor.family {
+        ModelFamily::SenseVoice => {
+            let model_name = descriptor
+                .files
+                .iter()
+                .find(|f| f.name.ends_with(".onnx"))
+                .map(|f| f.name.clone())
+                .ok_or_else(|| WispError::Model("model descriptor has no .onnx file".to_owned()))?;
+            let engine = SenseVoiceEngine::new(&dir.join(model_name), &dir.join("tokens.txt"))?;
+            Ok(Box::new(engine))
+        }
+        other => Err(WispError::Engine(format!("no engine for model family {other:?} yet"))),
+    }
+}
+
+#[tauri::command]
+fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> {
+    let active = state.active.lock().map_err(|_| "state lock poisoned".to_owned())?.clone();
+    let models = state
+        .store
+        .available()
+        .into_iter()
+        .map(|d| {
+            let installed = state.store.local_path(&d.id).is_some();
+            let is_active = active.as_ref() == Some(&d.id);
+            let size_bytes = d.total_size_bytes();
+            ModelInfoDto {
+                id: d.id.0,
+                name: d.display_name,
+                size_bytes,
+                languages: d.languages,
+                installed,
+                active: is_active,
+            }
+        })
+        .collect();
+    Ok(models)
+}
+
+#[tauri::command]
+async fn download_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let store = Arc::clone(&state.store);
+    let model_id = ModelId(id);
+    tauri::async_runtime::spawn_blocking(move || store.ensure(&model_id))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let model_id = ModelId(id);
+    if !state.store.available().iter().any(|d| d.id == model_id) {
+        return Err("unknown model".to_owned());
+    }
+    *state.active.lock().map_err(|_| "state lock poisoned".to_owned())? = Some(model_id);
+    Ok(())
 }
 
 #[tauri::command]
@@ -56,24 +137,27 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         return Err("a session is already running".to_owned());
     }
 
-    let dir = app
-        .path()
-        .app_data_dir()
-        .map_err(|e| e.to_string())?
-        .join("models")
-        .join("sense-voice");
-    let model = dir.join("model.int8.onnx");
-    let tokens = dir.join("tokens.txt");
-    if !model.is_file() || !tokens.is_file() {
-        return Err(format!(
-            "SenseVoice model not found in {}. Download it (see app/README) and retry.",
-            dir.display()
-        ));
-    }
+    let active = state
+        .active
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone()
+        .ok_or("no model selected")?;
 
-    let engine = SenseVoiceEngine::new(&model, &tokens).map_err(|e| e.to_string())?;
+    let descriptor = state
+        .store
+        .available()
+        .into_iter()
+        .find(|d| d.id == active)
+        .ok_or("selected model is not in the catalog")?;
+    let dir = state
+        .store
+        .local_path(&active)
+        .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
+
+    let engine = build_engine(&descriptor, &dir).map_err(|e| e.to_string())?;
     let pipeline = Pipeline::new(
-        Box::new(engine),
+        engine,
         Box::new(EnergyVad::default()),
         AudioSourceKind::Microphone,
         DEFAULT_SILENCE_HANGOVER,
@@ -104,8 +188,28 @@ fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
-        .manage(AppState::default())
-        .invoke_handler(tauri::generate_handler![start_session, stop_session])
+        .setup(|app| {
+            let models_root = app.path().app_data_dir()?.join("models");
+            let store = Arc::new(FsModelStore::new(models_root, builtin_catalog(), Box::new(HttpDownloader)));
+
+            // Default the active model to the first installed one, else the first in the catalog.
+            let catalog = store.available();
+            let active = catalog
+                .iter()
+                .find(|d| store.local_path(&d.id).is_some())
+                .or_else(|| catalog.first())
+                .map(|d| d.id.clone());
+
+            app.manage(AppState { store, session: Mutex::new(None), active: Mutex::new(active) });
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            list_models,
+            download_model,
+            select_model,
+            start_session,
+            stop_session
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }
