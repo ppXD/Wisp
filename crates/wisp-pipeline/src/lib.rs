@@ -8,7 +8,9 @@
 //! source drop in without touching this orchestration.
 
 pub mod pipeline;
+pub mod session;
 pub mod vad;
 
 pub use pipeline::{Pipeline, DEFAULT_SILENCE_HANGOVER};
+pub use session::{EventSink, Session};
 pub use vad::{EnergyVad, Vad};
