@@ -12,5 +12,5 @@ pub mod wav;
 
 pub use dsp::{resample_linear, to_mono_16k, TARGET_SAMPLE_RATE};
 #[cfg(feature = "mic")]
-pub use mic::MicSource;
+pub use mic::{list_input_devices, MicSource};
 pub use wav::WavSource;

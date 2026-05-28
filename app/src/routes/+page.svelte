@@ -29,6 +29,9 @@
   let segments = $state<Segment[]>([]);
   let models = $state<ModelInfo[]>([]);
   let downloading = $state<string | null>(null);
+  let devices = $state<string[]>([]);
+  let micDevice = $state("");
+  let systemDevice = $state("");
   let unlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
@@ -50,6 +53,28 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  async function refreshDevices() {
+    try {
+      devices = await invoke<string[]>("list_input_devices");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function applyDevices() {
+    try {
+      await invoke("set_devices", { mic: micDevice || null, system: systemDevice || null });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function sourceLabel(source: string): string {
+    if (source === "Microphone") return "me";
+    if (source === "System") return "meeting";
+    return source.toLowerCase();
   }
 
   async function download(id: string) {
@@ -84,6 +109,7 @@
   async function start() {
     error = "";
     try {
+      await applyDevices();
       await ensureListener();
       await invoke("start_session");
       running = true;
@@ -105,7 +131,10 @@
     segments = [];
   }
 
-  onMount(refreshModels);
+  onMount(() => {
+    refreshModels();
+    refreshDevices();
+  });
   onDestroy(() => unlisten?.());
 </script>
 
@@ -141,6 +170,25 @@
     {/each}
   </section>
 
+  <section class="card sources">
+    <div class="section-label">Audio sources</div>
+    <label class="source-row">
+      <span class="source-name">Microphone <em>(you)</em></span>
+      <select bind:value={micDevice} onchange={applyDevices} disabled={running}>
+        <option value="">System default</option>
+        {#each devices as d (d)}<option value={d}>{d}</option>{/each}
+      </select>
+    </label>
+    <label class="source-row">
+      <span class="source-name">Meeting audio <em>(others)</em></span>
+      <select bind:value={systemDevice} onchange={applyDevices} disabled={running}>
+        <option value="">Off</option>
+        {#each devices as d (d)}<option value={d}>{d}</option>{/each}
+      </select>
+    </label>
+    <p class="hint">Meeting audio needs a loopback device — install <strong>BlackHole</strong>, route system output to it, then select it here.</p>
+  </section>
+
   <div class="controls">
     {#if running}
       <button class="btn primary stop" onclick={stop}>Stop</button>
@@ -159,9 +207,9 @@
 
   <ul class="transcript">
     {#each segments as seg (seg.id)}
-      <li class:partial={!seg.isFinal}>
+      <li class:partial={!seg.isFinal} class:meeting={seg.source === "System"}>
         <span class="time">{fmtTime(seg.startMs)}</span>
-        <span class="who">{seg.source}</span>
+        <span class="who">{sourceLabel(seg.source)}</span>
         <span class="text">{seg.text}</span>
       </li>
     {:else}
@@ -448,5 +496,48 @@
     color: var(--accent);
     font-size: 12px;
     text-transform: lowercase;
+  }
+
+  .transcript li.meeting .who {
+    color: #5b7fb0;
+  }
+
+  .sources {
+    margin-bottom: 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .source-row {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+  }
+
+  .source-name {
+    flex: 1;
+    font-size: 14px;
+  }
+
+  .source-name em {
+    color: var(--muted);
+    font-style: normal;
+    font-size: 13px;
+  }
+
+  .source-row select {
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 7px 10px;
+    max-width: 280px;
+  }
+
+  .source-row select:disabled {
+    opacity: 0.5;
   }
 </style>
