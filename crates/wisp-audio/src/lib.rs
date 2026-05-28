@@ -6,7 +6,11 @@
 //! real hardware.
 
 pub mod dsp;
+#[cfg(feature = "mic")]
+pub mod mic;
 pub mod wav;
 
 pub use dsp::{resample_linear, to_mono_16k, TARGET_SAMPLE_RATE};
+#[cfg(feature = "mic")]
+pub use mic::MicSource;
 pub use wav::WavSource;
