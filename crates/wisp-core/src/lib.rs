@@ -6,6 +6,27 @@
 //!
 //! The architecture lands incrementally via small PRs — see `CLAUDE.md` at the repo root.
 
+pub mod audio;
+pub mod config;
+pub mod diarize;
+pub mod engine;
+pub mod error;
+pub mod model;
+pub mod transcript;
+
+#[cfg(any(test, feature = "testing"))]
+pub mod testing;
+
+pub use audio::{AudioFrame, AudioSource, AudioSourceInfo};
+pub use config::Config;
+pub use diarize::Diarizer;
+pub use engine::{AsrEngine, EngineInfo, TranscriptionResult};
+pub use error::{Result, WispError};
+pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
+pub use transcript::{
+    AudioSourceKind, SegmentStatus, SpeakerId, TranscriptEvent, TranscriptSegment,
+};
+
 /// The `wisp-core` crate version, surfaced to the app and UI.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
