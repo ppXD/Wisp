@@ -35,14 +35,27 @@ pub struct MicSource {
 
 impl MicSource {
     /// Opens the system default input device and starts capturing.
-    ///
-    /// Returns an error if there is no input device or the stream cannot be built/started.
     pub fn from_default() -> Result<Self> {
-        let host = cpal::default_host();
-        let device = host
+        let device = cpal::default_host()
             .default_input_device()
             .ok_or_else(|| WispError::Audio("no default input device".to_owned()))?;
-        let name = device.name().unwrap_or_else(|_| "microphone".to_owned());
+        Self::from_cpal_device(device)
+    }
+
+    /// Opens a specific input device by name and starts capturing.
+    ///
+    /// Used for loopback/virtual devices (e.g. BlackHole) that carry system/meeting audio.
+    pub fn from_device(name: &str) -> Result<Self> {
+        let device = cpal::default_host()
+            .input_devices()
+            .map_err(|e| WispError::Audio(format!("enumerate input devices: {e}")))?
+            .find(|d| d.name().is_ok_and(|n| n == name))
+            .ok_or_else(|| WispError::Audio(format!("input device '{name}' not found")))?;
+        Self::from_cpal_device(device)
+    }
+
+    fn from_cpal_device(device: cpal::Device) -> Result<Self> {
+        let name = device.name().unwrap_or_else(|_| "input".to_owned());
         let supported = device
             .default_input_config()
             .map_err(|e| WispError::Audio(format!("default input config: {e}")))?;
@@ -91,6 +104,14 @@ impl Drop for MicSource {
             let _ = handle.join();
         }
     }
+}
+
+/// Lists the names of available input devices (microphones, loopback/virtual devices, …).
+pub fn list_input_devices() -> Vec<String> {
+    cpal::default_host()
+        .input_devices()
+        .map(|devices| devices.filter_map(|d| d.name().ok()).collect())
+        .unwrap_or_default()
 }
 
 fn capture_loop(

@@ -1,8 +1,8 @@
 //! Wisp desktop app — a thin Tauri shell over `wisp_pipeline::Session`.
 //!
-//! Commands: list/download/select models (backed by `wisp_models::FsModelStore`) and
-//! start/stop a transcription session driven by the selected model. Transcript segments are
-//! forwarded to the webview as events.
+//! Commands: list/download/select models; list input devices and choose mic + system sources;
+//! start/stop transcription. A session is spawned per audio source (microphone = "Me", system
+//! loopback = meeting participants), all forwarding transcript segments to the webview.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
 use wisp_audio::MicSource;
+use wisp_core::audio::AudioSource;
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
@@ -25,8 +26,10 @@ const SEGMENT_EVENT: &str = "transcript://segment";
 /// Shared application state.
 struct AppState {
     store: Arc<FsModelStore>,
-    session: Mutex<Option<Session>>,
+    sessions: Mutex<Vec<Session>>,
     active: Mutex<Option<ModelId>>,
+    mic_device: Mutex<Option<String>>,
+    system_device: Mutex<Option<String>>,
 }
 
 /// Serializable transcript segment delivered to the UI.
@@ -81,13 +84,46 @@ fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn 
             let engine = SenseVoiceEngine::new(&dir.join(model_name), &dir.join("tokens.txt"))?;
             Ok(Box::new(engine))
         }
-        other => Err(WispError::Engine(format!("no engine for model family {other:?} yet"))),
+        other => Err(WispError::Engine(format!(
+            "no engine for model family {other:?} yet"
+        ))),
     }
+}
+
+/// Spawns one transcription session over `source`, tagging its segments with `kind` and
+/// forwarding them to the webview.
+fn spawn_session(
+    app: &AppHandle,
+    descriptor: &ModelDescriptor,
+    dir: &Path,
+    source: Box<dyn AudioSource>,
+    kind: AudioSourceKind,
+) -> WispResult<Session> {
+    let engine = build_engine(descriptor, dir)?;
+    let pipeline = Pipeline::new(
+        engine,
+        Box::new(EnergyVad::default()),
+        kind,
+        DEFAULT_SILENCE_HANGOVER,
+    );
+
+    let emitter = app.clone();
+    let sink: wisp_pipeline::EventSink = Box::new(move |event| {
+        if let TranscriptEvent::Segment(segment) = event {
+            let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
+        }
+    });
+
+    Ok(Session::spawn(pipeline, source, sink))
 }
 
 #[tauri::command]
 fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> {
-    let active = state.active.lock().map_err(|_| "state lock poisoned".to_owned())?.clone();
+    let active = state
+        .active
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
     let models = state
         .store
         .available()
@@ -126,14 +162,42 @@ fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
     if !state.store.available().iter().any(|d| d.id == model_id) {
         return Err("unknown model".to_owned());
     }
-    *state.active.lock().map_err(|_| "state lock poisoned".to_owned())? = Some(model_id);
+    *state
+        .active
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = Some(model_id);
+    Ok(())
+}
+
+#[tauri::command]
+fn list_input_devices() -> Vec<String> {
+    wisp_audio::list_input_devices()
+}
+
+#[tauri::command]
+fn set_devices(
+    state: State<'_, AppState>,
+    mic: Option<String>,
+    system: Option<String>,
+) -> Result<(), String> {
+    *state
+        .mic_device
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = mic;
+    *state
+        .system_device
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = system;
     Ok(())
 }
 
 #[tauri::command]
 fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
-    let mut guard = state.session.lock().map_err(|_| "state lock poisoned".to_owned())?;
-    if guard.is_some() {
+    let mut sessions = state
+        .sessions
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    if !sessions.is_empty() {
         return Err("a session is already running".to_owned());
     }
 
@@ -143,7 +207,6 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone()
         .ok_or("no model selected")?;
-
     let descriptor = state
         .store
         .available()
@@ -155,31 +218,71 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .local_path(&active)
         .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
 
-    let engine = build_engine(&descriptor, &dir).map_err(|e| e.to_string())?;
-    let pipeline = Pipeline::new(
-        engine,
-        Box::new(EnergyVad::default()),
-        AudioSourceKind::Microphone,
-        DEFAULT_SILENCE_HANGOVER,
+    // Open the audio sources first (these can fail: device missing / no mic permission).
+    let mic_device = state
+        .mic_device
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+    let mic_source: Box<dyn AudioSource> = match mic_device {
+        Some(name) => Box::new(MicSource::from_device(&name).map_err(|e| e.to_string())?),
+        None => Box::new(MicSource::from_default().map_err(|e| e.to_string())?),
+    };
+
+    let system_device = state
+        .system_device
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+    let system_source: Option<Box<dyn AudioSource>> = match system_device {
+        Some(name) => Some(Box::new(
+            MicSource::from_device(&name).map_err(|e| e.to_string())?,
+        )),
+        None => None,
+    };
+
+    sessions.push(
+        spawn_session(
+            &app,
+            &descriptor,
+            &dir,
+            mic_source,
+            AudioSourceKind::Microphone,
+        )
+        .map_err(|e| e.to_string())?,
     );
-    let source = MicSource::from_default().map_err(|e| e.to_string())?;
-
-    let emitter = app.clone();
-    let sink: wisp_pipeline::EventSink = Box::new(move |event| {
-        if let TranscriptEvent::Segment(segment) = event {
-            let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
-        }
-    });
-
-    *guard = Some(Session::spawn(pipeline, Box::new(source), sink));
+    if let Some(system_source) = system_source {
+        sessions.push(
+            spawn_session(
+                &app,
+                &descriptor,
+                &dir,
+                system_source,
+                AudioSourceKind::System,
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
     Ok(())
 }
 
 #[tauri::command]
 fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
-    let session = state.session.lock().map_err(|_| "state lock poisoned".to_owned())?.take();
-    match session {
-        Some(session) => session.stop().map_err(|e| e.to_string()),
+    let sessions = std::mem::take(
+        &mut *state
+            .sessions
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?,
+    );
+
+    let mut last_error = None;
+    for session in sessions {
+        if let Err(e) = session.stop() {
+            last_error = Some(e.to_string());
+        }
+    }
+    match last_error {
+        Some(e) => Err(e),
         None => Ok(()),
     }
 }
@@ -190,9 +293,12 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             let models_root = app.path().app_data_dir()?.join("models");
-            let store = Arc::new(FsModelStore::new(models_root, builtin_catalog(), Box::new(HttpDownloader)));
+            let store = Arc::new(FsModelStore::new(
+                models_root,
+                builtin_catalog(),
+                Box::new(HttpDownloader),
+            ));
 
-            // Default the active model to the first installed one, else the first in the catalog.
             let catalog = store.available();
             let active = catalog
                 .iter()
@@ -200,13 +306,21 @@ pub fn run() {
                 .or_else(|| catalog.first())
                 .map(|d| d.id.clone());
 
-            app.manage(AppState { store, session: Mutex::new(None), active: Mutex::new(active) });
+            app.manage(AppState {
+                store,
+                sessions: Mutex::new(Vec::new()),
+                active: Mutex::new(active),
+                mic_device: Mutex::new(None),
+                system_device: Mutex::new(None),
+            });
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             list_models,
             download_model,
             select_model,
+            list_input_devices,
+            set_devices,
             start_session,
             stop_session
         ])
