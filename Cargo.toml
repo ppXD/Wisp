@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The Tauri app (app/src-tauri) is its own workspace, kept out of the library CI build.
+exclude = ["app/src-tauri"]
 
 [workspace.package]
 edition = "2021"

@@ -6,6 +6,8 @@
 node_modules/
 dist/
 .vite/
+.svelte-kit/
+/app/build/
 
 # Models (large, downloaded on demand at runtime — never committed)
 /models/

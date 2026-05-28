@@ -1,0 +1,27 @@
+[package]
+name = "app"
+version = "0.1.0"
+description = "Wisp — local real-time meeting transcription"
+authors = ["Mars.P <marsxxd@outlook.com>"]
+edition = "2021"
+
+# Standalone workspace so this Tauri app is not built by the root library workspace/CI.
+[workspace]
+
+[lib]
+# The `_lib` suffix avoids a name clash with the binary on Windows.
+name = "app_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+wisp-core = { path = "../../crates/wisp-core" }
+wisp-audio = { path = "../../crates/wisp-audio", features = ["mic"] }
+wisp-pipeline = { path = "../../crates/wisp-pipeline" }
