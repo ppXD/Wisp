@@ -1,46 +1,20 @@
 //! Wisp desktop app — a thin Tauri shell over `wisp_pipeline::Session`.
 //!
-//! `start_session` builds a microphone-driven pipeline (with a placeholder engine so the app
-//! runs without a real model) and forwards transcript segments to the webview; `stop_session`
-//! stops it. The real sherpa-onnx engine is a drop-in replacement for [`PlaceholderEngine`].
+//! `start_session` builds a microphone-driven pipeline using the sherpa-onnx SenseVoice engine
+//! and forwards transcript segments to the webview; `stop_session` stops it.
 
 use std::sync::Mutex;
-use std::time::Duration;
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Emitter, Manager, State};
 
-use wisp_audio::{MicSource, TARGET_SAMPLE_RATE};
-use wisp_core::engine::{AsrEngine, EngineInfo, TranscriptionResult};
-use wisp_core::error::Result as WispResult;
+use wisp_audio::MicSource;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
+use wisp_engine_sherpa::SenseVoiceEngine;
 use wisp_pipeline::{EnergyVad, Pipeline, Session, DEFAULT_SILENCE_HANGOVER};
 
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
-
-/// A stand-in ASR engine: emits one segment per utterance reporting its duration, so the whole
-/// capture → pipeline → UI path runs without a model. Replaced by the sherpa engine later.
-#[derive(Default)]
-struct PlaceholderEngine;
-
-impl AsrEngine for PlaceholderEngine {
-    fn info(&self) -> EngineInfo {
-        EngineInfo { name: "placeholder".to_owned(), streaming: false }
-    }
-
-    fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> WispResult<TranscriptionResult> {
-        let rate = if sample_rate == 0 { TARGET_SAMPLE_RATE } else { sample_rate };
-        let secs = audio.len() as f32 / rate as f32;
-        let segment = TranscriptSegment::new(
-            0,
-            format!("[speech {secs:.1}s]"),
-            Duration::ZERO..Duration::from_secs_f32(secs),
-            AudioSourceKind::Microphone,
-        );
-        Ok(TranscriptionResult { segments: vec![segment] })
-    }
-}
 
 /// Serializable transcript segment delivered to the UI.
 #[derive(Clone, Serialize)]
@@ -82,13 +56,29 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         return Err("a session is already running".to_owned());
     }
 
-    let source = MicSource::from_default().map_err(|e| e.to_string())?;
+    let dir = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("models")
+        .join("sense-voice");
+    let model = dir.join("model.int8.onnx");
+    let tokens = dir.join("tokens.txt");
+    if !model.is_file() || !tokens.is_file() {
+        return Err(format!(
+            "SenseVoice model not found in {}. Download it (see app/README) and retry.",
+            dir.display()
+        ));
+    }
+
+    let engine = SenseVoiceEngine::new(&model, &tokens).map_err(|e| e.to_string())?;
     let pipeline = Pipeline::new(
-        Box::new(PlaceholderEngine),
+        Box::new(engine),
         Box::new(EnergyVad::default()),
         AudioSourceKind::Microphone,
         DEFAULT_SILENCE_HANGOVER,
     );
+    let source = MicSource::from_default().map_err(|e| e.to_string())?;
 
     let emitter = app.clone();
     let sink: wisp_pipeline::EventSink = Box::new(move |event| {
@@ -104,7 +94,6 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
 #[tauri::command]
 fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     let session = state.session.lock().map_err(|_| "state lock poisoned".to_owned())?.take();
-
     match session {
         Some(session) => session.stop().map_err(|e| e.to_string()),
         None => Ok(()),
