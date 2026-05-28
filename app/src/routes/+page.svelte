@@ -1,4 +1,6 @@
 <script lang="ts">
+  import "@fontsource-variable/geist";
+  import "@fontsource-variable/geist-mono";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, onMount } from "svelte";
@@ -109,24 +111,27 @@
 
 <main class="app">
   <header>
-    <h1>Wisp</h1>
-    <p class="tagline">Local real-time meeting transcription</p>
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Wisp</h1>
+    </div>
+    <p class="tagline">Local, real-time meeting transcription · on-device</p>
   </header>
 
-  <section class="models">
-    <h2>Model</h2>
+  <section class="card models">
+    <div class="section-label">Model</div>
     {#each models as m (m.id)}
       <div class="model" class:active={m.active}>
         <div class="meta">
           <div class="name">{m.name}</div>
-          <div class="sub">{fmtSize(m.sizeBytes)} · {m.languages.join(" / ")}</div>
+          <div class="sub">{fmtSize(m.sizeBytes)} · {m.languages.join(" · ")}</div>
         </div>
         {#if downloading === m.id}
           <button class="btn" disabled>Downloading…</button>
         {:else if !m.installed}
-          <button class="btn" onclick={() => download(m.id)} disabled={downloading !== null}>Download</button>
+          <button class="btn outline" onclick={() => download(m.id)} disabled={downloading !== null}>Download</button>
         {:else if m.active}
-          <span class="badge">Active</span>
+          <span class="pill">Active</span>
         {:else}
           <button class="btn ghost" onclick={() => selectModel(m.id)}>Use</button>
         {/if}
@@ -138,12 +143,14 @@
 
   <div class="controls">
     {#if running}
-      <button class="btn stop" onclick={stop}>■ Stop</button>
+      <button class="btn primary stop" onclick={stop}>Stop</button>
     {:else}
-      <button class="btn start" onclick={start} disabled={!canStart}>● Start (microphone)</button>
+      <button class="btn primary" onclick={start} disabled={!canStart}>Start listening</button>
     {/if}
     <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
-    <span class="status" class:live={running}>{running ? "listening…" : canStart ? "idle" : "select a model"}</span>
+    <span class="status" class:live={running}>
+      <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "select a model"}
+    </span>
   </div>
 
   {#if error}
@@ -158,64 +165,106 @@
         <span class="text">{seg.text}</span>
       </li>
     {:else}
-      <li class="empty">No transcript yet — pick a model, press Start, and speak.</li>
+      <li class="empty">Pick a model, press <em>Start listening</em>, and speak.</li>
     {/each}
   </ul>
 </main>
 
 <style>
+  :global(:root) {
+    --bg: #f7f4ee;
+    --surface: #fdfcfa;
+    --surface-active: #f7ece6;
+    --text: #1a1915;
+    --muted: #78736a;
+    --border: #e8e2d5;
+    --border-strong: #ddd5c4;
+    --accent: #c96442;
+    --accent-hover: #b5573a;
+    --stop: #b0463a;
+    --live: #5f8c6a;
+    --font-sans: "Geist Variable", system-ui, -apple-system, sans-serif;
+    --font-mono: "Geist Mono Variable", ui-monospace, monospace;
+  }
+
   :global(body) {
     margin: 0;
-    background: #0f1115;
-    color: #e6e7ea;
-    font-family: Inter, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-sans);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
   }
 
   .app {
-    max-width: 760px;
+    max-width: 720px;
     margin: 0 auto;
-    padding: 28px 24px 40px;
+    padding: 40px 28px 56px;
+  }
+
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .dot {
+    width: 11px;
+    height: 11px;
+    border-radius: 50%;
+    background: var(--accent);
   }
 
   header h1 {
     margin: 0;
-    font-size: 28px;
+    font-size: 26px;
+    font-weight: 600;
     letter-spacing: -0.02em;
   }
 
   .tagline {
-    margin: 4px 0 20px;
-    color: #9aa0aa;
+    margin: 8px 0 28px;
+    color: var(--muted);
     font-size: 14px;
   }
 
-  h2 {
-    font-size: 13px;
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 14px;
+    padding: 16px;
+  }
+
+  .section-label {
+    font-family: var(--font-mono);
+    font-size: 11px;
     text-transform: uppercase;
-    letter-spacing: 0.06em;
-    color: #9aa0aa;
-    margin: 0 0 8px;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    margin-bottom: 12px;
   }
 
   .models {
-    margin-bottom: 22px;
+    margin-bottom: 24px;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 8px;
   }
 
   .model {
     display: flex;
     align-items: center;
-    gap: 12px;
-    padding: 10px 12px;
-    background: #161a22;
-    border: 1px solid transparent;
-    border-radius: 8px;
+    gap: 14px;
+    padding: 12px 14px;
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    background: var(--bg);
+    transition: border-color 0.15s, background 0.15s;
   }
 
   .model.active {
-    border-color: #2563eb;
+    border-color: var(--accent);
+    background: var(--surface-active);
   }
 
   .meta {
@@ -224,130 +273,180 @@
   }
 
   .name {
-    font-size: 14px;
-    font-weight: 600;
+    font-size: 14.5px;
+    font-weight: 500;
   }
 
   .sub {
+    font-family: var(--font-mono);
     font-size: 12px;
-    color: #9aa0aa;
+    color: var(--muted);
+    margin-top: 3px;
   }
 
   .controls {
     display: flex;
     align-items: center;
     gap: 10px;
-    margin-bottom: 18px;
+    margin: 24px 0 18px;
   }
 
   .btn {
-    border: none;
-    border-radius: 8px;
-    padding: 9px 16px;
+    font-family: inherit;
     font-size: 14px;
-    font-weight: 600;
+    font-weight: 500;
+    border-radius: 10px;
+    padding: 9px 18px;
+    border: 1px solid transparent;
     cursor: pointer;
-    color: #fff;
-    background: #2a2f3a;
-    transition: filter 0.15s, opacity 0.15s;
-  }
-
-  .btn:hover:not(:disabled) {
-    filter: brightness(1.15);
+    background: var(--surface);
+    color: var(--text);
+    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
   }
 
   .btn:disabled {
-    opacity: 0.4;
+    opacity: 0.45;
     cursor: default;
   }
 
-  .btn.start {
-    background: #2563eb;
+  .btn.primary {
+    background: var(--accent);
+    color: #fff;
   }
 
-  .btn.stop {
-    background: #dc2626;
+  .btn.primary:hover:not(:disabled) {
+    background: var(--accent-hover);
+  }
+
+  .btn.primary.stop {
+    background: var(--stop);
+  }
+
+  .btn.outline {
+    background: transparent;
+    border-color: var(--accent);
+    color: var(--accent);
+  }
+
+  .btn.outline:hover:not(:disabled) {
+    background: var(--surface-active);
   }
 
   .btn.ghost {
     background: transparent;
-    border: 1px solid #2a2f3a;
-    color: #c7cad1;
+    border-color: var(--border-strong);
+    color: var(--muted);
   }
 
-  .badge {
-    font-size: 12px;
-    font-weight: 600;
-    color: #60a5fa;
-    padding: 6px 10px;
+  .btn.ghost:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--muted);
+  }
+
+  .pill {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--accent);
+    padding: 6px 12px;
+    border: 1px solid var(--accent);
+    border-radius: 999px;
   }
 
   .status {
     margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
     font-size: 13px;
-    color: #9aa0aa;
+    color: var(--muted);
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--border-strong);
   }
 
   .status.live {
-    color: #34d399;
+    color: var(--live);
+  }
+
+  .status.live .status-dot {
+    background: var(--live);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
   }
 
   .error {
-    background: #2a1316;
-    border: 1px solid #5b2327;
-    color: #fca5a5;
-    padding: 10px 12px;
-    border-radius: 8px;
+    background: color-mix(in srgb, var(--stop) 9%, var(--bg));
+    border: 1px solid color-mix(in srgb, var(--stop) 35%, var(--border));
+    color: var(--stop);
+    padding: 11px 14px;
+    border-radius: 10px;
     font-size: 13px;
   }
 
   .hint {
-    color: #6b7280;
+    color: var(--muted);
     font-size: 13px;
+    margin: 4px 0;
   }
 
   .transcript {
     list-style: none;
-    margin: 0;
+    margin: 8px 0 0;
     padding: 0;
     display: flex;
     flex-direction: column;
-    gap: 6px;
+    gap: 7px;
   }
 
   .transcript li {
     display: grid;
-    grid-template-columns: 52px 96px 1fr;
-    gap: 12px;
+    grid-template-columns: 48px 104px 1fr;
+    gap: 14px;
     align-items: baseline;
-    padding: 10px 12px;
-    background: #161a22;
-    border-radius: 8px;
-    font-size: 15px;
+    padding: 13px 16px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+    font-size: 15.5px;
+    line-height: 1.5;
   }
 
   .transcript li.partial {
-    opacity: 0.6;
+    opacity: 0.55;
     font-style: italic;
   }
 
   .transcript li.empty {
     display: block;
-    color: #6b7280;
+    color: var(--muted);
     background: transparent;
+    border: 1px dashed var(--border-strong);
     text-align: center;
-    padding: 40px 0;
+    padding: 44px 16px;
+    font-size: 14px;
+  }
+
+  .transcript li.empty em {
+    color: var(--accent);
+    font-style: normal;
   }
 
   .time {
-    color: #6b7280;
+    font-family: var(--font-mono);
+    color: var(--muted);
+    font-size: 12.5px;
     font-variant-numeric: tabular-nums;
-    font-size: 13px;
   }
 
   .who {
-    color: #818cf8;
-    font-weight: 600;
-    font-size: 13px;
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 12px;
+    text-transform: lowercase;
   }
 </style>
