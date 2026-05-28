@@ -81,6 +81,7 @@ dependencies = [
  "wisp-audio",
  "wisp-core",
  "wisp-engine-sherpa",
+ "wisp-models",
  "wisp-pipeline",
 ]
 
@@ -4550,6 +4551,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
 dependencies = [
  "base64 0.22.1",
+ "flate2",
  "log",
  "once_cell",
  "rustls",
@@ -5427,6 +5429,15 @@ name = "wisp-engine-sherpa"
 version = "0.0.0"
 dependencies = [
  "sherpa-rs",
+ "wisp-core",
+]
+
+[[package]]
+name = "wisp-models"
+version = "0.0.0"
+dependencies = [
+ "sha2",
+ "ureq",
  "wisp-core",
 ]
 

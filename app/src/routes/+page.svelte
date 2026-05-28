@@ -1,7 +1,7 @@
 <script lang="ts">
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-  import { onDestroy } from "svelte";
+  import { onDestroy, onMount } from "svelte";
 
   type Segment = {
     id: number;
@@ -13,16 +13,63 @@
     isFinal: boolean;
   };
 
+  type ModelInfo = {
+    id: string;
+    name: string;
+    sizeBytes: number;
+    languages: string[];
+    installed: boolean;
+    active: boolean;
+  };
+
   let running = $state(false);
   let error = $state("");
   let segments = $state<Segment[]>([]);
+  let models = $state<ModelInfo[]>([]);
+  let downloading = $state<string | null>(null);
   let unlisten: UnlistenFn | undefined;
+
+  const activeModel = $derived(models.find((m) => m.active));
+  const canStart = $derived(!!activeModel?.installed);
 
   function fmtTime(ms: number): string {
     const total = Math.floor(ms / 1000);
-    const m = Math.floor(total / 60);
-    const s = total % 60;
-    return `${m}:${String(s).padStart(2, "0")}`;
+    return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, "0")}`;
+  }
+
+  function fmtSize(bytes: number): string {
+    const mb = bytes / 1_048_576;
+    return mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+  }
+
+  async function refreshModels() {
+    try {
+      models = await invoke<ModelInfo[]>("list_models");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function download(id: string) {
+    error = "";
+    downloading = id;
+    try {
+      await invoke("download_model", { id });
+      await refreshModels();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      downloading = null;
+    }
+  }
+
+  async function selectModel(id: string) {
+    try {
+      await invoke("select_model", { id });
+      await refreshModels();
+    } catch (e) {
+      error = String(e);
+    }
   }
 
   async function ensureListener() {
@@ -56,6 +103,7 @@
     segments = [];
   }
 
+  onMount(refreshModels);
   onDestroy(() => unlisten?.());
 </script>
 
@@ -65,14 +113,37 @@
     <p class="tagline">Local real-time meeting transcription</p>
   </header>
 
+  <section class="models">
+    <h2>Model</h2>
+    {#each models as m (m.id)}
+      <div class="model" class:active={m.active}>
+        <div class="meta">
+          <div class="name">{m.name}</div>
+          <div class="sub">{fmtSize(m.sizeBytes)} · {m.languages.join(" / ")}</div>
+        </div>
+        {#if downloading === m.id}
+          <button class="btn" disabled>Downloading…</button>
+        {:else if !m.installed}
+          <button class="btn" onclick={() => download(m.id)} disabled={downloading !== null}>Download</button>
+        {:else if m.active}
+          <span class="badge">Active</span>
+        {:else}
+          <button class="btn ghost" onclick={() => selectModel(m.id)}>Use</button>
+        {/if}
+      </div>
+    {:else}
+      <p class="hint">Loading models…</p>
+    {/each}
+  </section>
+
   <div class="controls">
     {#if running}
       <button class="btn stop" onclick={stop}>■ Stop</button>
     {:else}
-      <button class="btn start" onclick={start}>● Start (microphone)</button>
+      <button class="btn start" onclick={start} disabled={!canStart}>● Start (microphone)</button>
     {/if}
     <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
-    <span class="status" class:live={running}>{running ? "listening…" : "idle"}</span>
+    <span class="status" class:live={running}>{running ? "listening…" : canStart ? "idle" : "select a model"}</span>
   </div>
 
   {#if error}
@@ -87,7 +158,7 @@
         <span class="text">{seg.text}</span>
       </li>
     {:else}
-      <li class="empty">No transcript yet — press Start and speak.</li>
+      <li class="empty">No transcript yet — pick a model, press Start, and speak.</li>
     {/each}
   </ul>
 </main>
@@ -118,6 +189,50 @@
     font-size: 14px;
   }
 
+  h2 {
+    font-size: 13px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: #9aa0aa;
+    margin: 0 0 8px;
+  }
+
+  .models {
+    margin-bottom: 22px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .model {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 12px;
+    background: #161a22;
+    border: 1px solid transparent;
+    border-radius: 8px;
+  }
+
+  .model.active {
+    border-color: #2563eb;
+  }
+
+  .meta {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .name {
+    font-size: 14px;
+    font-weight: 600;
+  }
+
+  .sub {
+    font-size: 12px;
+    color: #9aa0aa;
+  }
+
   .controls {
     display: flex;
     align-items: center;
@@ -137,7 +252,7 @@
     transition: filter 0.15s, opacity 0.15s;
   }
 
-  .btn:hover {
+  .btn:hover:not(:disabled) {
     filter: brightness(1.15);
   }
 
@@ -160,6 +275,13 @@
     color: #c7cad1;
   }
 
+  .badge {
+    font-size: 12px;
+    font-weight: 600;
+    color: #60a5fa;
+    padding: 6px 10px;
+  }
+
   .status {
     margin-left: auto;
     font-size: 13px;
@@ -176,6 +298,11 @@
     color: #fca5a5;
     padding: 10px 12px;
     border-radius: 8px;
+    font-size: 13px;
+  }
+
+  .hint {
+    color: #6b7280;
     font-size: 13px;
   }
 
