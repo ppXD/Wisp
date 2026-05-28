@@ -10,6 +10,11 @@ repository.workspace = true
 [dependencies]
 wisp-core = { path = "../wisp-core" }
 hound = "3"
+cpal = { version = "0.15", optional = true }
+
+[features]
+# Microphone capture via cpal (pulls a platform audio backend; Linux needs libasound2-dev).
+mic = ["dep:cpal"]
 
 [dev-dependencies]
 tempfile = "3"
