@@ -1,0 +1,11 @@
+[package]
+name = "wisp-core"
+version = "0.0.0"
+description = "Generic, engine-agnostic core for Wisp local real-time transcription"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true

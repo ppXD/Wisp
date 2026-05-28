@@ -1,0 +1,22 @@
+# Rust
+/target
+**/target
+
+# Node / frontend
+node_modules/
+dist/
+.vite/
+
+# Models (large, downloaded on demand at runtime — never committed)
+/models/
+*.bin
+*.onnx
+*.gguf
+
+# Env / secrets
+.env
+.env.*
+
+# OS
+.DS_Store
+Thumbs.db
