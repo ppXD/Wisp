@@ -7,5 +7,13 @@ license.workspace = true
 authors.workspace = true
 repository.workspace = true
 
+[dependencies]
+thiserror.workspace = true
+
+[features]
+# Exposes the mock trait implementations for downstream crates' tests.
+# wisp-core's own tests use them automatically under cfg(test).
+testing = []
+
 [lints]
 workspace = true
