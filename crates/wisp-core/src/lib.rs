@@ -27,7 +27,7 @@ pub use channel::{frame_channel, FrameReceiver, FrameSender};
 pub use config::Config;
 pub use dedup::CrossStreamEchoFilter;
 pub use diarize::Diarizer;
-pub use engine::{AsrEngine, EngineInfo, TranscriptionResult};
+pub use engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult};
 pub use error::{Result, WispError};
 pub use export::{format_transcript, ExportFormat};
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};

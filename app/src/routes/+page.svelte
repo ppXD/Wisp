@@ -297,6 +297,8 @@
   let fileSegments = $state<Segment[]>([]);
   let fileName = $state("");
   let fileTranscribing = $state(false);
+  // Accurate (beam search) vs Fast (greedy) decoding. Files default to Accurate.
+  let fileAccurate = $state(true);
   // Timeline (timestamps) is opt-in: off = most accurate plain text; on = timed for SRT/VTT.
   let fileTimestamps = $state(false);
   let fileHasTimestamps = $state(false);
@@ -316,7 +318,11 @@
     fileHasTimestamps = fileTimestamps;
     fileTranscribing = true;
     try {
-      await invoke("transcribe_file", { path, timestamps: fileTimestamps });
+      await invoke("transcribe_file", {
+        path,
+        timestamps: fileTimestamps,
+        accurate: fileAccurate,
+      });
     } catch (e) {
       error = String(e);
       fileTranscribing = false;
@@ -636,10 +642,29 @@
       {:else}
         <div class="box-head">
           {@render modelPicker()}
-          <label class="toggle">
-            <input type="checkbox" bind:checked={fileTimestamps} />
-            <span>Timeline</span>
-          </label>
+        </div>
+        <div class="file-opts">
+          <div class="opt-row">
+            <span class="opt-label">Mode</span>
+            <div class="seg">
+              <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
+              <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" bind:checked={fileTimestamps} />
+              <span>Timeline</span>
+            </label>
+          </div>
+          <p class="opt-hint">
+            {#if fileAccurate}
+              <strong>Accurate</strong> — beam search weighs several candidate sentences and keeps the
+              best overall. Most accurate, slower.
+            {:else}
+              <strong>Fast</strong> — greedy decoding takes the most likely word at each step. Faster,
+              a little less accurate.
+            {/if}
+            {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
+          </p>
         </div>
         <button
           class="dropzone"
@@ -652,9 +677,7 @@
           <p class="dropzone-sub">
             {#if canStart}
               mp3, m4a, wav, flac, mp4, mov… transcribed locally with
-              <strong>{activeModel?.name}</strong>{fileTimestamps
-                ? ", with subtitle timing"
-                : " — plain text, most accurate"}.
+              <strong>{activeModel?.name}</strong>.
             {:else}
               Download a model in the Live tab first.
             {/if}
@@ -1359,6 +1382,68 @@
   .toggle input {
     accent-color: var(--accent);
     cursor: pointer;
+  }
+
+  .file-opts {
+    flex: none;
+    padding: 11px 14px 12px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .opt-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    flex-wrap: wrap;
+  }
+
+  .opt-label {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  .seg {
+    display: inline-flex;
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 2px;
+  }
+
+  .seg button {
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    padding: 4px 14px;
+    cursor: pointer;
+    transition:
+      background 0.15s,
+      color 0.15s;
+  }
+
+  .seg button:hover {
+    color: var(--text);
+  }
+
+  .seg button.active {
+    background: var(--accent);
+    color: #fff;
+  }
+
+  .opt-hint {
+    margin: 9px 0 0;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .opt-hint strong {
+    color: var(--text);
+    font-weight: 600;
   }
 
   .dropzone-title {

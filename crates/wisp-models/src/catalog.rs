@@ -23,6 +23,7 @@ pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
         whisper_turbo_q5(),
         whisper_turbo_q8(),
+        whisper_large_v3_gpu(),
         sense_voice_int8(),
         sense_voice_fp32(),
         whisper_large_v3(),
@@ -64,7 +65,7 @@ fn whisper_turbo_q8() -> ModelDescriptor {
         id: ModelId("whisper-large-v3-turbo-q8".to_owned()),
         family: ModelFamily::WhisperCpp,
         quant: Quant::Q8,
-        display_name: "Whisper large-v3-turbo · GPU (Metal) · q8 (most accurate)".to_owned(),
+        display_name: "Whisper large-v3-turbo · GPU (Metal) · q8".to_owned(),
         files: vec![ModelFile {
             name: "ggml-large-v3-turbo-q8_0.bin".to_owned(),
             url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo-q8_0.bin"),
@@ -73,8 +74,29 @@ fn whisper_turbo_q8() -> ModelDescriptor {
         }],
         languages: whisper_languages(),
         description:
-            "Same large-v3-turbo on the GPU (Metal), at higher q8 precision for the best accuracy \
-             — ideal for Cantonese on a capable machine. Larger download (~0.85 GB)."
+            "Same large-v3-turbo on the GPU (Metal), at higher q8 precision — fast and very \
+             accurate. Larger download (~0.85 GB)."
+                .to_owned(),
+    }
+}
+
+fn whisper_large_v3_gpu() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-large-v3-gpu".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q5,
+        display_name: "Whisper large-v3 · GPU (Metal) · q5 (most accurate)".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-large-v3-q5_0.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-q5_0.bin"),
+            sha256: String::new(),
+            size_bytes: 1_081_140_203,
+        }],
+        languages: whisper_languages(),
+        description:
+            "The full Whisper large-v3 (32-layer decoder, not distilled) on the GPU (Metal) — the \
+             most accurate option, best for files with the Accurate mode. Slower than turbo; \
+             ~1.1 GB."
                 .to_owned(),
     }
 }
@@ -226,7 +248,7 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 6);
+        assert_eq!(catalog.len(), 7);
 
         let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
