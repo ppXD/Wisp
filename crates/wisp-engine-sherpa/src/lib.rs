@@ -19,6 +19,25 @@ use wisp_core::engine::{AsrEngine, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 
+/// CPU threads for Whisper's (heavier, autoregressive) decoder — sherpa-rs otherwise defaults to 1,
+/// which makes it sluggish and far from real-time.
+fn whisper_threads() -> i32 {
+    std::thread::available_parallelism()
+        .map(|n| n.get().min(8) as i32)
+        .unwrap_or(4)
+}
+
+/// Whisper emits non-speech annotations like `[BLANK_AUDIO]` or `(speaking in foreign language)` on
+/// silence/noise. Treat any segment that is purely such an annotation as empty so it isn't shown.
+fn strip_whisper_annotation(raw: &str) -> &str {
+    let trimmed = raw.trim();
+    if trimmed.starts_with('[') || trimmed.starts_with('(') {
+        ""
+    } else {
+        trimmed
+    }
+}
+
 /// Wraps recognized `text` (spanning `audio` at `rate`) as a single-segment result; empty → empty.
 fn to_result(text: &str, audio: &[f32], rate: u32) -> TranscriptionResult {
     let text = text.trim();
@@ -33,7 +52,9 @@ fn to_result(text: &str, audio: &[f32], rate: u32) -> TranscriptionResult {
         Duration::ZERO..Duration::from_secs_f32(secs),
         AudioSourceKind::Microphone,
     );
-    TranscriptionResult { segments: vec![segment] }
+    TranscriptionResult {
+        segments: vec![segment],
+    }
 }
 
 /// An [`AsrEngine`] backed by sherpa-onnx's SenseVoice offline recognizer.
@@ -61,11 +82,18 @@ impl SenseVoiceEngine {
 
 impl AsrEngine for SenseVoiceEngine {
     fn info(&self) -> EngineInfo {
-        EngineInfo { name: "sherpa-sense-voice".to_owned(), streaming: false }
+        EngineInfo {
+            name: "sherpa-sense-voice".to_owned(),
+            streaming: false,
+        }
     }
 
     fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
-        let rate = if sample_rate == 0 { 16_000 } else { sample_rate };
+        let rate = if sample_rate == 0 {
+            16_000
+        } else {
+            sample_rate
+        };
         let result = self.recognizer.transcribe(rate, audio);
         Ok(to_result(&result.text, audio, rate))
     }
@@ -87,6 +115,7 @@ impl WhisperEngine {
             decoder: decoder.to_string_lossy().into_owned(),
             tokens: tokens.to_string_lossy().into_owned(),
             language: language.to_owned(),
+            num_threads: Some(whisper_threads()),
             ..Default::default()
         };
 
@@ -99,12 +128,40 @@ impl WhisperEngine {
 
 impl AsrEngine for WhisperEngine {
     fn info(&self) -> EngineInfo {
-        EngineInfo { name: "sherpa-whisper".to_owned(), streaming: false }
+        EngineInfo {
+            name: "sherpa-whisper".to_owned(),
+            streaming: false,
+        }
     }
 
     fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
-        let rate = if sample_rate == 0 { 16_000 } else { sample_rate };
+        let rate = if sample_rate == 0 {
+            16_000
+        } else {
+            sample_rate
+        };
         let result = self.recognizer.transcribe(rate, audio);
-        Ok(to_result(&result.text, audio, rate))
+        Ok(to_result(
+            strip_whisper_annotation(&result.text),
+            audio,
+            rate,
+        ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::strip_whisper_annotation;
+
+    #[test]
+    fn drops_whisper_non_speech_annotations() {
+        assert_eq!(strip_whisper_annotation("[BLANK_AUDIO]"), "");
+        assert_eq!(
+            strip_whisper_annotation("  (speaking in foreign language) "),
+            ""
+        );
+        assert_eq!(strip_whisper_annotation("[BLANK"), "");
+        assert_eq!(strip_whisper_annotation("聽不聽到"), "聽不聽到");
+        assert_eq!(strip_whisper_annotation("  Hello, "), "Hello,");
     }
 }
