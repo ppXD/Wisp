@@ -28,6 +28,9 @@ const SEGMENT_EVENT: &str = "transcript://segment";
 /// Must match the value used by the UI.
 const SYSTEM_CAPTURE_ID: &str = "__wisp_system_audio__";
 
+/// Sentinel mic id meaning "no microphone" — capture system audio only. Matches the UI.
+const MIC_OFF_ID: &str = "__wisp_mic_off__";
+
 /// Shared application state.
 struct AppState {
     store: Arc<FsModelStore>,
@@ -185,6 +188,11 @@ fn system_audio_id() -> &'static str {
 }
 
 #[tauri::command]
+fn mic_off_id() -> &'static str {
+    MIC_OFF_ID
+}
+
+#[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
     mic: Option<String>,
@@ -234,9 +242,14 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
-    let mic_source: Box<dyn AudioSource> = match mic_device {
-        Some(name) => Box::new(MicSource::from_device(&name).map_err(|e| e.to_string())?),
-        None => Box::new(MicSource::from_default().map_err(|e| e.to_string())?),
+    let mic_source: Option<Box<dyn AudioSource>> = match mic_device {
+        Some(name) if name == MIC_OFF_ID => None,
+        Some(name) => Some(Box::new(
+            MicSource::from_device(&name).map_err(|e| e.to_string())?,
+        )),
+        None => Some(Box::new(
+            MicSource::from_default().map_err(|e| e.to_string())?,
+        )),
     };
 
     let system_device = state
@@ -254,16 +267,22 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         None => None,
     };
 
-    sessions.push(
-        spawn_session(
-            &app,
-            &descriptor,
-            &dir,
-            mic_source,
-            AudioSourceKind::Microphone,
-        )
-        .map_err(|e| e.to_string())?,
-    );
+    if mic_source.is_none() && system_source.is_none() {
+        return Err("no audio source — enable the microphone or select meeting audio".to_owned());
+    }
+
+    if let Some(mic_source) = mic_source {
+        sessions.push(
+            spawn_session(
+                &app,
+                &descriptor,
+                &dir,
+                mic_source,
+                AudioSourceKind::Microphone,
+            )
+            .map_err(|e| e.to_string())?,
+        );
+    }
     if let Some(system_source) = system_source {
         sessions.push(
             spawn_session(
@@ -334,6 +353,7 @@ pub fn run() {
             select_model,
             list_input_devices,
             system_audio_id,
+            mic_off_id,
             set_devices,
             start_session,
             stop_session

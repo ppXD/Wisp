@@ -33,6 +33,7 @@
   let micDevice = $state("");
   let systemDevice = $state("");
   let systemAudioId = $state("");
+  let micOffId = $state("");
   let unlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
@@ -60,6 +61,7 @@
     try {
       devices = await invoke<string[]>("list_input_devices");
       systemAudioId = await invoke<string>("system_audio_id");
+      micOffId = await invoke<string>("mic_off_id");
     } catch (e) {
       error = String(e);
     }
@@ -178,6 +180,7 @@
       <span class="source-name">Microphone <em>(you)</em></span>
       <select bind:value={micDevice} onchange={applyDevices} disabled={running}>
         <option value="">System default</option>
+        {#if micOffId}<option value={micOffId}>Off</option>{/if}
         {#each devices as d (d)}<option value={d}>{d}</option>{/each}
       </select>
     </label>
