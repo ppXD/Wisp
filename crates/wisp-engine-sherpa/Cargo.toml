@@ -7,4 +7,5 @@ license = "MIT"
 
 [dependencies]
 wisp-core = { path = "../wisp-core" }
+wisp-pipeline = { path = "../wisp-pipeline" }
 sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }

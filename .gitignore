@@ -15,6 +15,10 @@ dist/
 *.onnx
 *.gguf
 
+# Exception: the Silero VAD model is a small (~600 KB) fixed runtime asset bundled with the app
+# (not a large user-swappable ASR model), so it ships in-tree and works offline on first launch.
+!/app/src-tauri/resources/silero_vad.onnx
+
 # Env / secrets
 .env
 .env.*

@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use tauri::{AppHandle, Emitter, Manager, State};
+use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{tee, ChannelSource, EchoCancellingSource, MicSource, Tee};
@@ -20,7 +20,7 @@ use wisp_core::engine::AsrEngine;
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
-use wisp_engine_sherpa::{SenseVoiceEngine, WhisperEngine};
+use wisp_engine_sherpa::{SenseVoiceEngine, SileroSegmenter, WhisperEngine};
 use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
 use wisp_pipeline::{
     EnergySegmenter, EnergyVad, Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
@@ -163,6 +163,32 @@ fn build_engine(
     }
 }
 
+/// Builds the segmenter for a live session: the Silero neural VAD when its bundled model resolves,
+/// otherwise the dependency-free energy gate (so capture still works if the asset is missing).
+fn build_segmenter(app: &AppHandle, kind: AudioSourceKind) -> Box<dyn Segmenter> {
+    if let Some(model) = silero_model_path(app) {
+        match SileroSegmenter::new(&model) {
+            Ok(segmenter) => return Box::new(segmenter),
+            Err(e) => eprintln!("wisp: Silero VAD load failed ({e}); using energy gate"),
+        }
+    }
+
+    let vad: Box<dyn Vad> = match kind {
+        AudioSourceKind::Microphone => Box::new(EnergyVad::new(MIC_VAD_THRESHOLD)),
+        _ => Box::new(EnergyVad::default()),
+    };
+    Box::new(EnergySegmenter::new(vad, DEFAULT_SILENCE_HANGOVER))
+}
+
+/// Resolves the bundled `silero_vad.onnx` resource, or `None` if it isn't present.
+fn silero_model_path(app: &AppHandle) -> Option<PathBuf> {
+    let path = app
+        .path()
+        .resolve("resources/silero_vad.onnx", BaseDirectory::Resource)
+        .ok()?;
+    path.exists().then_some(path)
+}
+
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
 /// forwarding them to the webview.
 ///
@@ -179,11 +205,7 @@ fn spawn_session(
     language: &str,
 ) -> WispResult<Session> {
     let engine = build_engine(descriptor, dir, language)?;
-    let vad: Box<dyn Vad> = match kind {
-        AudioSourceKind::Microphone => Box::new(EnergyVad::new(MIC_VAD_THRESHOLD)),
-        _ => Box::new(EnergyVad::default()),
-    };
-    let segmenter: Box<dyn Segmenter> = Box::new(EnergySegmenter::new(vad, DEFAULT_SILENCE_HANGOVER));
+    let segmenter = build_segmenter(app, kind);
     let transcriber = Transcriber::new(engine, kind);
 
     let emitter = app.clone();

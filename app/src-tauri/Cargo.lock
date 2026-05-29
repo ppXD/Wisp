@@ -5537,6 +5537,7 @@ version = "0.0.0"
 dependencies = [
  "sherpa-rs",
  "wisp-core",
+ "wisp-pipeline",
 ]
 
 [[package]]
