@@ -6,6 +6,7 @@
 //!
 //! The architecture lands incrementally via small PRs — see `CLAUDE.md` at the repo root.
 
+pub mod aec;
 pub mod audio;
 pub mod channel;
 pub mod config;
@@ -18,6 +19,7 @@ pub mod transcript;
 #[cfg(any(test, feature = "testing"))]
 pub mod testing;
 
+pub use aec::EchoCanceller;
 pub use audio::{AudioFrame, AudioSource, AudioSourceInfo};
 pub use channel::{frame_channel, FrameReceiver, FrameSender};
 pub use config::Config;

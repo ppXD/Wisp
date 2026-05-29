@@ -6,12 +6,14 @@
 //! real hardware.
 
 pub mod dsp;
+pub mod echo;
 #[cfg(feature = "mic")]
 pub mod mic;
 pub mod stream;
 pub mod wav;
 
 pub use dsp::{resample_linear, to_mono_16k, TARGET_SAMPLE_RATE};
+pub use echo::EchoCancellingSource;
 #[cfg(feature = "mic")]
 pub use mic::{list_input_devices, MicSource};
 pub use stream::{tee, ChannelSource, Tee};

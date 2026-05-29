@@ -7,6 +7,7 @@ use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use crate::aec::EchoCanceller;
 use crate::audio::{AudioFrame, AudioSource, AudioSourceInfo};
 use crate::diarize::Diarizer;
 use crate::engine::{AsrEngine, EngineInfo, TranscriptionResult};
@@ -79,6 +80,26 @@ impl AsrEngine for MockAsrEngine {
 
     fn reset(&mut self) {
         self.reset_calls += 1;
+    }
+}
+
+/// An [`EchoCanceller`] that passes capture audio through unchanged, counting what it is fed.
+#[derive(Debug, Default)]
+pub struct MockEchoCanceller {
+    /// Total number of reference samples pushed via [`push_reference`](EchoCanceller::push_reference).
+    pub reference_samples: usize,
+    /// Number of [`process_capture`](EchoCanceller::process_capture) calls.
+    pub capture_calls: usize,
+}
+
+impl EchoCanceller for MockEchoCanceller {
+    fn push_reference(&mut self, samples: &[f32]) {
+        self.reference_samples += samples.len();
+    }
+
+    fn process_capture(&mut self, samples: &[f32]) -> Vec<f32> {
+        self.capture_calls += 1;
+        samples.to_vec()
     }
 }
 
@@ -171,6 +192,16 @@ mod tests {
     fn null_diarizer_is_constant() {
         let mut d = NullDiarizer;
         assert_eq!(d.identify(&[], 16_000).unwrap(), SpeakerId(0));
+    }
+
+    #[test]
+    fn mock_echo_canceller_passes_through_and_counts() {
+        let mut aec = MockEchoCanceller::default();
+        aec.push_reference(&[0.1, 0.2, 0.3]);
+        let out = aec.process_capture(&[1.0, -1.0]);
+        assert_eq!(out, vec![1.0, -1.0]); // passthrough
+        assert_eq!(aec.reference_samples, 3);
+        assert_eq!(aec.capture_calls, 1);
     }
 
     #[test]
