@@ -7,6 +7,7 @@
 //! The architecture lands incrementally via small PRs — see `CLAUDE.md` at the repo root.
 
 pub mod audio;
+pub mod channel;
 pub mod config;
 pub mod diarize;
 pub mod engine;
@@ -18,6 +19,7 @@ pub mod transcript;
 pub mod testing;
 
 pub use audio::{AudioFrame, AudioSource, AudioSourceInfo};
+pub use channel::{frame_channel, FrameReceiver, FrameSender};
 pub use config::Config;
 pub use diarize::Diarizer;
 pub use engine::{AsrEngine, EngineInfo, TranscriptionResult};

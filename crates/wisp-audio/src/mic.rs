@@ -6,7 +6,7 @@
 //! conversion to 16 kHz mono happens downstream in the pipeline.
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -14,8 +14,15 @@ use std::time::{Duration, Instant};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 
 use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
+use wisp_core::channel::{frame_channel, FrameReceiver, FrameSender};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::AudioSourceKind;
+
+/// Bounded capacity of the capture→pipeline frame channel. Drop-oldest on overflow keeps capture
+/// real-time if the consumer briefly stalls, instead of letting a backlog grow without bound (which
+/// would climb in latency and memory until the stream appears stuck). ~256 cpal buffers is a couple
+/// of seconds of audio — far more headroom than a healthy consumer ever needs.
+const FRAME_CHANNEL_CAPACITY: usize = 256;
 
 /// Framing metadata shared with the capture callback.
 #[derive(Clone, Copy)]
@@ -27,7 +34,7 @@ struct Framing {
 
 /// An [`AudioSource`] that captures the system default input device through cpal.
 pub struct MicSource {
-    rx: Receiver<AudioFrame>,
+    rx: FrameReceiver,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
     info: AudioSourceInfo,
@@ -60,7 +67,7 @@ impl MicSource {
             .default_input_config()
             .map_err(|e| WispError::Audio(format!("default input config: {e}")))?;
 
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
+        let (tx, rx) = frame_channel(FRAME_CHANNEL_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::channel::<std::result::Result<(), String>>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
@@ -92,7 +99,7 @@ impl AudioSource for MicSource {
     }
 
     fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
-        Ok(self.rx.recv().ok())
+        Ok(self.rx.recv())
     }
 }
 
@@ -117,7 +124,7 @@ pub fn list_input_devices() -> Vec<String> {
 fn capture_loop(
     device: cpal::Device,
     supported: cpal::SupportedStreamConfig,
-    tx: Sender<AudioFrame>,
+    tx: FrameSender,
     stop: Arc<AtomicBool>,
     ready: Sender<std::result::Result<(), String>>,
 ) {
@@ -155,14 +162,24 @@ fn build_stream(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
     format: cpal::SampleFormat,
-    tx: Sender<AudioFrame>,
+    tx: FrameSender,
     framing: Framing,
 ) -> std::result::Result<cpal::Stream, String> {
+    // Closing the sender on a stream error wakes the blocked consumer, so a device that drops or
+    // is toggled mid-session ends that source cleanly instead of hanging on a dead stream.
+    let on_error = {
+        let tx = tx.clone();
+        move |error: cpal::StreamError| {
+            eprintln!("wisp: microphone stream error, closing source: {error}");
+            tx.close();
+        }
+    };
+
     match format {
         cpal::SampleFormat::F32 => to_build_err(device.build_input_stream(
             config,
             move |data: &[f32], _| send_samples(&tx, data.to_vec(), framing),
-            on_stream_error,
+            on_error,
             None,
         )),
         cpal::SampleFormat::I16 => to_build_err(device.build_input_stream(
@@ -174,7 +191,7 @@ fn build_stream(
                     framing,
                 );
             },
-            on_stream_error,
+            on_error,
             None,
         )),
         cpal::SampleFormat::U16 => to_build_err(device.build_input_stream(
@@ -188,7 +205,7 @@ fn build_stream(
                     framing,
                 );
             },
-            on_stream_error,
+            on_error,
             None,
         )),
         other => Err(format!("unsupported sample format: {other:?}")),
@@ -201,17 +218,15 @@ fn to_build_err(
     result.map_err(|e| format!("build input stream: {e}"))
 }
 
-fn send_samples(tx: &Sender<AudioFrame>, samples: Vec<f32>, framing: Framing) {
+fn send_samples(tx: &FrameSender, samples: Vec<f32>, framing: Framing) {
     let frame = AudioFrame::new(
         samples,
         framing.sample_rate,
         framing.channels,
         framing.start.elapsed(),
     );
-    let _ = tx.send(frame);
+    tx.send(frame);
 }
-
-fn on_stream_error(_error: cpal::StreamError) {}
 
 #[cfg(test)]
 mod tests {
