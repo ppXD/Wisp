@@ -4,7 +4,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
-  import { open } from "@tauri-apps/plugin-dialog";
+  import { open, save } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
   import { slide } from "svelte/transition";
 
@@ -354,6 +354,20 @@
     }
   }
 
+  async function exportFile(format: string) {
+    if (!fileSegments.length) return;
+    const base = (fileName || "transcript").replace(/\.[^.]+$/, "");
+    try {
+      const dest = await save({
+        defaultPath: `${base}.${format}`,
+        filters: [{ name: format.toUpperCase(), extensions: [format] }],
+      });
+      if (typeof dest === "string") await invoke("export_transcript", { format, dest });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   let fileListenersReady = false;
   async function ensureFileListeners() {
     if (fileListenersReady) return;
@@ -615,6 +629,14 @@
           {/each}
         </ul>
         <div class="box-foot">
+          <div class="export-group">
+            {#if fileSegments.length && !fileTranscribing}
+              <span class="export-label">Export</span>
+              <button class="btn outline sm" onclick={() => exportFile("txt")}>TXT</button>
+              <button class="btn outline sm" onclick={() => exportFile("srt")}>SRT</button>
+              <button class="btn outline sm" onclick={() => exportFile("vtt")}>VTT</button>
+            {/if}
+          </div>
           <button class="btn ghost" onclick={resetFile} disabled={fileTranscribing}>
             Transcribe another
           </button>
@@ -1311,6 +1333,18 @@
   .dropzone:disabled {
     cursor: default;
     opacity: 0.6;
+  }
+
+  .export-group {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  .export-label {
+    font-size: 13px;
+    color: var(--muted);
+    margin-right: 2px;
   }
 
   .dropzone-title {

@@ -14,6 +14,7 @@ pub mod dedup;
 pub mod diarize;
 pub mod engine;
 pub mod error;
+pub mod export;
 pub mod model;
 pub mod transcript;
 
@@ -28,6 +29,7 @@ pub use dedup::CrossStreamEchoFilter;
 pub use diarize::Diarizer;
 pub use engine::{AsrEngine, EngineInfo, TranscriptionResult};
 pub use error::{Result, WispError};
+pub use export::{format_transcript, ExportFormat};
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 pub use transcript::{
     AudioSourceKind, SegmentStatus, SpeakerId, TranscriptEvent, TranscriptSegment,
