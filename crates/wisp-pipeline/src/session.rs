@@ -61,7 +61,7 @@ impl Session {
     /// thread flushes its buffered utterance and closes the queue; the transcription thread then
     /// finishes the backlog before the session joins.
     pub fn spawn_live(
-        mut segmenter: Segmenter,
+        mut segmenter: Box<dyn Segmenter>,
         mut transcriber: Transcriber,
         mut source: Box<dyn AudioSource>,
         mut sink: EventSink,
@@ -90,7 +90,7 @@ impl Session {
         // Capture + segmentation thread: never blocks on the engine.
         let capture_handle = thread::spawn(move || {
             run_capture(
-                &mut segmenter,
+                &mut *segmenter,
                 &mut *source,
                 &utterance_tx,
                 &stop_for_capture,
@@ -138,7 +138,7 @@ impl Session {
 /// Capture loop for [`Session::spawn_live`]: pull frames, segment them, and queue finished
 /// utterances until `stop` is set or the source ends; then flush any buffered utterance.
 fn run_capture(
-    segmenter: &mut Segmenter,
+    segmenter: &mut dyn Segmenter,
     source: &mut dyn AudioSource,
     utterance_tx: &Sender<Utterance>,
     stop: &AtomicBool,
@@ -147,14 +147,14 @@ fn run_capture(
         match source.next_frame()? {
             Some(frame) => {
                 let mono = to_mono_16k(&frame);
-                if let Some(utterance) = segmenter.push(&mono, frame.timestamp, frame.duration()) {
+                for utterance in segmenter.push(&mono, frame.timestamp, frame.duration()) {
                     let _ = utterance_tx.send(utterance);
                 }
             }
             None => break,
         }
     }
-    if let Some(utterance) = segmenter.flush() {
+    for utterance in segmenter.flush() {
         let _ = utterance_tx.send(utterance);
     }
     Ok(())
@@ -170,6 +170,7 @@ impl Drop for Session {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::segmenter::EnergySegmenter;
     use crate::vad::EnergyVad;
     use std::sync::mpsc;
     use std::time::Duration;
@@ -258,8 +259,11 @@ mod tests {
         session.stop().unwrap();
     }
 
-    fn segmenter() -> Segmenter {
-        Segmenter::new(Box::new(EnergyVad::new(0.01)), Duration::from_millis(150))
+    fn segmenter() -> Box<dyn Segmenter> {
+        Box::new(EnergySegmenter::new(
+            Box::new(EnergyVad::new(0.01)),
+            Duration::from_millis(150),
+        ))
     }
 
     fn transcriber(results: Vec<TranscriptionResult>) -> Transcriber {
