@@ -62,6 +62,8 @@
       devices = await invoke<string[]>("list_input_devices");
       systemAudioId = await invoke<string>("system_audio_id");
       micOffId = await invoke<string>("mic_off_id");
+      // Default: capture system audio too, so one click grabs everything (you + all audio).
+      if (!systemDevice) systemDevice = systemAudioId;
     } catch (e) {
       error = String(e);
     }
@@ -174,8 +176,9 @@
     {/each}
   </section>
 
-  <section class="card sources">
-    <div class="section-label">Audio sources</div>
+  <details class="advanced">
+    <summary>Advanced · audio sources</summary>
+    <section class="card sources">
     <label class="source-row">
       <span class="source-name">Microphone <em>(you)</em></span>
       <select bind:value={micDevice} onchange={applyDevices} disabled={running}>
@@ -192,8 +195,9 @@
         {#each devices as d (d)}<option value={d}>{d}</option>{/each}
       </select>
     </label>
-    <p class="hint"><strong>System audio — no setup</strong> captures the meeting directly (grant the one-time macOS Screen Recording permission). Or pick a loopback device like BlackHole.</p>
-  </section>
+    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong> (you + anything playing). On speakers the mic re-hears the audio (echo) — use headphones, or set Microphone to Off. System audio asks for Screen Recording permission once.</p>
+    </section>
+  </details>
 
   <div class="controls">
     {#if running}
@@ -545,5 +549,31 @@
 
   .source-row select:disabled {
     opacity: 0.5;
+  }
+  .advanced {
+    margin-bottom: 24px;
+  }
+
+  .advanced > summary {
+    cursor: pointer;
+    list-style: none;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.12em;
+    color: var(--muted);
+    padding: 4px 0;
+  }
+
+  .advanced > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .advanced[open] > summary {
+    margin-bottom: 10px;
+  }
+
+  .advanced .sources {
+    margin-bottom: 0;
   }
 </style>
