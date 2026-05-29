@@ -115,6 +115,12 @@ impl Pipeline {
             .transcribe(&self.utterance, TARGET_SAMPLE_RATE)?;
 
         for mut segment in result.segments {
+            // Skip empty / punctuation-only transcriptions — these are ASR hallucinations on
+            // near-silence (e.g. "." or "?"), not speech worth showing.
+            if !segment.text.chars().any(char::is_alphanumeric) {
+                continue;
+            }
+
             segment.id = self.next_id;
             segment.source = self.source_kind;
             segment.status = SegmentStatus::Final;
@@ -225,6 +231,14 @@ mod tests {
     fn all_silence_emits_nothing() {
         let frames = vec![frame(0.0, 0), frame(0.0, 100), frame(0.0, 200)];
         let segments = run(frames, vec![canned("unused")]);
+        assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn drops_punctuation_only_transcription() {
+        // One spoken utterance whose recognition is just punctuation — an ASR hallucination.
+        let frames = vec![frame(0.5, 0), frame(0.5, 100)];
+        let segments = run(frames, vec![canned("？")]);
         assert!(segments.is_empty());
     }
 }
