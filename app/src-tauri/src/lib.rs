@@ -18,6 +18,7 @@ use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::{Result as WispResult, WispError};
+use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_sherpa::{SenseVoiceEngine, SileroSegmenter, WhisperEngine};
@@ -696,6 +697,22 @@ async fn transcribe_file(
     Ok(())
 }
 
+/// Writes the most recent file transcription to `dest` in `format` (`txt`/`srt`/`vtt`).
+#[tauri::command]
+fn export_transcript(state: State<'_, AppState>, format: String, dest: String) -> Result<(), String> {
+    let format = ExportFormat::from_name(&format).ok_or_else(|| format!("unknown format: {format}"))?;
+    let segments = state
+        .file_segments
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    if segments.is_empty() {
+        return Err("nothing to export — transcribe a file first".to_owned());
+    }
+    let content = format_transcript(&segments, format);
+    fs::write(&dest, content).map_err(|e| format!("write {dest}: {e}"))?;
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -757,7 +774,8 @@ pub fn run() {
             set_devices,
             start_session,
             stop_session,
-            transcribe_file
+            transcribe_file,
+            export_transcript
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
