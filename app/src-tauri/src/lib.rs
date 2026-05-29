@@ -4,7 +4,8 @@
 //! start/stop transcription. A session is spawned per audio source (microphone = "Me", system
 //! loopback = meeting participants), all forwarding transcript segments to the webview.
 
-use std::path::Path;
+use std::fs;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -54,6 +55,8 @@ struct AppState {
     system_device: Mutex<Option<String>>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
+    /// File where the active model id is persisted, so the choice survives a restart.
+    active_model_path: PathBuf,
 }
 
 /// Serializable transcript segment delivered to the UI.
@@ -217,7 +220,11 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
 }
 
 #[tauri::command]
-async fn download_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn download_model(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
     let store = Arc::clone(&state.store);
     let model_id = ModelId(id.clone());
     let emitter = app.clone();
@@ -235,7 +242,11 @@ async fn download_model(app: AppHandle, state: State<'_, AppState>, id: String) 
                 last = Some(now);
                 let _ = emitter.emit(
                     DOWNLOAD_PROGRESS_EVENT,
-                    DownloadProgressDto { id: id.clone(), downloaded, total },
+                    DownloadProgressDto {
+                        id: id.clone(),
+                        downloaded,
+                        total,
+                    },
                 );
             }
         };
@@ -253,6 +264,8 @@ fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
     if !state.store.available().iter().any(|d| d.id == model_id) {
         return Err("unknown model".to_owned());
     }
+    // Persist the choice so it survives a restart (best-effort — not fatal if it fails).
+    let _ = fs::write(&state.active_model_path, model_id.as_str());
     *state
         .active
         .lock()
@@ -497,19 +510,29 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            let models_root = app.path().app_data_dir()?.join("models");
+            let data_dir = app.path().app_data_dir()?;
+            let active_model_path = data_dir.join("active-model");
             let store = Arc::new(FsModelStore::new(
-                models_root,
+                data_dir.join("models"),
                 builtin_catalog(),
                 Box::new(HttpDownloader),
             ));
 
             let catalog = store.available();
-            let active = catalog
-                .iter()
-                .find(|d| store.local_path(&d.id).is_some())
-                .or_else(|| catalog.first())
-                .map(|d| d.id.clone());
+            // Prefer the last chosen model (if still installed), then the first installed, then the
+            // first in the catalog.
+            let persisted = fs::read_to_string(&active_model_path)
+                .ok()
+                .map(|s| ModelId(s.trim().to_owned()))
+                .filter(|id| store.local_path(id).is_some());
+            let active = persisted
+                .or_else(|| {
+                    catalog
+                        .iter()
+                        .find(|d| store.local_path(&d.id).is_some())
+                        .map(|d| d.id.clone())
+                })
+                .or_else(|| catalog.first().map(|d| d.id.clone()));
 
             app.manage(AppState {
                 store,
@@ -519,6 +542,7 @@ pub fn run() {
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
                 tee: Mutex::new(None),
+                active_model_path,
             });
             Ok(())
         })
