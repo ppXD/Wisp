@@ -12,6 +12,8 @@ use crate::error::Result;
 pub enum ModelFamily {
     /// OpenAI Whisper and derivatives (e.g. large-v3-turbo, distil).
     Whisper,
+    /// whisper.cpp (GGML/GGUF) models, run via the GPU (Metal on macOS).
+    WhisperCpp,
     /// NVIDIA Parakeet transducer models.
     Parakeet,
     /// sherpa-onnx SenseVoice (single-file multilingual model).

@@ -157,10 +157,40 @@ fn build_engine(
             let engine = WhisperEngine::new(&encoder, &decoder, &tokens, language)?;
             Ok(Box::new(engine))
         }
+        ModelFamily::WhisperCpp => build_whisper_cpp_engine(descriptor, dir, language),
         other => Err(WispError::Engine(format!(
             "no engine for model family {other:?} yet"
         ))),
     }
+}
+
+/// Builds the GPU (Metal) whisper.cpp engine from a downloaded GGUF model. macOS only; elsewhere
+/// this family isn't offered, so the stub just reports it.
+#[cfg(target_os = "macos")]
+fn build_whisper_cpp_engine(
+    descriptor: &ModelDescriptor,
+    dir: &Path,
+    language: &str,
+) -> WispResult<Box<dyn AsrEngine>> {
+    let model = descriptor
+        .files
+        .iter()
+        .find(|f| f.name.ends_with(".bin"))
+        .map(|f| dir.join(&f.name))
+        .ok_or_else(|| WispError::Model("whisper.cpp model has no .bin file".to_owned()))?;
+    let engine = wisp_engine_whisper_cpp::WhisperCppEngine::new(&model, language)?;
+    Ok(Box::new(engine))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_whisper_cpp_engine(
+    _descriptor: &ModelDescriptor,
+    _dir: &Path,
+    _language: &str,
+) -> WispResult<Box<dyn AsrEngine>> {
+    Err(WispError::Engine(
+        "the whisper.cpp GPU engine is only available on macOS".to_owned(),
+    ))
 }
 
 /// Builds the segmenter for a live session: the Silero neural VAD when its bundled model resolves,

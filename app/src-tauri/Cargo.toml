@@ -33,3 +33,5 @@ wisp-aec = { path = "../../crates/wisp-aec" }
 # Querying microphone authorization status (AVFoundation) for the permission prompt.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
+# GPU (Metal) Whisper engine — macOS only.
+wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }
