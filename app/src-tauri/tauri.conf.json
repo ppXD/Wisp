@@ -35,6 +35,7 @@
       "icons/icon.ico"
     ],
     "macOS": {
+      "minimumSystemVersion": "11.0",
       "frameworks": [
         "target/release/libonnxruntime.1.17.1.dylib",
         "target/release/libonnxruntime.dylib",
