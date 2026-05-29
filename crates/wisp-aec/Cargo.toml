@@ -1,0 +1,10 @@
+[package]
+name = "wisp-aec"
+version = "0.0.0"
+description = "WebRTC AEC3 echo cancellation for Wisp"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+webrtc-audio-processing = { version = "2.1.0", features = ["bundled"] }
