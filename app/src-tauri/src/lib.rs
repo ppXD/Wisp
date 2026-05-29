@@ -343,7 +343,8 @@ pub fn run() {
                 sessions: Mutex::new(Vec::new()),
                 active: Mutex::new(active),
                 mic_device: Mutex::new(None),
-                system_device: Mutex::new(None),
+                // Default to capturing everything: mic (you) + system audio (all scenarios).
+                system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
             });
             Ok(())
         })
