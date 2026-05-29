@@ -14,7 +14,7 @@ pub mod transcriber;
 pub mod vad;
 
 pub use pipeline::{Pipeline, DEFAULT_SILENCE_HANGOVER};
-pub use segmenter::{Segmenter, Utterance};
+pub use segmenter::{EnergySegmenter, Segmenter, Utterance};
 pub use session::{EventSink, Session};
 pub use transcriber::Transcriber;
 pub use vad::{EnergyVad, Vad};

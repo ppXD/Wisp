@@ -9,7 +9,7 @@ use wisp_core::engine::AsrEngine;
 use wisp_core::error::Result;
 use wisp_core::transcript::{AudioSourceKind, TranscriptEvent};
 
-use crate::segmenter::{Segmenter, Utterance};
+use crate::segmenter::{EnergySegmenter, Segmenter, Utterance};
 use crate::transcriber::Transcriber;
 use crate::vad::Vad;
 
@@ -28,13 +28,13 @@ pub const DEFAULT_SILENCE_HANGOVER: Duration = Duration::from_millis(700);
 /// [`Session::spawn_live`](crate::session::Session::spawn_live) instead, which runs the same two
 /// pieces on separate threads so a slow engine never stalls capture.
 pub struct Pipeline {
-    segmenter: Segmenter,
+    segmenter: Box<dyn Segmenter>,
     transcriber: Transcriber,
 }
 
 impl Pipeline {
     /// Creates a pipeline tagging segments with `source_kind` and ending utterances after
-    /// `silence_hangover` of trailing silence.
+    /// `silence_hangover` of trailing silence, using the energy-gate segmenter.
     pub fn new(
         engine: Box<dyn AsrEngine>,
         vad: Box<dyn Vad>,
@@ -42,7 +42,7 @@ impl Pipeline {
         silence_hangover: Duration,
     ) -> Self {
         Self {
-            segmenter: Segmenter::new(vad, silence_hangover),
+            segmenter: Box::new(EnergySegmenter::new(vad, silence_hangover)),
             transcriber: Transcriber::new(engine, source_kind),
         }
     }
@@ -79,7 +79,7 @@ impl Pipeline {
         sink: &mut dyn FnMut(TranscriptEvent),
     ) -> Result<()> {
         let mono = to_mono_16k(frame);
-        if let Some(utterance) = self
+        for utterance in self
             .segmenter
             .push(&mono, frame.timestamp, frame.duration())
         {
@@ -89,7 +89,7 @@ impl Pipeline {
     }
 
     fn finalize(&mut self, sink: &mut dyn FnMut(TranscriptEvent)) -> Result<()> {
-        if let Some(utterance) = self.segmenter.flush() {
+        for utterance in self.segmenter.flush() {
             self.emit(&utterance, sink)?;
         }
         Ok(())

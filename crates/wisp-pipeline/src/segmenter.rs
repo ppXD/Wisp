@@ -1,8 +1,9 @@
 //! Voice-activity segmentation: turns a frame stream into complete utterances.
 //!
-//! Pure, engine-free logic so it can run on the real-time capture thread without ever blocking on
-//! transcription. Feed 16 kHz mono frames via [`Segmenter::push`]; when trailing silence reaches
-//! the hangover, it hands back the buffered [`Utterance`].
+//! [`Segmenter`] is a narrow trait so segmentation strategies plug in interchangeably — a naive
+//! energy gate ([`EnergySegmenter`]) today, a neural VAD (Silero) tomorrow — without touching the
+//! pipeline or session that drive it. Segmentation is engine-free and runs on the real-time capture
+//! thread, so it must never block on transcription.
 
 use std::time::Duration;
 
@@ -10,8 +11,8 @@ use crate::vad::Vad;
 
 /// A complete spoken utterance: 16 kHz mono PCM plus the timestamp of its first speech frame.
 ///
-/// Produced by the [`Segmenter`] and consumed by the transcriber — decoupling the (fast) capture
-/// path from the (slow) ASR engine.
+/// Produced by a [`Segmenter`] and consumed by the transcriber — decoupling the (fast) capture path
+/// from the (slow) ASR engine.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Utterance {
     /// 16 kHz mono samples spanning the utterance.
@@ -20,11 +21,29 @@ pub struct Utterance {
     pub start: Duration,
 }
 
-/// Accumulates speech frames into utterances, splitting on trailing silence.
+/// Splits a 16 kHz mono frame stream into complete utterances.
 ///
-/// Holds no ASR engine — emitting an [`Utterance`] is just buffer book-keeping, so this can be
-/// driven from the capture thread at real-time without stalling on the engine.
-pub struct Segmenter {
+/// A frame may complete zero, one, or several utterances (a neural VAD draining a backlog can emit
+/// more than one), so [`push`](Self::push) returns a `Vec`. Implementors hold no ASR engine —
+/// emitting an [`Utterance`] is buffer book-keeping only, cheap enough for the capture thread.
+pub trait Segmenter: Send {
+    /// Feeds one 16 kHz mono frame (`mono`) stamped at `timestamp` and lasting `frame_duration`,
+    /// returning any utterances this frame completed (usually none, or one).
+    fn push(
+        &mut self,
+        mono: &[f32],
+        timestamp: Duration,
+        frame_duration: Duration,
+    ) -> Vec<Utterance>;
+
+    /// Emits any buffered utterance at end-of-stream — the last one may not have been followed by
+    /// enough trailing silence to close on its own.
+    fn flush(&mut self) -> Vec<Utterance>;
+}
+
+/// Energy-gate segmenter: accumulates speech frames into an utterance, splitting on trailing
+/// silence. Simple and dependency-free; the cross-platform fallback when no neural VAD is loaded.
+pub struct EnergySegmenter {
     vad: Box<dyn Vad>,
     silence_hangover: Duration,
     utterance: Vec<f32>,
@@ -32,7 +51,7 @@ pub struct Segmenter {
     silence_accum: Duration,
 }
 
-impl Segmenter {
+impl EnergySegmenter {
     /// Creates a segmenter that ends an utterance after `silence_hangover` of trailing silence.
     pub fn new(vad: Box<dyn Vad>, silence_hangover: Duration) -> Self {
         Self {
@@ -42,41 +61,6 @@ impl Segmenter {
             utterance_start: None,
             silence_accum: Duration::ZERO,
         }
-    }
-
-    /// Feeds one 16 kHz mono frame (`mono`) stamped at `timestamp` and lasting `frame_duration`.
-    ///
-    /// Returns `Some(utterance)` exactly when this frame's trailing silence completes the buffered
-    /// utterance; otherwise `None` (still buffering, or idle).
-    pub fn push(
-        &mut self,
-        mono: &[f32],
-        timestamp: Duration,
-        frame_duration: Duration,
-    ) -> Option<Utterance> {
-        if self.vad.is_speech(mono) {
-            if self.utterance.is_empty() {
-                self.utterance_start = Some(timestamp);
-            }
-            self.utterance.extend_from_slice(mono);
-            self.silence_accum = Duration::ZERO;
-            return None;
-        }
-
-        if !self.utterance.is_empty() {
-            self.silence_accum += frame_duration;
-            if self.silence_accum >= self.silence_hangover {
-                return self.take();
-            }
-        }
-
-        None
-    }
-
-    /// Emits any buffered utterance unconditionally — for end-of-stream, where the last utterance
-    /// may not have been followed by enough trailing silence to close on its own.
-    pub fn flush(&mut self) -> Option<Utterance> {
-        self.take()
     }
 
     /// Detaches the buffered utterance and resets state, or `None` if nothing is buffered.
@@ -91,6 +75,37 @@ impl Segmenter {
     }
 }
 
+impl Segmenter for EnergySegmenter {
+    fn push(
+        &mut self,
+        mono: &[f32],
+        timestamp: Duration,
+        frame_duration: Duration,
+    ) -> Vec<Utterance> {
+        if self.vad.is_speech(mono) {
+            if self.utterance.is_empty() {
+                self.utterance_start = Some(timestamp);
+            }
+            self.utterance.extend_from_slice(mono);
+            self.silence_accum = Duration::ZERO;
+            return Vec::new();
+        }
+
+        if !self.utterance.is_empty() {
+            self.silence_accum += frame_duration;
+            if self.silence_accum >= self.silence_hangover {
+                return self.take().into_iter().collect();
+            }
+        }
+
+        Vec::new()
+    }
+
+    fn flush(&mut self) -> Vec<Utterance> {
+        self.take().into_iter().collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -99,8 +114,8 @@ mod tests {
     const HANGOVER: Duration = Duration::from_millis(150);
     const FRAME: Duration = Duration::from_millis(100);
 
-    fn segmenter() -> Segmenter {
-        Segmenter::new(Box::new(EnergyVad::new(0.01)), HANGOVER)
+    fn segmenter() -> EnergySegmenter {
+        EnergySegmenter::new(Box::new(EnergyVad::new(0.01)), HANGOVER)
     }
 
     /// 100 ms of speech (loud) at `t_ms`.
@@ -118,19 +133,20 @@ mod tests {
         let mut seg = segmenter();
 
         let (s1, t1) = speech(0);
-        assert_eq!(seg.push(&s1, t1, FRAME), None);
+        assert!(seg.push(&s1, t1, FRAME).is_empty());
         let (s2, t2) = speech(100);
-        assert_eq!(seg.push(&s2, t2, FRAME), None);
+        assert!(seg.push(&s2, t2, FRAME).is_empty());
 
         // One silent frame (100 ms) is below the 150 ms hangover — keep buffering.
         let (q1, tq1) = silence(200);
-        assert_eq!(seg.push(&q1, tq1, FRAME), None);
+        assert!(seg.push(&q1, tq1, FRAME).is_empty());
 
         // Second silent frame crosses the hangover — utterance closes.
         let (q2, tq2) = silence(300);
-        let utt = seg.push(&q2, tq2, FRAME).expect("utterance should close");
-        assert_eq!(utt.start, Duration::from_millis(0));
-        assert_eq!(utt.audio.len(), 3_200); // two 1 600-sample speech frames
+        let utts = seg.push(&q2, tq2, FRAME);
+        assert_eq!(utts.len(), 1);
+        assert_eq!(utts[0].start, Duration::from_millis(0));
+        assert_eq!(utts[0].audio.len(), 3_200); // two 1 600-sample speech frames
     }
 
     #[test]
@@ -139,17 +155,18 @@ mod tests {
 
         // Leading silence with no buffered speech yields nothing and sets no start.
         let (q, tq) = silence(0);
-        assert_eq!(seg.push(&q, tq, FRAME), None);
+        assert!(seg.push(&q, tq, FRAME).is_empty());
 
         let (s, ts) = speech(500);
-        assert_eq!(seg.push(&s, ts, FRAME), None);
+        assert!(seg.push(&s, ts, FRAME).is_empty());
 
-        let (q1, _) = silence(600);
-        assert_eq!(seg.push(&q1, Duration::from_millis(600), FRAME), None);
-        let (q2, _) = silence(700);
-        let utt = seg.push(&q2, Duration::from_millis(700), FRAME).unwrap();
+        assert!(seg
+            .push(&silence(600).0, Duration::from_millis(600), FRAME)
+            .is_empty());
+        let utts = seg.push(&silence(700).0, Duration::from_millis(700), FRAME);
 
-        assert_eq!(utt.start, Duration::from_millis(500));
+        assert_eq!(utts.len(), 1);
+        assert_eq!(utts[0].start, Duration::from_millis(500));
     }
 
     #[test]
@@ -158,14 +175,17 @@ mod tests {
 
         seg.push(&speech(0).0, Duration::from_millis(0), FRAME);
         seg.push(&silence(100).0, Duration::from_millis(100), FRAME);
-        let first = seg.push(&silence(200).0, Duration::from_millis(200), FRAME);
-        assert!(first.is_some(), "first utterance closes after hangover");
+        assert_eq!(
+            seg.push(&silence(200).0, Duration::from_millis(200), FRAME)
+                .len(),
+            1
+        );
 
         seg.push(&speech(300).0, Duration::from_millis(300), FRAME);
         seg.push(&silence(400).0, Duration::from_millis(400), FRAME);
-        let second = seg.push(&silence(500).0, Duration::from_millis(500), FRAME);
-        let utt = second.expect("second utterance closes");
-        assert_eq!(utt.start, Duration::from_millis(300));
+        let utts = seg.push(&silence(500).0, Duration::from_millis(500), FRAME);
+        assert_eq!(utts.len(), 1);
+        assert_eq!(utts[0].start, Duration::from_millis(300));
     }
 
     #[test]
@@ -174,19 +194,20 @@ mod tests {
         seg.push(&speech(0).0, Duration::from_millis(0), FRAME);
         seg.push(&speech(100).0, Duration::from_millis(100), FRAME);
 
-        let utt = seg.flush().expect("buffered speech should flush");
-        assert_eq!(utt.start, Duration::ZERO);
-        assert_eq!(utt.audio.len(), 3_200);
+        let utts = seg.flush();
+        assert_eq!(utts.len(), 1);
+        assert_eq!(utts[0].start, Duration::ZERO);
+        assert_eq!(utts[0].audio.len(), 3_200);
 
         // Nothing left after a flush.
-        assert_eq!(seg.flush(), None);
+        assert!(seg.flush().is_empty());
     }
 
     #[test]
     fn flush_when_idle_emits_nothing() {
         let mut seg = segmenter();
-        assert_eq!(seg.flush(), None);
+        assert!(seg.flush().is_empty());
         seg.push(&silence(0).0, Duration::ZERO, FRAME);
-        assert_eq!(seg.flush(), None);
+        assert!(seg.flush().is_empty());
     }
 }

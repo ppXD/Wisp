@@ -22,7 +22,9 @@ use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_sherpa::{SenseVoiceEngine, WhisperEngine};
 use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
-use wisp_pipeline::{EnergyVad, Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER};
+use wisp_pipeline::{
+    EnergySegmenter, EnergyVad, Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
+};
 use wisp_screencapture::ScreenCaptureSource;
 
 mod permissions;
@@ -181,7 +183,7 @@ fn spawn_session(
         AudioSourceKind::Microphone => Box::new(EnergyVad::new(MIC_VAD_THRESHOLD)),
         _ => Box::new(EnergyVad::default()),
     };
-    let segmenter = Segmenter::new(vad, DEFAULT_SILENCE_HANGOVER);
+    let segmenter: Box<dyn Segmenter> = Box::new(EnergySegmenter::new(vad, DEFAULT_SILENCE_HANGOVER));
     let transcriber = Transcriber::new(engine, kind);
 
     let emitter = app.clone();
