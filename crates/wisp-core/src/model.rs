@@ -75,6 +75,8 @@ pub struct ModelDescriptor {
     pub files: Vec<ModelFile>,
     /// Languages the model supports; empty means unspecified/multilingual.
     pub languages: Vec<String>,
+    /// Short human guidance on the size / speed / accuracy tradeoff, shown in the picker.
+    pub description: String,
 }
 
 impl ModelDescriptor {
@@ -129,6 +131,7 @@ mod tests {
                 },
             ],
             languages: vec![],
+            description: String::new(),
         };
         assert_eq!(d.total_size_bytes(), 42);
     }

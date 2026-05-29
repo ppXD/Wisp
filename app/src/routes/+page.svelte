@@ -20,6 +20,7 @@
     name: string;
     sizeBytes: number;
     languages: string[];
+    description: string;
     installed: boolean;
     active: boolean;
   };
@@ -42,6 +43,19 @@
 
   const activeModel = $derived(models.find((m) => m.active));
   const canStart = $derived(!!activeModel?.installed);
+
+  // Which model the picker is showing. Defaults to the active one once models load.
+  let chosenId = $state("");
+  $effect(() => {
+    if (!chosenId && models.length) chosenId = (models.find((m) => m.active) ?? models[0]).id;
+  });
+  const chosenModel = $derived(models.find((m) => m.id === chosenId));
+
+  async function pickModel(id: string) {
+    chosenId = id;
+    const m = models.find((x) => x.id === id);
+    if (m?.installed) await selectModel(id); // installed → make it the active model
+  }
   // System audio on macOS needs Screen Recording permission; only relevant for the one-click source.
   const needsScreenRecording = $derived(
     !!systemAudioId && systemDevice === systemAudioId && !screenAuthorized,
@@ -131,6 +145,7 @@
     try {
       await invoke("download_model", { id });
       await refreshModels();
+      await selectModel(id); // a freshly downloaded model becomes the active one
     } catch (e) {
       error = String(e);
     } finally {
@@ -260,25 +275,38 @@
 
   <section class="card models">
     <div class="section-label">Model</div>
-    {#each models as m (m.id)}
-      <div class="model" class:active={m.active}>
-        <div class="meta">
-          <div class="name">{m.name}</div>
-          <div class="sub">{fmtSize(m.sizeBytes)} · {m.languages.join(" · ")}</div>
+    {#if models.length}
+      <select class="model-select" value={chosenId} onchange={(e) => pickModel(e.currentTarget.value)} disabled={running}>
+        {#each models as m (m.id)}
+          <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
+        {/each}
+      </select>
+
+      {#if chosenModel}
+        <div class="model-detail">
+          <div class="model-tags">
+            <span class="tag">{fmtSize(chosenModel.sizeBytes)}</span>
+            {#each chosenModel.languages as l (l)}<span class="tag">{l}</span>{/each}
+          </div>
+          {#if chosenModel.description}<p class="model-desc">{chosenModel.description}</p>{/if}
+          <div class="model-action">
+            {#if downloading === chosenModel.id}
+              <button class="btn" disabled>Downloading…</button>
+            {:else if !chosenModel.installed}
+              <button class="btn outline" onclick={() => download(chosenModel.id)} disabled={downloading !== null}>
+                Download · {fmtSize(chosenModel.sizeBytes)}
+              </button>
+            {:else if chosenModel.active}
+              <span class="pill">Active</span>
+            {:else}
+              <button class="btn ghost" onclick={() => selectModel(chosenModel.id)}>Use this model</button>
+            {/if}
+          </div>
         </div>
-        {#if downloading === m.id}
-          <button class="btn" disabled>Downloading…</button>
-        {:else if !m.installed}
-          <button class="btn outline" onclick={() => download(m.id)} disabled={downloading !== null}>Download</button>
-        {:else if m.active}
-          <span class="pill">Active</span>
-        {:else}
-          <button class="btn ghost" onclick={() => selectModel(m.id)}>Use</button>
-        {/if}
-      </div>
+      {/if}
     {:else}
       <p class="hint">Loading models…</p>
-    {/each}
+    {/if}
   </section>
 
   <details class="advanced">
@@ -464,42 +492,49 @@
 
   .models {
     margin-bottom: 24px;
-    display: flex;
-    flex-direction: column;
-    gap: 8px;
   }
 
-  .model {
-    display: flex;
-    align-items: center;
-    gap: 14px;
-    padding: 12px 14px;
-    border: 1px solid var(--border);
-    border-radius: 11px;
+  .model-select {
+    width: 100%;
+    font-family: inherit;
+    font-size: 14px;
+    color: var(--text);
     background: var(--bg);
-    transition: border-color 0.15s, background 0.15s;
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 10px 12px;
   }
 
-  .model.active {
-    border-color: var(--accent);
-    background: var(--surface-active);
+  .model-select:disabled {
+    opacity: 0.5;
   }
 
-  .meta {
-    flex: 1;
-    min-width: 0;
+  .model-tags {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    margin-top: 12px;
   }
 
-  .name {
-    font-size: 14.5px;
-    font-weight: 500;
-  }
-
-  .sub {
+  .tag {
     font-family: var(--font-mono);
-    font-size: 12px;
+    font-size: 11px;
     color: var(--muted);
-    margin-top: 3px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 3px 8px;
+  }
+
+  .model-desc {
+    margin: 10px 0 0;
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--muted);
+  }
+
+  .model-action {
+    margin-top: 12px;
   }
 
   .controls {

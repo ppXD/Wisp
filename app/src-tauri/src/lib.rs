@@ -87,6 +87,7 @@ struct ModelInfoDto {
     name: String,
     size_bytes: u64,
     languages: Vec<String>,
+    description: String,
     installed: bool,
     active: bool,
 }
@@ -171,6 +172,7 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
                 name: d.display_name,
                 size_bytes,
                 languages: d.languages,
+                description: d.description,
                 installed,
                 active: is_active,
             }
