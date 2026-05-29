@@ -14,8 +14,9 @@ use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
 use wisp_core::channel::{frame_channel, FrameReceiver};
 use wisp_core::error::Result;
 
-/// Per-branch capacity of a [`tee`] (drop-oldest on overflow, like the capture channel).
-const TEE_CAPACITY: usize = 256;
+/// Per-branch capacity of a [`tee`] (drop-oldest on overflow, like the capture channel). Generous
+/// headroom (~10-20 s) so a slow engine transcribing one utterance doesn't drop the next.
+const TEE_CAPACITY: usize = 1024;
 
 /// An [`AudioSource`] that reads frames from a [`FrameReceiver`].
 ///

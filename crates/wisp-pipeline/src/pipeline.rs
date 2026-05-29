@@ -11,8 +11,9 @@ use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent};
 
 use crate::vad::Vad;
 
-/// Default trailing silence that ends an utterance.
-pub const DEFAULT_SILENCE_HANGOVER: Duration = Duration::from_millis(400);
+/// Default trailing silence that ends an utterance. Generous enough that a brief mid-sentence
+/// pause doesn't cut the utterance short (which truncates the transcript).
+pub const DEFAULT_SILENCE_HANGOVER: Duration = Duration::from_millis(700);
 
 /// Drives audio through VAD segmentation and an ASR engine, emitting transcript events.
 ///
