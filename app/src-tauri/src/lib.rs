@@ -33,6 +33,12 @@ const SYSTEM_CAPTURE_ID: &str = "__wisp_system_audio__";
 /// Sentinel mic id meaning "no microphone" — capture system audio only. Matches the UI.
 const MIC_OFF_ID: &str = "__wisp_mic_off__";
 
+/// Voice-activity RMS gate for the microphone stream, above the default used for the clean system
+/// stream. The mic re-hears the speakers, so after echo cancellation its residual + room noise is
+/// quiet while the user's own close-mic voice is loud; a higher gate keeps that quiet residual from
+/// being transcribed (and from feeding the ASR near-silence to hallucinate on).
+const MIC_VAD_THRESHOLD: f32 = 0.02;
+
 /// Shared application state.
 struct AppState {
     store: Arc<FsModelStore>,
@@ -119,7 +125,10 @@ fn spawn_session(
     let engine = build_engine(descriptor, dir)?;
     let pipeline = Pipeline::new(
         engine,
-        Box::new(EnergyVad::default()),
+        match kind {
+            AudioSourceKind::Microphone => Box::new(EnergyVad::new(MIC_VAD_THRESHOLD)),
+            _ => Box::new(EnergyVad::default()),
+        },
         kind,
         DEFAULT_SILENCE_HANGOVER,
     );
