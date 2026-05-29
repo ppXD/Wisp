@@ -18,7 +18,7 @@ use wisp_core::engine::AsrEngine;
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
-use wisp_engine_sherpa::SenseVoiceEngine;
+use wisp_engine_sherpa::{SenseVoiceEngine, WhisperEngine};
 use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
 use wisp_pipeline::{EnergyVad, Pipeline, Session, DEFAULT_SILENCE_HANGOVER};
 use wisp_screencapture::ScreenCaptureSource;
@@ -103,6 +103,28 @@ fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn 
                 .map(|f| f.name.clone())
                 .ok_or_else(|| WispError::Model("model descriptor has no .onnx file".to_owned()))?;
             let engine = SenseVoiceEngine::new(&dir.join(model_name), &dir.join("tokens.txt"))?;
+            Ok(Box::new(engine))
+        }
+        ModelFamily::Whisper => {
+            let onnx = |needle: &str| {
+                descriptor
+                    .files
+                    .iter()
+                    .find(|f| f.name.contains(needle) && f.name.ends_with(".onnx"))
+                    .map(|f| dir.join(&f.name))
+            };
+            let encoder = onnx("encoder")
+                .ok_or_else(|| WispError::Model("whisper model has no encoder".to_owned()))?;
+            let decoder = onnx("decoder")
+                .ok_or_else(|| WispError::Model("whisper model has no decoder".to_owned()))?;
+            let tokens = descriptor
+                .files
+                .iter()
+                .find(|f| f.name.ends_with("tokens.txt"))
+                .map(|f| dir.join(&f.name))
+                .ok_or_else(|| WispError::Model("whisper model has no tokens file".to_owned()))?;
+            // Empty language → Whisper auto-detects (handles mixed Cantonese/English meetings).
+            let engine = WhisperEngine::new(&encoder, &decoder, &tokens, "")?;
             Ok(Box::new(engine))
         }
         other => Err(WispError::Engine(format!(

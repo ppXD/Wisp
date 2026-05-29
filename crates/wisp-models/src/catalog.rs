@@ -9,9 +9,20 @@ use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, Quant};
 const SENSE_VOICE_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-sense-voice-zh-en-ja-ko-yue-2024-07-17/resolve/main";
 
+/// Hugging Face repos hosting the sherpa-onnx Whisper ONNX exports (no auth needed).
+const WHISPER_LARGE_V3_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-large-v3/resolve/main";
+const WHISPER_MEDIUM_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main";
+
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
-    vec![sense_voice_int8(), sense_voice_fp32()]
+    vec![
+        sense_voice_int8(),
+        sense_voice_fp32(),
+        whisper_large_v3(),
+        whisper_medium(),
+    ]
 }
 
 fn sense_voice_languages() -> Vec<String> {
@@ -76,6 +87,84 @@ fn sense_voice_fp32() -> ModelDescriptor {
     }
 }
 
+fn whisper_large_v3() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-large-v3".to_owned()),
+        family: ModelFamily::Whisper,
+        quant: Quant::Q8,
+        display_name: "Whisper large-v3 · 99+ languages · int8".to_owned(),
+        files: vec![
+            ModelFile {
+                name: "large-v3-encoder.int8.onnx".to_owned(),
+                url: format!("{WHISPER_LARGE_V3_BASE}/large-v3-encoder.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 766_671_985,
+            },
+            ModelFile {
+                name: "large-v3-decoder.int8.onnx".to_owned(),
+                url: format!("{WHISPER_LARGE_V3_BASE}/large-v3-decoder.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 1_008_265_203,
+            },
+            ModelFile {
+                name: "large-v3-tokens.txt".to_owned(),
+                url: format!("{WHISPER_LARGE_V3_BASE}/large-v3-tokens.txt"),
+                sha256: String::new(),
+                size_bytes: 816_730,
+            },
+        ],
+        languages: vec![
+            "yue".to_owned(),
+            "zh".to_owned(),
+            "en".to_owned(),
+            "ja".to_owned(),
+        ],
+        description:
+            "OpenAI Whisper large-v3 (int8) — the most accurate, broadest option, ~99 languages \
+             including Cantonese (yue). Large (~1.8 GB) and noticeably slower than SenseVoice."
+                .to_owned(),
+    }
+}
+
+fn whisper_medium() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-medium".to_owned()),
+        family: ModelFamily::Whisper,
+        quant: Quant::Q8,
+        display_name: "Whisper medium · 99+ languages · int8".to_owned(),
+        files: vec![
+            ModelFile {
+                name: "medium-encoder.int8.onnx".to_owned(),
+                url: format!("{WHISPER_MEDIUM_BASE}/medium-encoder.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 374_196_283,
+            },
+            ModelFile {
+                name: "medium-decoder.int8.onnx".to_owned(),
+                url: format!("{WHISPER_MEDIUM_BASE}/medium-decoder.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 571_059_257,
+            },
+            ModelFile {
+                name: "medium-tokens.txt".to_owned(),
+                url: format!("{WHISPER_MEDIUM_BASE}/medium-tokens.txt"),
+                sha256: String::new(),
+                size_bytes: 816_730,
+            },
+        ],
+        languages: vec![
+            "yue".to_owned(),
+            "zh".to_owned(),
+            "en".to_owned(),
+            "ja".to_owned(),
+        ],
+        description:
+            "OpenAI Whisper medium (int8) — a middle ground: ~99 languages, smaller and faster \
+             than large-v3 with somewhat lower accuracy (~0.95 GB)."
+                .to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -83,11 +172,18 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 2);
-        assert_ne!(catalog[0].id, catalog[1].id);
+        assert_eq!(catalog.len(), 4);
+
+        let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
+        assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
+
         for descriptor in &catalog {
             assert!(descriptor.files.iter().any(|f| f.name.ends_with(".onnx")));
-            assert!(descriptor.files.iter().any(|f| f.name == "tokens.txt"));
+            assert!(descriptor
+                .files
+                .iter()
+                .any(|f| f.name.ends_with("tokens.txt")));
+            assert!(!descriptor.description.is_empty());
             assert!(descriptor.total_size_bytes() > 0);
         }
     }
