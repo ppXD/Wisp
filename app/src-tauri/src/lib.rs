@@ -241,6 +241,15 @@ fn microphone_blocked() -> bool {
 }
 
 #[tauri::command]
+fn session_running(state: State<'_, AppState>) -> Result<bool, String> {
+    Ok(!state
+        .sessions
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .is_empty())
+}
+
+#[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
     mic: Option<String>,
@@ -469,6 +478,7 @@ pub fn run() {
             request_screen_recording,
             open_privacy_settings,
             microphone_blocked,
+            session_running,
             set_devices,
             start_session,
             stop_session

@@ -170,6 +170,19 @@
     });
   }
 
+  // Reflect the backend's real session state. The frontend can reload (e.g. dev HMR) while a
+  // session keeps running, which would otherwise leave `running` stale and the UI out of sync.
+  async function syncRunning() {
+    try {
+      if (await invoke<boolean>("session_running")) {
+        await ensureListener();
+        running = true;
+      }
+    } catch {
+      // best-effort; ignore
+    }
+  }
+
   async function start() {
     error = "";
     try {
@@ -182,7 +195,10 @@
       screenAuthorized = true;
       micBlocked = false;
     } catch (e) {
-      error = String(e);
+      // If a session is actually already running (e.g. after a reload), reflect that instead of
+      // showing the error.
+      await syncRunning();
+      error = running ? "" : String(e);
     }
   }
 
@@ -221,6 +237,7 @@
     refreshModels();
     refreshDevices();
     checkPermissions();
+    syncRunning();
     // Re-check when the window regains focus, so granting in System Settings clears the banner.
     const onFocus = () => checkPermissions();
     window.addEventListener("focus", onFocus);
