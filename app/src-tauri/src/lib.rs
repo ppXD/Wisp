@@ -13,6 +13,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{tee, ChannelSource, EchoCancellingSource, MicSource, Tee};
 use wisp_core::audio::AudioSource;
+use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
@@ -103,12 +104,17 @@ fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn 
 
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
 /// forwarding them to the webview.
+///
+/// When `dedup` is set (the mic + system case), every segment is routed through the shared
+/// [`CrossStreamEchoFilter`] first, so a mic segment that echoes a recent meeting segment is
+/// dropped rather than emitted.
 fn spawn_session(
     app: &AppHandle,
     descriptor: &ModelDescriptor,
     dir: &Path,
     source: Box<dyn AudioSource>,
     kind: AudioSourceKind,
+    dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
 ) -> WispResult<Session> {
     let engine = build_engine(descriptor, dir)?;
     let pipeline = Pipeline::new(
@@ -121,7 +127,13 @@ fn spawn_session(
     let emitter = app.clone();
     let sink: wisp_pipeline::EventSink = Box::new(move |event| {
         if let TranscriptEvent::Segment(segment) = event {
-            let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
+            let emit = match &dedup {
+                Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
+                None => true,
+            };
+            if emit {
+                let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
+            }
         }
     });
 
@@ -277,6 +289,9 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
             let system_info = system.info();
             let (tee_handle, meeting_rx, reference_rx) = tee(system);
 
+            // Shared across both sessions: drops any residual echo AEC leaves on the mic stream.
+            let dedup = Arc::new(Mutex::new(CrossStreamEchoFilter::new()));
+
             let canceller = Box::new(WebrtcEchoCanceller::new().map_err(|e| e.to_string())?);
             let aec_mic: Box<dyn AudioSource> =
                 Box::new(EchoCancellingSource::new(mic, reference_rx, canceller));
@@ -287,6 +302,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     &dir,
                     aec_mic,
                     AudioSourceKind::Microphone,
+                    Some(Arc::clone(&dedup)),
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -294,8 +310,15 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
             let meeting: Box<dyn AudioSource> =
                 Box::new(ChannelSource::new(meeting_rx, system_info));
             sessions.push(
-                spawn_session(&app, &descriptor, &dir, meeting, AudioSourceKind::System)
-                    .map_err(|e| e.to_string())?,
+                spawn_session(
+                    &app,
+                    &descriptor,
+                    &dir,
+                    meeting,
+                    AudioSourceKind::System,
+                    Some(dedup),
+                )
+                .map_err(|e| e.to_string())?,
             );
 
             *state
@@ -307,16 +330,30 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         // Mic only → no playback to echo; capture it directly.
         (Some(mic), None) => {
             sessions.push(
-                spawn_session(&app, &descriptor, &dir, mic, AudioSourceKind::Microphone)
-                    .map_err(|e| e.to_string())?,
+                spawn_session(
+                    &app,
+                    &descriptor,
+                    &dir,
+                    mic,
+                    AudioSourceKind::Microphone,
+                    None,
+                )
+                .map_err(|e| e.to_string())?,
             );
         }
 
         // System only → clean digital capture, no echo path; transcribe it directly.
         (None, Some(system)) => {
             sessions.push(
-                spawn_session(&app, &descriptor, &dir, system, AudioSourceKind::System)
-                    .map_err(|e| e.to_string())?,
+                spawn_session(
+                    &app,
+                    &descriptor,
+                    &dir,
+                    system,
+                    AudioSourceKind::System,
+                    None,
+                )
+                .map_err(|e| e.to_string())?,
             );
         }
 
