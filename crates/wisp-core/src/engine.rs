@@ -37,6 +37,22 @@ pub trait AsrEngine: Send {
     /// Transcribes a chunk of 16 kHz mono audio.
     fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult>;
 
+    /// Transcribes a whole clip (e.g. an entire file) at once, rather than a short streamed chunk.
+    ///
+    /// Engines with a native long-form path (full cross-window context) should override this for
+    /// much better accuracy on files. `with_timestamps` requests per-segment timings for subtitle
+    /// export, at a small accuracy cost — callers that only need text pass `false` to let the
+    /// engine spend everything on words. The default delegates to [`transcribe`](Self::transcribe).
+    fn transcribe_clip(
+        &mut self,
+        audio: &[f32],
+        sample_rate: u32,
+        with_timestamps: bool,
+    ) -> Result<TranscriptionResult> {
+        let _ = with_timestamps;
+        self.transcribe(audio, sample_rate)
+    }
+
     /// Clears any accumulated streaming state (e.g. between utterances).
     ///
     /// The default is a no-op, which is correct for stateless engines.
