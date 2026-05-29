@@ -234,6 +234,11 @@ fn open_privacy_settings(pane: String) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn microphone_blocked() -> bool {
+    permissions::microphone_blocked()
+}
+
+#[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
     mic: Option<String>,
@@ -461,6 +466,7 @@ pub fn run() {
             screen_recording_authorized,
             request_screen_recording,
             open_privacy_settings,
+            microphone_blocked,
             set_devices,
             start_session,
             stop_session

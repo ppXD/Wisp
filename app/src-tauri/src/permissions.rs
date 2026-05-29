@@ -22,13 +22,30 @@ pub fn open_privacy_settings(pane: &str) -> Result<(), String> {
     imp::open_privacy_settings(pane)
 }
 
+/// Whether microphone access is blocked (explicitly denied or restricted).
+///
+/// `false` for both "authorized" and "not yet determined" — in the latter case the OS prompts on
+/// first capture, so there is nothing to warn about up front; only an outright block needs action.
+pub fn microphone_blocked() -> bool {
+    imp::microphone_blocked()
+}
+
 #[cfg(target_os = "macos")]
 mod imp {
+    use objc2::runtime::AnyObject;
+    use objc2::{class, msg_send};
+
     // CoreGraphics screen-capture access APIs (macOS 10.15+).
     #[link(name = "CoreGraphics", kind = "framework")]
     extern "C" {
         fn CGPreflightScreenCaptureAccess() -> bool;
         fn CGRequestScreenCaptureAccess() -> bool;
+    }
+
+    // `AVMediaTypeAudio` constant from AVFoundation (an `NSString *`).
+    #[link(name = "AVFoundation", kind = "framework")]
+    extern "C" {
+        static AVMediaTypeAudio: *const AnyObject;
     }
 
     pub(super) fn screen_recording_authorized() -> bool {
@@ -37,6 +54,14 @@ mod imp {
 
     pub(super) fn request_screen_recording() -> bool {
         unsafe { CGRequestScreenCaptureAccess() }
+    }
+
+    pub(super) fn microphone_blocked() -> bool {
+        // AVAuthorizationStatus: 0 notDetermined, 1 restricted, 2 denied, 3 authorized.
+        let status: isize = unsafe {
+            msg_send![class!(AVCaptureDevice), authorizationStatusForMediaType: AVMediaTypeAudio]
+        };
+        status == 1 || status == 2
     }
 
     pub(super) fn open_privacy_settings(pane: &str) -> Result<(), String> {
@@ -66,5 +91,9 @@ mod imp {
 
     pub(super) fn open_privacy_settings(_pane: &str) -> Result<(), String> {
         Ok(())
+    }
+
+    pub(super) fn microphone_blocked() -> bool {
+        false
     }
 }
