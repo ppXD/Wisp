@@ -35,6 +35,7 @@
   let systemAudioId = $state("");
   let micOffId = $state("");
   let screenAuthorized = $state(true);
+  let micBlocked = $state(false);
   let permissionBusy = $state(false);
   let unlisten: UnlistenFn | undefined;
 
@@ -44,6 +45,8 @@
   const needsScreenRecording = $derived(
     !!systemAudioId && systemDevice === systemAudioId && !screenAuthorized,
   );
+  // Microphone is on unless explicitly set to Off; warn only when access is actually blocked.
+  const needsMicPermission = $derived(micDevice !== micOffId && micBlocked);
 
   function fmtTime(ms: number): string {
     const total = Math.floor(ms / 1000);
@@ -78,6 +81,16 @@
   async function checkPermissions() {
     try {
       screenAuthorized = await invoke<boolean>("screen_recording_authorized");
+      micBlocked = await invoke<boolean>("microphone_blocked");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function openMicSettings() {
+    try {
+      // A denied mic can't be re-prompted by macOS — System Settings is the only way to re-enable.
+      await invoke("open_privacy_settings", { pane: "microphone" });
     } catch (e) {
       error = String(e);
     }
@@ -198,6 +211,19 @@
       <button class="btn primary" onclick={grantScreenRecording} disabled={permissionBusy}>
         {permissionBusy ? "Requesting…" : "Grant access"}
       </button>
+    </div>
+  {/if}
+
+  {#if needsMicPermission}
+    <div class="permission">
+      <div class="permission-body">
+        <div class="permission-title">Microphone access is off</div>
+        <p class="permission-sub">
+          Wisp needs the microphone to transcribe your voice. Enable it in System Settings, or set
+          Microphone to Off under Advanced to capture meeting audio only.
+        </p>
+      </div>
+      <button class="btn primary" onclick={openMicSettings}>Open settings</button>
     </div>
   {/if}
 

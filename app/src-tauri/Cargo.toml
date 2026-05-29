@@ -29,3 +29,7 @@ wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa" }
 wisp-screencapture = { path = "../../crates/wisp-screencapture" }
 wisp-aec = { path = "../../crates/wisp-aec" }
+
+# Querying microphone authorization status (AVFoundation) for the permission prompt.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
