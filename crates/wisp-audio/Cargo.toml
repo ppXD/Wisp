@@ -11,10 +11,26 @@ repository.workspace = true
 wisp-core = { path = "../wisp-core" }
 hound = "3"
 cpal = { version = "0.15", optional = true }
+symphonia = { version = "0.5", optional = true, default-features = false, features = [
+    "mp3",
+    "aac",
+    "alac",
+    "flac",
+    "vorbis",
+    "pcm",
+    "adpcm",
+    "isomp4",
+    "ogg",
+    "wav",
+    "mkv",
+] }
 
 [features]
 # Microphone capture via cpal (pulls a platform audio backend; Linux needs libasound2-dev).
 mic = ["dep:cpal"]
+# Decode audio/video files (mp3, m4a/aac, flac, ogg, wav, and the audio of mp4/mov/webm) via
+# symphonia — pure Rust, no ffmpeg.
+file = ["dep:symphonia"]
 
 [dev-dependencies]
 tempfile = "3"
