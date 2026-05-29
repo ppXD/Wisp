@@ -3,6 +3,7 @@
   import "@fontsource-variable/geist-mono";
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+  import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { onDestroy, onMount } from "svelte";
   import { slide } from "svelte/transition";
 
@@ -291,11 +292,87 @@
     }
   });
 
+  // ── File mode ────────────────────────────────────────────────────────────
+  let fileSegments = $state<Segment[]>([]);
+  let fileName = $state("");
+  let fileTotalMs = $state(0);
+  let fileTranscribing = $state(false);
+  let dragOver = $state(false);
+  let fileListeners: UnlistenFn[] = [];
+  let dropUnlisten: UnlistenFn | undefined;
+
+  const filePct = $derived(
+    fileTotalMs > 0 && fileSegments.length
+      ? Math.min(100, Math.round((fileSegments[fileSegments.length - 1].endMs / fileTotalMs) * 100))
+      : 0,
+  );
+
+  async function transcribeFile(path: string) {
+    if (fileTranscribing) return;
+    if (!canStart) {
+      error = "Download a model in the Live tab first.";
+      return;
+    }
+    error = "";
+    fileSegments = [];
+    fileName = path.split(/[\\/]/).pop() ?? path;
+    fileTranscribing = true;
+    try {
+      await invoke("transcribe_file", { path });
+    } catch (e) {
+      error = String(e);
+      fileTranscribing = false;
+    }
+  }
+
+  function resetFile() {
+    fileSegments = [];
+    fileName = "";
+    fileTotalMs = 0;
+  }
+
+  let fileListenersReady = false;
+  async function ensureFileListeners() {
+    if (fileListenersReady) return;
+    fileListenersReady = true;
+    fileListeners.push(
+      await listen<{ name: string; totalMs: number }>("file://meta", (e) => {
+        fileName = e.payload.name;
+        fileTotalMs = e.payload.totalMs;
+      }),
+    );
+    fileListeners.push(
+      await listen<Segment>("file://segment", (e) => {
+        fileSegments = [...fileSegments, e.payload];
+      }),
+    );
+    fileListeners.push(
+      await listen("file://done", () => {
+        fileTranscribing = false;
+      }),
+    );
+    // Window-level drag-and-drop (Tauri core webview event) — only act on it in File mode.
+    dropUnlisten = await getCurrentWebview().onDragDropEvent((event) => {
+      if (mode !== "file") return;
+      const p = event.payload;
+      if (p.type === "enter" || p.type === "over") {
+        dragOver = true;
+      } else if (p.type === "leave") {
+        dragOver = false;
+      } else if (p.type === "drop") {
+        dragOver = false;
+        const path = p.paths[0];
+        if (path) transcribeFile(path);
+      }
+    });
+  }
+
   onMount(() => {
     refreshModels();
     refreshDevices();
     checkPermissions();
     ensureProgressListener();
+    ensureFileListeners();
     syncRunning();
     // Re-check when the window regains focus, so granting in System Settings clears the banner.
     const onFocus = () => checkPermissions();
@@ -305,6 +382,8 @@
   onDestroy(() => {
     unlisten?.();
     progressUnlisten?.();
+    fileListeners.forEach((u) => u());
+    dropUnlisten?.();
   });
 </script>
 
@@ -481,12 +560,49 @@
       </details>
     {/if}
   {:else if mode === "file"}
-    <section class="box box-center">
-      <div class="placeholder-title">Transcribe a file</div>
-      <p class="placeholder-sub">
-        Drop in an audio or video file and Wisp transcribes it with your local model, then lets you
-        export the text (TXT / SRT / VTT). Coming next.
-      </p>
+    <section class="box">
+      {#if fileTranscribing || fileSegments.length}
+        <div class="box-head">
+          <span class="active-model">{fileName || "File"}</span>
+          <span class="status" class:live={fileTranscribing}>
+            <span class="status-dot"></span>{fileTranscribing ? `transcribing · ${filePct}%` : "done"}
+          </span>
+        </div>
+        {#if fileTranscribing}
+          <div class="box-aux">
+            <div class="dl-bar">
+              <div class="dl-track"><div class="dl-fill" style="width:{filePct}%"></div></div>
+            </div>
+          </div>
+        {/if}
+        <ul class="feed">
+          {#each fileSegments as seg (seg.id)}
+            <li>
+              <span class="meta"><span class="time">{fmtTime(seg.startMs)}</span></span>
+              <span class="text">{seg.text}</span>
+            </li>
+          {:else}
+            <li class="empty">Decoding…</li>
+          {/each}
+        </ul>
+        <div class="box-foot">
+          <button class="btn ghost" onclick={resetFile} disabled={fileTranscribing}>
+            Transcribe another
+          </button>
+        </div>
+      {:else}
+        <div class="dropzone" class:over={dragOver}>
+          <div class="dropzone-title">Drop an audio or video file</div>
+          <p class="dropzone-sub">
+            {#if canStart}
+              mp3, m4a, wav, flac, mp4, mov… transcribed locally with
+              <strong>{activeModel?.name}</strong>.
+            {:else}
+              Download a model in the Live tab first.
+            {/if}
+          </p>
+        </div>
+      {/if}
     </section>
   {:else}
     <section class="box box-center">
@@ -1127,6 +1243,39 @@
   .feed li.empty em {
     color: var(--accent);
     font-style: normal;
+  }
+
+  .dropzone {
+    flex: 1;
+    margin: 14px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    border: 2px dashed var(--border-strong);
+    border-radius: 14px;
+    transition:
+      border-color 0.15s,
+      background 0.15s;
+  }
+
+  .dropzone.over {
+    border-color: var(--accent);
+    background: var(--surface-active);
+  }
+
+  .dropzone-title {
+    font-size: 17px;
+    font-weight: 600;
+  }
+
+  .dropzone-sub {
+    margin: 8px 22px 0;
+    max-width: 420px;
+    color: var(--muted);
+    font-size: 13.5px;
+    line-height: 1.6;
   }
 
   .placeholder-title {
