@@ -315,6 +315,15 @@ fn open_privacy_settings(pane: String) -> Result<(), String> {
     permissions::open_privacy_settings(&pane)
 }
 
+/// Relaunches the app. macOS applies a newly granted Screen Recording permission only to a fresh
+/// process, so after the user enables Wisp in System Settings the running app must restart to pick
+/// it up — otherwise `CGPreflightScreenCaptureAccess` keeps reporting "not authorized" and the
+/// permission banner never clears.
+#[tauri::command]
+fn restart_app(app: AppHandle) {
+    app.restart()
+}
+
 #[tauri::command]
 fn microphone_blocked() -> bool {
     permissions::microphone_blocked()
@@ -587,6 +596,7 @@ pub fn run() {
             screen_recording_authorized,
             request_screen_recording,
             open_privacy_settings,
+            restart_app,
             microphone_blocked,
             session_running,
             set_language,

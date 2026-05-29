@@ -130,6 +130,17 @@
     }
   }
 
+  // macOS applies a newly granted Screen Recording (and a re-enabled mic) permission only to a
+  // freshly launched process, so the running app must relaunch to pick it up — otherwise the
+  // permission banner never clears even though access is granted in System Settings.
+  async function restartApp() {
+    try {
+      await invoke("restart_app");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   async function applyDevices() {
     try {
       await invoke("set_devices", { mic: micDevice || null, system: systemDevice || null });
@@ -308,13 +319,17 @@
       <div class="permission-body">
         <div class="permission-title">Allow Screen Recording to capture system audio</div>
         <p class="permission-sub">
-          Wisp captures system audio through macOS Screen Recording. Grant access once — nothing
-          leaves your device.
+          Enable Wisp under Screen Recording in System Settings, then <strong>restart Wisp</strong>
+          to apply it — macOS only grants screen access to a freshly launched app. Nothing leaves
+          your device.
         </p>
       </div>
-      <button class="btn primary" onclick={grantScreenRecording} disabled={permissionBusy}>
-        {permissionBusy ? "Requesting…" : "Grant access"}
-      </button>
+      <div class="permission-actions">
+        <button class="btn primary" onclick={grantScreenRecording} disabled={permissionBusy}>
+          {permissionBusy ? "Requesting…" : "Grant access"}
+        </button>
+        <button class="btn ghost" onclick={restartApp}>Restart Wisp</button>
+      </div>
     </div>
   {/if}
 
@@ -323,11 +338,14 @@
       <div class="permission-body">
         <div class="permission-title">Microphone access is off</div>
         <p class="permission-sub">
-          Wisp needs the microphone to transcribe your voice. Enable it in System Settings, or set
-          Microphone to Off under Advanced to capture system audio only.
+          Enable Wisp under Microphone in System Settings, then <strong>restart Wisp</strong> to
+          apply it. Or set Microphone to Off under Advanced to capture system audio only.
         </p>
       </div>
-      <button class="btn primary" onclick={openMicSettings}>Open settings</button>
+      <div class="permission-actions">
+        <button class="btn primary" onclick={openMicSettings}>Open settings</button>
+        <button class="btn ghost" onclick={restartApp}>Restart Wisp</button>
+      </div>
     </div>
   {/if}
 
@@ -841,6 +859,13 @@
     color: var(--muted);
     font-size: 13px;
     line-height: 1.5;
+  }
+
+  .permission-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex-shrink: 0;
   }
 
   .permission .btn {
