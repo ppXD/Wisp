@@ -1,0 +1,3 @@
+[submodule "crates/wisp-engine-whisper-cpp/vendor/whisper.cpp"]
+	path = crates/wisp-engine-whisper-cpp/vendor/whisper.cpp
+	url = https://github.com/ggerganov/whisper.cpp
