@@ -31,6 +31,9 @@
   let segments = $state<Segment[]>([]);
   let models = $state<ModelInfo[]>([]);
   let downloading = $state<string | null>(null);
+  let downloadProgress = $state<{ downloaded: number; total: number } | null>(null);
+  let downloadFailed = $state<string | null>(null);
+  let progressUnlisten: UnlistenFn | undefined;
   let devices = $state<string[]>([]);
   let micDevice = $state("");
   let systemDevice = $state("");
@@ -142,17 +145,28 @@
 
   async function download(id: string) {
     error = "";
+    downloadFailed = null;
     downloading = id;
+    const m = models.find((x) => x.id === id);
+    downloadProgress = { downloaded: 0, total: m?.sizeBytes ?? 0 };
     try {
       await invoke("download_model", { id });
       await refreshModels();
       await selectModel(id); // a freshly downloaded model becomes the active one
     } catch (e) {
+      downloadFailed = id;
       error = String(e);
     } finally {
       downloading = null;
+      downloadProgress = null;
     }
   }
+
+  const downloadPct = $derived(
+    downloadProgress && downloadProgress.total > 0
+      ? Math.min(100, Math.round((downloadProgress.downloaded / downloadProgress.total) * 100))
+      : 0,
+  );
 
   async function selectModel(id: string) {
     try {
@@ -168,6 +182,18 @@
     unlisten = await listen<Segment>("transcript://segment", (event) => {
       segments = [...segments, event.payload];
     });
+  }
+
+  async function ensureProgressListener() {
+    if (progressUnlisten) return;
+    progressUnlisten = await listen<{ id: string; downloaded: number; total: number }>(
+      "download://progress",
+      (event) => {
+        if (event.payload.id === downloading) {
+          downloadProgress = { downloaded: event.payload.downloaded, total: event.payload.total };
+        }
+      },
+    );
   }
 
   // Reflect the backend's real session state. The frontend can reload (e.g. dev HMR) while a
@@ -237,13 +263,17 @@
     refreshModels();
     refreshDevices();
     checkPermissions();
+    ensureProgressListener();
     syncRunning();
     // Re-check when the window regains focus, so granting in System Settings clears the banner.
     const onFocus = () => checkPermissions();
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   });
-  onDestroy(() => unlisten?.());
+  onDestroy(() => {
+    unlisten?.();
+    progressUnlisten?.();
+  });
 </script>
 
 <main class="app">
@@ -301,7 +331,7 @@
     <div class="section-label">Model</div>
     {#if models.length}
       <div class="select-wrap">
-        <select class="model-select" value={chosenId} onchange={(e) => pickModel(e.currentTarget.value)} disabled={running}>
+        <select class="model-select" value={chosenId} onchange={(e) => pickModel(e.currentTarget.value)} disabled={running || downloading !== null}>
           {#each models as m (m.id)}
             <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
           {/each}
@@ -317,7 +347,18 @@
           {#if chosenModel.description}<p class="model-desc">{chosenModel.description}</p>{/if}
           <div class="model-action">
             {#if downloading === chosenModel.id}
-              <button class="btn" disabled>Downloading…</button>
+              <div class="dl">
+                <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
+                <span class="dl-label">
+                  Downloading… {downloadPct}% · {fmtSize(downloadProgress?.downloaded ?? 0)} / {fmtSize(
+                    downloadProgress?.total ?? chosenModel.sizeBytes,
+                  )}
+                </span>
+              </div>
+            {:else if downloadFailed === chosenModel.id}
+              <button class="btn outline" onclick={() => download(chosenModel.id)}>
+                Retry download · {fmtSize(chosenModel.sizeBytes)}
+              </button>
             {:else if !chosenModel.installed}
               <button class="btn outline" onclick={() => download(chosenModel.id)} disabled={downloading !== null}>
                 Download · {fmtSize(chosenModel.sizeBytes)}
@@ -591,6 +632,33 @@
 
   .model-action {
     margin-top: 12px;
+  }
+
+  .dl {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+  }
+
+  .dl-track {
+    height: 7px;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+
+  .dl-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.2s ease;
+  }
+
+  .dl-label {
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
   }
 
   .active-model {
