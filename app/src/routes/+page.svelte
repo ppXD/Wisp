@@ -298,21 +298,15 @@
 </script>
 
 <main class="app">
-  <header class="topbar">
-    <div class="brand">
-      <span class="dot"></span>
-      <h1>Wisp</h1>
-    </div>
-    <nav class="modes">
-      <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
-      <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
-      <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
-    </nav>
-  </header>
+  <nav class="tabs">
+    <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
+    <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
+    <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
+  </nav>
 
   {#if mode === "live"}
-    <section class="controls">
-      <div class="control-main">
+    <section class="box">
+      <div class="box-head">
         {#if running}
           <span class="active-model"><span class="live-pip"></span>{activeModel?.name ?? "Model"}</span>
         {:else if models.length}
@@ -328,21 +322,80 @@
               {/each}
             </select>
           </div>
-          {#if chosenModel && !chosenModel.installed && downloading !== chosenModel.id}
-            <button
-              class="btn outline sm"
-              onclick={() => download(chosenModel.id)}
-              disabled={downloading !== null}
-            >
-              {downloadFailed === chosenModel.id ? "Retry" : "Download"} · {fmtSize(chosenModel.sizeBytes)}
-            </button>
-          {/if}
         {:else}
           <span class="muted">Loading models…</span>
         {/if}
+        <span class="status" class:live={running}>
+          <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "no model"}
+        </span>
       </div>
 
-      <div class="control-actions">
+      {#if !running && (needsScreenRecording || needsMicPermission || error || (chosenModel && !chosenModel.installed))}
+        <div class="box-aux">
+          {#if chosenModel && !chosenModel.installed}
+            {#if downloading === chosenModel.id && downloadProgress}
+              <div class="dl-bar">
+                <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
+                <span class="dl-label">
+                  {downloadPct}% · {fmtSize(downloadProgress.downloaded)} / {fmtSize(downloadProgress.total)}
+                </span>
+              </div>
+            {:else}
+              <button class="btn outline" onclick={() => download(chosenModel.id)} disabled={downloading !== null}>
+                {downloadFailed === chosenModel.id ? "Retry download" : "Download"} · {fmtSize(chosenModel.sizeBytes)}
+              </button>
+            {/if}
+          {/if}
+
+          {#if needsScreenRecording}
+            <div class="notice">
+              <span class="notice-text">
+                <strong>Screen Recording is off.</strong> Enable Wisp under Screen Recording in System
+                Settings, then restart to apply it.
+              </span>
+              <span class="notice-actions">
+                <button class="btn outline sm" onclick={grantScreenRecording} disabled={permissionBusy}>
+                  {permissionBusy ? "…" : "Grant"}
+                </button>
+                <button class="btn ghost sm" onclick={restartApp}>Restart</button>
+              </span>
+            </div>
+          {/if}
+
+          {#if needsMicPermission}
+            <div class="notice">
+              <span class="notice-text">
+                <strong>Microphone is off.</strong> Enable Wisp under Microphone in System Settings,
+                then restart — or set Microphone to Off in Advanced.
+              </span>
+              <span class="notice-actions">
+                <button class="btn outline sm" onclick={openMicSettings}>Settings</button>
+                <button class="btn ghost sm" onclick={restartApp}>Restart</button>
+              </span>
+            </div>
+          {/if}
+
+          {#if error}
+            <div class="notice error">{error}</div>
+          {/if}
+        </div>
+      {/if}
+
+      <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
+        {#each segments as seg (seg.source + "-" + seg.id)}
+          <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
+            <span class="meta">
+              <span class="time">{fmtTime(seg.startMs)}</span>
+              <span class="who">{sourceLabel(seg.source)}</span>
+            </span>
+            <span class="text">{seg.text}</span>
+          </li>
+        {:else}
+          <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
+        {/each}
+      </ul>
+
+      <div class="box-foot">
         {#if running}
           <button class="btn primary stop" onclick={stop}>Stop</button>
         {:else}
@@ -351,56 +404,12 @@
           </button>
         {/if}
         <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
-        <span class="status" class:live={running}>
-          <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "select a model"}
-        </span>
       </div>
     </section>
 
-    {#if downloading !== null && downloadProgress}
-      <div class="dl-bar" transition:slide={{ duration: 150 }}>
-        <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
-        <span class="dl-label">
-          {downloadPct}% · {fmtSize(downloadProgress.downloaded)} / {fmtSize(downloadProgress.total)}
-        </span>
-      </div>
-    {/if}
-
-    {#if !running && needsScreenRecording}
-      <div class="notice" transition:slide={{ duration: 150 }}>
-        <span class="notice-text">
-          <strong>Screen Recording is off.</strong> Enable Wisp under Screen Recording in System
-          Settings, then restart to apply it.
-        </span>
-        <span class="notice-actions">
-          <button class="btn outline sm" onclick={grantScreenRecording} disabled={permissionBusy}>
-            {permissionBusy ? "…" : "Grant"}
-          </button>
-          <button class="btn ghost sm" onclick={restartApp}>Restart</button>
-        </span>
-      </div>
-    {/if}
-
-    {#if !running && needsMicPermission}
-      <div class="notice" transition:slide={{ duration: 150 }}>
-        <span class="notice-text">
-          <strong>Microphone is off.</strong> Enable Wisp under Microphone in System Settings, then
-          restart — or set Microphone to Off in Advanced.
-        </span>
-        <span class="notice-actions">
-          <button class="btn outline sm" onclick={openMicSettings}>Settings</button>
-          <button class="btn ghost sm" onclick={restartApp}>Restart</button>
-        </span>
-      </div>
-    {/if}
-
-    {#if error}
-      <div class="notice error" transition:slide={{ duration: 150 }}>{error}</div>
-    {/if}
-
     {#if !running}
-      <details class="advanced">
-        <summary>Advanced · language & audio</summary>
+      <details class="advanced-panel">
+        <summary>Advanced · language &amp; audio</summary>
         <div class="advanced-grid">
           <label class="source-row">
             <span class="source-name">Language</span>
@@ -437,22 +446,8 @@
         </div>
       </details>
     {/if}
-
-    <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
-      {#each segments as seg (seg.source + "-" + seg.id)}
-        <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
-          <span class="meta">
-            <span class="time">{fmtTime(seg.startMs)}</span>
-            <span class="who">{sourceLabel(seg.source)}</span>
-          </span>
-          <span class="text">{seg.text}</span>
-        </li>
-      {:else}
-        <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
-      {/each}
-    </ul>
   {:else if mode === "file"}
-    <section class="placeholder">
+    <section class="box box-center">
       <div class="placeholder-title">Transcribe a file</div>
       <p class="placeholder-sub">
         Drop in an audio or video file and Wisp transcribes it with your local model, then lets you
@@ -460,7 +455,7 @@
       </p>
     </section>
   {:else}
-    <section class="placeholder">
+    <section class="box box-center">
       <div class="placeholder-title">Cloud realtime</div>
       <p class="placeholder-sub">
         Stream live audio to a realtime transcription API (e.g. OpenAI Realtime) for the highest
@@ -496,11 +491,11 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* Strict viewport-height column: only the feed scrolls, so chrome never pushes the page. */
+  /* Strict viewport-height column: tabs on top, one content box filling the rest. */
   .app {
-    max-width: 780px;
+    max-width: 820px;
     margin: 0 auto;
-    padding: 18px 22px 20px;
+    padding: 16px 20px 18px;
     height: 100dvh;
     box-sizing: border-box;
     display: flex;
@@ -508,96 +503,95 @@
     gap: 12px;
   }
 
-  .topbar {
+  /* Top row — the three tabs. */
+  .tabs {
     flex: none;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 16px;
-  }
-
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 9px;
-  }
-
-  .dot {
-    width: 10px;
-    height: 10px;
-    border-radius: 50%;
-    background: var(--accent);
-  }
-
-  .brand h1 {
-    margin: 0;
-    font-size: 22px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
-  }
-
-  .modes {
     display: inline-flex;
-    gap: 2px;
+    align-self: center;
+    gap: 3px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 10px;
+    border-radius: 11px;
     padding: 3px;
   }
 
-  .modes button {
+  .tabs button {
     font-family: inherit;
-    font-size: 13px;
+    font-size: 13.5px;
     font-weight: 500;
     color: var(--muted);
     background: transparent;
     border: none;
-    border-radius: 7px;
-    padding: 5px 13px;
+    border-radius: 8px;
+    padding: 6px 22px;
     cursor: pointer;
     transition:
       background 0.15s,
       color 0.15s;
   }
 
-  .modes button:hover {
+  .tabs button:hover {
     color: var(--text);
   }
 
-  .modes button.active {
+  .tabs button.active {
     background: var(--accent);
     color: #fff;
   }
 
-  /* Compact control bar — wraps gracefully on narrow windows. */
-  .controls {
+  /* The content box — fills all remaining height; only its feed scrolls. */
+  .box {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+  }
+
+  .box-center {
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 28px;
+  }
+
+  .box-head {
     flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    gap: 10px 14px;
-    flex-wrap: wrap;
+    gap: 12px;
+    padding: 11px 14px;
+    border-bottom: 1px solid var(--border);
   }
 
-  .control-main {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex: 1 1 260px;
-    min-width: 0;
-  }
-
-  .control-actions {
-    display: flex;
-    align-items: center;
-    gap: 9px;
+  .box-aux {
     flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .box-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 11px 14px;
+    border-top: 1px solid var(--border);
   }
 
   .select-wrap {
     position: relative;
-    flex: 0 1 340px;
+    flex: 1 1 auto;
     min-width: 0;
+    max-width: 460px;
   }
 
   .select-wrap::after {
@@ -622,7 +616,7 @@
     font-size: 13.5px;
     font-weight: 500;
     color: var(--text);
-    background: var(--surface);
+    background: var(--bg);
     border: 1px solid var(--border-strong);
     border-radius: 9px;
     padding: 8px 30px 8px 12px;
@@ -651,10 +645,6 @@
     font-size: 14px;
     font-weight: 500;
     color: var(--text);
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 8px 13px;
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
@@ -674,7 +664,7 @@
     font-size: 14px;
     font-weight: 500;
     border-radius: 9px;
-    padding: 8px 16px;
+    padding: 8px 18px;
     border: 1px solid transparent;
     cursor: pointer;
     background: var(--surface);
@@ -738,6 +728,7 @@
     font-size: 13px;
     color: var(--muted);
     white-space: nowrap;
+    flex: none;
   }
 
   .status-dot {
@@ -761,9 +752,7 @@
     font-size: 13px;
   }
 
-  /* Slim download bar. */
   .dl-bar {
-    flex: none;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -792,9 +781,7 @@
     font-variant-numeric: tabular-nums;
   }
 
-  /* Slim, single-row notices — compact enough that they never break the layout. */
   .notice {
-    flex: none;
     display: flex;
     align-items: center;
     gap: 12px;
@@ -830,12 +817,12 @@
     display: block;
   }
 
-  /* Advanced — collapsed by default, so it costs almost no vertical space. */
-  .advanced {
+  /* Advanced panel sits below the content box; collapsed by default so it costs ~no height. */
+  .advanced-panel {
     flex: none;
   }
 
-  .advanced > summary {
+  .advanced-panel > summary {
     cursor: pointer;
     list-style: none;
     display: inline-flex;
@@ -855,11 +842,11 @@
       background 0.15s;
   }
 
-  .advanced > summary::-webkit-details-marker {
+  .advanced-panel > summary::-webkit-details-marker {
     display: none;
   }
 
-  .advanced > summary::before {
+  .advanced-panel > summary::before {
     content: "";
     width: 6px;
     height: 6px;
@@ -869,21 +856,24 @@
     transition: transform 0.15s;
   }
 
-  .advanced[open] > summary::before {
+  .advanced-panel[open] > summary::before {
     transform: rotate(45deg);
   }
 
-  .advanced > summary:hover {
+  .advanced-panel > summary:hover {
     color: var(--text);
     border-color: var(--border-strong);
     background: var(--surface-active);
+  }
+
+  .advanced-panel[open] > summary {
+    margin-bottom: 10px;
   }
 
   .advanced-grid {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    margin-top: 10px;
     padding: 14px;
     background: var(--surface);
     border: 1px solid var(--border);
@@ -931,17 +921,16 @@
     margin: 2px 0 0;
   }
 
-  /* The feed — the dominant area and the only scroller. */
+  /* The feed — the only scroller, fills the box. */
   .feed {
     flex: 1 1 auto;
     min-height: 0;
     overflow-y: auto;
     list-style: none;
     margin: 0;
-    padding: 2px 6px 2px 0;
+    padding: 4px 6px;
     display: flex;
     flex-direction: column;
-    gap: 8px;
     scroll-behavior: smooth;
   }
 
@@ -949,16 +938,14 @@
     display: flex;
     align-items: baseline;
     gap: 16px;
-    padding: 13px 18px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
+    padding: 12px 12px;
+    border-bottom: 1px solid var(--border);
     font-size: 16px;
-    line-height: 1.5;
+    line-height: 1.55;
   }
 
   .feed li:last-child {
-    border-color: var(--border-strong);
+    border-bottom: none;
   }
 
   .feed li.partial {
@@ -971,7 +958,7 @@
     display: flex;
     flex-direction: column;
     gap: 2px;
-    width: 54px;
+    width: 52px;
     padding-top: 1px;
   }
 
@@ -1001,31 +988,16 @@
 
   .feed li.empty {
     display: block;
+    margin: auto 0;
+    border-bottom: none;
     color: var(--muted);
-    background: transparent;
-    border: 1px dashed var(--border-strong);
     text-align: center;
-    padding: 40px 16px;
     font-size: 14px;
   }
 
   .feed li.empty em {
     color: var(--accent);
     font-style: normal;
-  }
-
-  /* File / Cloud placeholders fill the same space, centered. */
-  .placeholder {
-    flex: 1 1 auto;
-    min-height: 0;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    border: 1px dashed var(--border-strong);
-    border-radius: 14px;
-    padding: 28px;
   }
 
   .placeholder-title {
