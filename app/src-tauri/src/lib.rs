@@ -22,7 +22,7 @@ use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_sherpa::{SenseVoiceEngine, WhisperEngine};
 use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
-use wisp_pipeline::{EnergyVad, Pipeline, Session, DEFAULT_SILENCE_HANGOVER};
+use wisp_pipeline::{EnergyVad, Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER};
 use wisp_screencapture::ScreenCaptureSource;
 
 mod permissions;
@@ -177,15 +177,12 @@ fn spawn_session(
     language: &str,
 ) -> WispResult<Session> {
     let engine = build_engine(descriptor, dir, language)?;
-    let pipeline = Pipeline::new(
-        engine,
-        match kind {
-            AudioSourceKind::Microphone => Box::new(EnergyVad::new(MIC_VAD_THRESHOLD)),
-            _ => Box::new(EnergyVad::default()),
-        },
-        kind,
-        DEFAULT_SILENCE_HANGOVER,
-    );
+    let vad: Box<dyn Vad> = match kind {
+        AudioSourceKind::Microphone => Box::new(EnergyVad::new(MIC_VAD_THRESHOLD)),
+        _ => Box::new(EnergyVad::default()),
+    };
+    let segmenter = Segmenter::new(vad, DEFAULT_SILENCE_HANGOVER);
+    let transcriber = Transcriber::new(engine, kind);
 
     let emitter = app.clone();
     let sink: wisp_pipeline::EventSink = Box::new(move |event| {
@@ -200,7 +197,9 @@ fn spawn_session(
         }
     });
 
-    Ok(Session::spawn(pipeline, source, sink))
+    // Decoupled live session: capture+segmentation runs real-time; the (slow) engine runs on its
+    // own thread draining complete utterances, so it never stalls capture or drops mid-sentence.
+    Ok(Session::spawn_live(segmenter, transcriber, source, sink))
 }
 
 #[tauri::command]

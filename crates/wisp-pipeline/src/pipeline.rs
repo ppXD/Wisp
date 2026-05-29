@@ -3,12 +3,14 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
-use wisp_audio::{to_mono_16k, TARGET_SAMPLE_RATE};
+use wisp_audio::to_mono_16k;
 use wisp_core::audio::{AudioFrame, AudioSource};
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::Result;
-use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent};
+use wisp_core::transcript::{AudioSourceKind, TranscriptEvent};
 
+use crate::segmenter::{Segmenter, Utterance};
+use crate::transcriber::Transcriber;
 use crate::vad::Vad;
 
 /// Default trailing silence that ends an utterance. Generous enough that a brief mid-sentence
@@ -17,19 +19,17 @@ pub const DEFAULT_SILENCE_HANGOVER: Duration = Duration::from_millis(700);
 
 /// Drives audio through VAD segmentation and an ASR engine, emitting transcript events.
 ///
-/// Frames are converted to 16 kHz mono, accumulated while the [`Vad`] reports speech, and once
-/// trailing silence reaches the hangover the buffered utterance is transcribed and emitted as
-/// `Final` segments. Emitting in-progress `Partial` segments is a planned refinement; the event
-/// model already supports it.
+/// Frames are converted to 16 kHz mono, accumulated by a [`Segmenter`] while it reports speech,
+/// and once trailing silence reaches the hangover the buffered utterance is transcribed by a
+/// [`Transcriber`] and emitted as `Final` segments.
+///
+/// This is the *synchronous* composition — segmentation and (slow) transcription share one thread,
+/// which is fine for finite sources (e.g. a file) where latency doesn't matter. Live sources use
+/// [`Session::spawn_live`](crate::session::Session::spawn_live) instead, which runs the same two
+/// pieces on separate threads so a slow engine never stalls capture.
 pub struct Pipeline {
-    engine: Box<dyn AsrEngine>,
-    vad: Box<dyn Vad>,
-    source_kind: AudioSourceKind,
-    silence_hangover: Duration,
-    next_id: u64,
-    utterance: Vec<f32>,
-    utterance_start: Option<Duration>,
-    silence_accum: Duration,
+    segmenter: Segmenter,
+    transcriber: Transcriber,
 }
 
 impl Pipeline {
@@ -42,14 +42,8 @@ impl Pipeline {
         silence_hangover: Duration,
     ) -> Self {
         Self {
-            engine,
-            vad,
-            source_kind,
-            silence_hangover,
-            next_id: 0,
-            utterance: Vec::new(),
-            utterance_start: None,
-            silence_accum: Duration::ZERO,
+            segmenter: Segmenter::new(vad, silence_hangover),
+            transcriber: Transcriber::new(engine, source_kind),
         }
     }
 
@@ -85,56 +79,26 @@ impl Pipeline {
         sink: &mut dyn FnMut(TranscriptEvent),
     ) -> Result<()> {
         let mono = to_mono_16k(frame);
-
-        if self.vad.is_speech(&mono) {
-            if self.utterance.is_empty() {
-                self.utterance_start = Some(frame.timestamp);
-            }
-            self.utterance.extend_from_slice(&mono);
-            self.silence_accum = Duration::ZERO;
-            return Ok(());
+        if let Some(utterance) = self
+            .segmenter
+            .push(&mono, frame.timestamp, frame.duration())
+        {
+            self.emit(&utterance, sink)?;
         }
-
-        if !self.utterance.is_empty() {
-            self.silence_accum += frame.duration();
-            if self.silence_accum >= self.silence_hangover {
-                self.finalize(sink)?;
-            }
-        }
-
         Ok(())
     }
 
     fn finalize(&mut self, sink: &mut dyn FnMut(TranscriptEvent)) -> Result<()> {
-        if self.utterance.is_empty() {
-            return Ok(());
+        if let Some(utterance) = self.segmenter.flush() {
+            self.emit(&utterance, sink)?;
         }
+        Ok(())
+    }
 
-        let start = self.utterance_start.unwrap_or(Duration::ZERO);
-        let result = self
-            .engine
-            .transcribe(&self.utterance, TARGET_SAMPLE_RATE)?;
-
-        for mut segment in result.segments {
-            // Skip empty / punctuation-only transcriptions — these are ASR hallucinations on
-            // near-silence (e.g. "." or "?"), not speech worth showing.
-            if !segment.text.chars().any(char::is_alphanumeric) {
-                continue;
-            }
-
-            segment.id = self.next_id;
-            segment.source = self.source_kind;
-            segment.status = SegmentStatus::Final;
-            segment.start += start;
-            segment.end += start;
-            self.next_id += 1;
+    fn emit(&mut self, utterance: &Utterance, sink: &mut dyn FnMut(TranscriptEvent)) -> Result<()> {
+        for segment in self.transcriber.transcribe(utterance)? {
             sink(TranscriptEvent::Segment(segment));
         }
-
-        self.engine.reset();
-        self.utterance.clear();
-        self.utterance_start = None;
-        self.silence_accum = Duration::ZERO;
         Ok(())
     }
 }
@@ -143,9 +107,10 @@ impl Pipeline {
 mod tests {
     use super::*;
     use crate::vad::EnergyVad;
+    use wisp_audio::TARGET_SAMPLE_RATE;
     use wisp_core::engine::TranscriptionResult;
     use wisp_core::testing::{MockAsrEngine, MockAudioSource};
-    use wisp_core::transcript::TranscriptSegment;
+    use wisp_core::transcript::{SegmentStatus, TranscriptSegment};
 
     /// 0.1 s of 16 kHz mono at amplitude `amp`, stamped at `t_ms`.
     fn frame(amp: f32, t_ms: u64) -> AudioFrame {
