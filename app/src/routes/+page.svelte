@@ -298,178 +298,161 @@
 </script>
 
 <main class="app">
-  <header>
-    <div class="topbar">
-      <div class="brand">
-        <span class="dot"></span>
-        <h1>Wisp</h1>
-      </div>
-      <nav class="modes">
-        <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
-        <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
-        <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
-      </nav>
+  <header class="topbar">
+    <div class="brand">
+      <span class="dot"></span>
+      <h1>Wisp</h1>
     </div>
-    <p class="tagline">On-device transcription — live, files, or cloud</p>
+    <nav class="modes">
+      <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
+      <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
+      <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
+    </nav>
   </header>
 
   {#if mode === "live"}
-  {#if needsScreenRecording}
-    <div class="permission">
-      <div class="permission-body">
-        <div class="permission-title">Allow Screen Recording to capture system audio</div>
-        <p class="permission-sub">
-          Enable Wisp under Screen Recording in System Settings, then <strong>restart Wisp</strong>
-          to apply it — macOS only grants screen access to a freshly launched app. Nothing leaves
-          your device.
-        </p>
-      </div>
-      <div class="permission-actions">
-        <button class="btn primary" onclick={grantScreenRecording} disabled={permissionBusy}>
-          {permissionBusy ? "Requesting…" : "Grant access"}
-        </button>
-        <button class="btn ghost" onclick={restartApp}>Restart Wisp</button>
-      </div>
-    </div>
-  {/if}
-
-  {#if needsMicPermission}
-    <div class="permission">
-      <div class="permission-body">
-        <div class="permission-title">Microphone access is off</div>
-        <p class="permission-sub">
-          Enable Wisp under Microphone in System Settings, then <strong>restart Wisp</strong> to
-          apply it. Or set Microphone to Off under Advanced to capture system audio only.
-        </p>
-      </div>
-      <div class="permission-actions">
-        <button class="btn primary" onclick={openMicSettings}>Open settings</button>
-        <button class="btn ghost" onclick={restartApp}>Restart Wisp</button>
-      </div>
-    </div>
-  {/if}
-
-  {#if running}
-    <div class="active-model" transition:slide={{ duration: 200 }}>
-      <span class="live-pip"></span>
-      <span class="active-model-name">{activeModel?.name ?? "Model"}</span>
-    </div>
-  {:else}
-  <section class="card models" transition:slide={{ duration: 200 }}>
-    <div class="section-label">Model</div>
-    {#if models.length}
-      <div class="select-wrap">
-        <select class="model-select" value={chosenId} onchange={(e) => pickModel(e.currentTarget.value)} disabled={running || downloading !== null}>
-          {#each models as m (m.id)}
-            <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
-          {/each}
-        </select>
-      </div>
-
-      {#if chosenModel}
-        <div class="model-detail">
-          <div class="model-tags">
-            <span class="tag">{fmtSize(chosenModel.sizeBytes)}</span>
-            {#each chosenModel.languages as l (l)}<span class="tag">{l}</span>{/each}
+    <section class="controls">
+      <div class="control-main">
+        {#if running}
+          <span class="active-model"><span class="live-pip"></span>{activeModel?.name ?? "Model"}</span>
+        {:else if models.length}
+          <div class="select-wrap">
+            <select
+              class="model-select"
+              value={chosenId}
+              onchange={(e) => pickModel(e.currentTarget.value)}
+              disabled={downloading !== null}
+            >
+              {#each models as m (m.id)}
+                <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
+              {/each}
+            </select>
           </div>
-          {#if chosenModel.description}<p class="model-desc">{chosenModel.description}</p>{/if}
-          <div class="model-action">
-            {#if downloading === chosenModel.id}
-              <div class="dl">
-                <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
-                <span class="dl-label">
-                  Downloading… {downloadPct}% · {fmtSize(downloadProgress?.downloaded ?? 0)} / {fmtSize(
-                    downloadProgress?.total ?? chosenModel.sizeBytes,
-                  )}
-                </span>
-              </div>
-            {:else if downloadFailed === chosenModel.id}
-              <button class="btn outline" onclick={() => download(chosenModel.id)}>
-                Retry download · {fmtSize(chosenModel.sizeBytes)}
-              </button>
-            {:else if !chosenModel.installed}
-              <button class="btn outline" onclick={() => download(chosenModel.id)} disabled={downloading !== null}>
-                Download · {fmtSize(chosenModel.sizeBytes)}
-              </button>
-            {:else if chosenModel.active}
-              <span class="pill">Active</span>
-            {:else}
-              <button class="btn ghost" onclick={() => selectModel(chosenModel.id)}>Use this model</button>
-            {/if}
-          </div>
-        </div>
-      {/if}
-    {:else}
-      <p class="hint">Loading models…</p>
-    {/if}
-  </section>
+          {#if chosenModel && !chosenModel.installed && downloading !== chosenModel.id}
+            <button
+              class="btn outline sm"
+              onclick={() => download(chosenModel.id)}
+              disabled={downloading !== null}
+            >
+              {downloadFailed === chosenModel.id ? "Retry" : "Download"} · {fmtSize(chosenModel.sizeBytes)}
+            </button>
+          {/if}
+        {:else}
+          <span class="muted">Loading models…</span>
+        {/if}
+      </div>
 
-  <details class="advanced" transition:slide={{ duration: 200 }}>
-    <summary>Advanced · language & audio</summary>
-    <section class="card sources">
-    <label class="source-row">
-      <span class="source-name">Language</span>
-      <select bind:value={language} onchange={applyLanguage} disabled={running}>
-        <option value="">Auto-detect</option>
-        <option value="yue">Cantonese</option>
-        <option value="zh">Chinese (Mandarin)</option>
-        <option value="en">English</option>
-        <option value="ja">Japanese</option>
-        <option value="ko">Korean</option>
-      </select>
-    </label>
-    <label class="source-row">
-      <span class="source-name">Microphone <em>(you)</em></span>
-      <select bind:value={micDevice} onchange={applyDevices} disabled={running}>
-        <option value="">System default</option>
-        {#if micOffId}<option value={micOffId}>Off</option>{/if}
-        {#each devices as d (d)}<option value={d}>{d}</option>{/each}
-      </select>
-    </label>
-    <label class="source-row">
-      <span class="source-name">System audio <em>(everything playing)</em></span>
-      <select bind:value={systemDevice} onchange={applyDevices} disabled={running}>
-        <option value="">Off</option>
-        {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
-        {#each devices as d (d)}<option value={d}>{d}</option>{/each}
-      </select>
-    </label>
-    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>, with <strong>echo cancellation</strong> so audio your mic re-hears from the speakers is removed automatically. Want system audio only? Set Microphone to Off. System audio asks for Screen Recording permission once. Set a specific <strong>Language</strong> if auto-detect gets it wrong — recommended for Cantonese.</p>
+      <div class="control-actions">
+        {#if running}
+          <button class="btn primary stop" onclick={stop}>Stop</button>
+        {:else}
+          <button class="btn primary" onclick={start} disabled={!canStart || downloading !== null}>
+            {downloading !== null ? "Downloading…" : "Start"}
+          </button>
+        {/if}
+        <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
+        <span class="status" class:live={running}>
+          <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "select a model"}
+        </span>
+      </div>
     </section>
-  </details>
-  {/if}
 
-  <div class="controls">
-    {#if running}
-      <button class="btn primary stop" onclick={stop}>Stop</button>
-    {:else}
-      <button class="btn primary" onclick={start} disabled={!canStart || downloading !== null}>
-        {downloading !== null ? "Downloading…" : "Start listening"}
-      </button>
+    {#if downloading !== null && downloadProgress}
+      <div class="dl-bar" transition:slide={{ duration: 150 }}>
+        <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
+        <span class="dl-label">
+          {downloadPct}% · {fmtSize(downloadProgress.downloaded)} / {fmtSize(downloadProgress.total)}
+        </span>
+      </div>
     {/if}
-    <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
-    <span class="status" class:live={running}>
-      <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "select a model"}
-    </span>
-  </div>
 
-  {#if error}
-    <p class="error">{error}</p>
-  {/if}
+    {#if !running && needsScreenRecording}
+      <div class="notice" transition:slide={{ duration: 150 }}>
+        <span class="notice-text">
+          <strong>Screen Recording is off.</strong> Enable Wisp under Screen Recording in System
+          Settings, then restart to apply it.
+        </span>
+        <span class="notice-actions">
+          <button class="btn outline sm" onclick={grantScreenRecording} disabled={permissionBusy}>
+            {permissionBusy ? "…" : "Grant"}
+          </button>
+          <button class="btn ghost sm" onclick={restartApp}>Restart</button>
+        </span>
+      </div>
+    {/if}
 
-  <ul class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
-    {#each segments as seg (seg.source + "-" + seg.id)}
-      <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
-        <span class="time">{fmtTime(seg.startMs)}</span>
-        <span class="who">{sourceLabel(seg.source)}</span>
-        <span class="text">{seg.text}</span>
-      </li>
-    {:else}
-      <li class="empty">Pick a model, press <em>Start listening</em>, and speak.</li>
-    {/each}
-  </ul>
+    {#if !running && needsMicPermission}
+      <div class="notice" transition:slide={{ duration: 150 }}>
+        <span class="notice-text">
+          <strong>Microphone is off.</strong> Enable Wisp under Microphone in System Settings, then
+          restart — or set Microphone to Off in Advanced.
+        </span>
+        <span class="notice-actions">
+          <button class="btn outline sm" onclick={openMicSettings}>Settings</button>
+          <button class="btn ghost sm" onclick={restartApp}>Restart</button>
+        </span>
+      </div>
+    {/if}
+
+    {#if error}
+      <div class="notice error" transition:slide={{ duration: 150 }}>{error}</div>
+    {/if}
+
+    {#if !running}
+      <details class="advanced">
+        <summary>Advanced · language & audio</summary>
+        <div class="advanced-grid">
+          <label class="source-row">
+            <span class="source-name">Language</span>
+            <select bind:value={language} onchange={applyLanguage}>
+              <option value="">Auto-detect</option>
+              <option value="yue">Cantonese</option>
+              <option value="zh">Chinese (Mandarin)</option>
+              <option value="en">English</option>
+              <option value="ja">Japanese</option>
+              <option value="ko">Korean</option>
+            </select>
+          </label>
+          <label class="source-row">
+            <span class="source-name">Microphone <em>(you)</em></span>
+            <select bind:value={micDevice} onchange={applyDevices}>
+              <option value="">System default</option>
+              {#if micOffId}<option value={micOffId}>Off</option>{/if}
+              {#each devices as d (d)}<option value={d}>{d}</option>{/each}
+            </select>
+          </label>
+          <label class="source-row">
+            <span class="source-name">System audio <em>(everything playing)</em></span>
+            <select bind:value={systemDevice} onchange={applyDevices}>
+              <option value="">Off</option>
+              {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
+              {#each devices as d (d)}<option value={d}>{d}</option>{/each}
+            </select>
+          </label>
+          <p class="hint">
+            By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>
+            with <strong>echo cancellation</strong>. Want system audio only? Set Microphone to Off.
+            Set a <strong>Language</strong> if auto-detect gets it wrong — recommended for Cantonese.
+          </p>
+        </div>
+      </details>
+    {/if}
+
+    <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
+      {#each segments as seg (seg.source + "-" + seg.id)}
+        <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
+          <span class="meta">
+            <span class="time">{fmtTime(seg.startMs)}</span>
+            <span class="who">{sourceLabel(seg.source)}</span>
+          </span>
+          <span class="text">{seg.text}</span>
+        </li>
+      {:else}
+        <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
+      {/each}
+    </ul>
   {:else if mode === "file"}
-    <section class="placeholder card">
+    <section class="placeholder">
       <div class="placeholder-title">Transcribe a file</div>
       <p class="placeholder-sub">
         Drop in an audio or video file and Wisp transcribes it with your local model, then lets you
@@ -477,7 +460,7 @@
       </p>
     </section>
   {:else}
-    <section class="placeholder card">
+    <section class="placeholder">
       <div class="placeholder-title">Cloud realtime</div>
       <p class="placeholder-sub">
         Stream live audio to a realtime transcription API (e.g. OpenAI Realtime) for the highest
@@ -513,17 +496,20 @@
     text-rendering: optimizeLegibility;
   }
 
+  /* Strict viewport-height column: only the feed scrolls, so chrome never pushes the page. */
   .app {
-    max-width: 720px;
+    max-width: 780px;
     margin: 0 auto;
-    padding: 32px 28px 24px;
-    height: 100vh;
+    padding: 18px 22px 20px;
+    height: 100dvh;
     box-sizing: border-box;
     display: flex;
     flex-direction: column;
+    gap: 12px;
   }
 
   .topbar {
+    flex: none;
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -533,7 +519,21 @@
   .brand {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 9px;
+  }
+
+  .dot {
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: var(--accent);
+  }
+
+  .brand h1 {
+    margin: 0;
+    font-size: 22px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
 
   .modes {
@@ -553,9 +553,11 @@
     background: transparent;
     border: none;
     border-radius: 7px;
-    padding: 6px 14px;
+    padding: 5px 13px;
     cursor: pointer;
-    transition: background 0.15s, color 0.15s;
+    transition:
+      background 0.15s,
+      color 0.15s;
   }
 
   .modes button:hover {
@@ -567,54 +569,41 @@
     color: #fff;
   }
 
-  .dot {
-    width: 11px;
-    height: 11px;
-    border-radius: 50%;
-    background: var(--accent);
+  /* Compact control bar — wraps gracefully on narrow windows. */
+  .controls {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px 14px;
+    flex-wrap: wrap;
   }
 
-  header h1 {
-    margin: 0;
-    font-size: 26px;
-    font-weight: 600;
-    letter-spacing: -0.02em;
+  .control-main {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    flex: 1 1 260px;
+    min-width: 0;
   }
 
-  .tagline {
-    margin: 8px 0 28px;
-    color: var(--muted);
-    font-size: 14px;
-  }
-
-  .card {
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 14px;
-    padding: 16px;
-  }
-
-  .section-label {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    color: var(--muted);
-    margin-bottom: 12px;
-  }
-
-  .models {
-    margin-bottom: 24px;
+  .control-actions {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    flex: none;
   }
 
   .select-wrap {
     position: relative;
+    flex: 0 1 340px;
+    min-width: 0;
   }
 
   .select-wrap::after {
     content: "";
     position: absolute;
-    right: 15px;
+    right: 13px;
     top: 50%;
     width: 7px;
     height: 7px;
@@ -630,94 +619,45 @@
     appearance: none;
     -webkit-appearance: none;
     font-family: inherit;
-    font-size: 14px;
+    font-size: 13.5px;
     font-weight: 500;
     color: var(--text);
-    background: var(--bg);
+    background: var(--surface);
     border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    padding: 11px 34px 11px 13px;
+    border-radius: 9px;
+    padding: 8px 30px 8px 12px;
     cursor: pointer;
-    transition: border-color 0.15s, background 0.15s;
+    text-overflow: ellipsis;
+    transition:
+      border-color 0.15s,
+      background 0.15s;
   }
 
-  .model-select:hover {
+  .model-select:hover:not(:disabled) {
     border-color: var(--muted);
     background: var(--surface-active);
   }
 
   .model-select:disabled {
-    opacity: 0.5;
+    opacity: 0.55;
     cursor: default;
-  }
-
-  .model-tags {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 6px;
-    margin-top: 12px;
-  }
-
-  .tag {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--muted);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 3px 8px;
-  }
-
-  .model-desc {
-    margin: 10px 0 0;
-    font-size: 13px;
-    line-height: 1.55;
-    color: var(--muted);
-  }
-
-  .model-action {
-    margin-top: 12px;
-  }
-
-  .dl {
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-  }
-
-  .dl-track {
-    height: 7px;
-    background: var(--border);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-
-  .dl-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 999px;
-    transition: width 0.2s ease;
-  }
-
-  .dl-label {
-    font-family: var(--font-mono);
-    font-size: 12px;
-    color: var(--muted);
-    font-variant-numeric: tabular-nums;
   }
 
   .active-model {
     display: inline-flex;
     align-items: center;
     gap: 9px;
+    min-width: 0;
     font-size: 14px;
     font-weight: 500;
     color: var(--text);
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 10px;
-    padding: 9px 14px;
-    margin-bottom: 4px;
+    border-radius: 9px;
+    padding: 8px 13px;
+    overflow: hidden;
+    white-space: nowrap;
+    text-overflow: ellipsis;
   }
 
   .live-pip {
@@ -729,24 +669,27 @@
     flex-shrink: 0;
   }
 
-  .controls {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    margin: 24px 0 18px;
-  }
-
   .btn {
     font-family: inherit;
     font-size: 14px;
     font-weight: 500;
-    border-radius: 10px;
-    padding: 9px 18px;
+    border-radius: 9px;
+    padding: 8px 16px;
     border: 1px solid transparent;
     cursor: pointer;
     background: var(--surface);
     color: var(--text);
-    transition: background 0.15s, border-color 0.15s, opacity 0.15s;
+    white-space: nowrap;
+    transition:
+      background 0.15s,
+      border-color 0.15s,
+      opacity 0.15s;
+  }
+
+  .btn.sm {
+    font-size: 12.5px;
+    padding: 6px 11px;
+    border-radius: 8px;
   }
 
   .btn:disabled {
@@ -788,24 +731,13 @@
     border-color: var(--muted);
   }
 
-  .pill {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--accent);
-    padding: 6px 12px;
-    border: 1px solid var(--accent);
-    border-radius: 999px;
-  }
-
   .status {
-    margin-left: auto;
     display: inline-flex;
     align-items: center;
     gap: 7px;
     font-size: 13px;
     color: var(--muted);
+    white-space: nowrap;
   }
 
   .status-dot {
@@ -824,152 +756,138 @@
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
   }
 
-  .error {
-    background: color-mix(in srgb, var(--stop) 9%, var(--bg));
-    border: 1px solid color-mix(in srgb, var(--stop) 35%, var(--border));
-    color: var(--stop);
-    padding: 11px 14px;
-    border-radius: 10px;
+  .muted {
+    color: var(--muted);
     font-size: 13px;
   }
 
-  .permission {
+  /* Slim download bar. */
+  .dl-bar {
+    flex: none;
     display: flex;
     align-items: center;
-    gap: 16px;
-    background: var(--surface-active);
-    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
-    border-radius: 14px;
-    padding: 15px 18px;
-    margin-bottom: 24px;
+    gap: 12px;
   }
 
-  .permission-body {
+  .dl-track {
     flex: 1;
-    min-width: 0;
+    height: 6px;
+    background: var(--border);
+    border-radius: 999px;
+    overflow: hidden;
   }
 
-  .permission-title {
-    font-size: 14.5px;
-    font-weight: 600;
+  .dl-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.2s ease;
   }
 
-  .permission-sub {
-    margin: 4px 0 0;
-    color: var(--muted);
-    font-size: 13px;
-    line-height: 1.5;
-  }
-
-  .permission-actions {
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    flex-shrink: 0;
-  }
-
-  .permission .btn {
-    flex-shrink: 0;
-  }
-
-  .hint {
-    color: var(--muted);
-    font-size: 13px;
-    margin: 4px 0;
-  }
-
-  .transcript {
-    list-style: none;
-    margin: 8px 0 0;
-    padding: 0 4px 0 0;
-    display: flex;
-    flex-direction: column;
-    gap: 7px;
-    flex: 1;
-    min-height: 0;
-    overflow-y: auto;
-    scroll-behavior: smooth;
-  }
-
-  .transcript li {
-    display: grid;
-    grid-template-columns: 48px 104px 1fr;
-    gap: 14px;
-    align-items: baseline;
-    padding: 13px 16px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 11px;
-    font-size: 15.5px;
-    line-height: 1.5;
-  }
-
-  .transcript li.partial {
-    opacity: 0.55;
-    font-style: italic;
-  }
-
-  .transcript li.empty {
-    display: block;
-    color: var(--muted);
-    background: transparent;
-    border: 1px dashed var(--border-strong);
-    text-align: center;
-    padding: 44px 16px;
-    font-size: 14px;
-  }
-
-  .transcript li.empty em {
-    color: var(--accent);
-    font-style: normal;
-  }
-
-  .time {
+  .dl-label {
+    flex: none;
     font-family: var(--font-mono);
+    font-size: 12px;
     color: var(--muted);
-    font-size: 12.5px;
     font-variant-numeric: tabular-nums;
   }
 
-  .who {
-    font-family: var(--font-mono);
-    color: var(--accent);
-    font-size: 12px;
-    text-transform: lowercase;
+  /* Slim, single-row notices — compact enough that they never break the layout. */
+  .notice {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    background: var(--surface-active);
+    border: 1px solid color-mix(in srgb, var(--accent) 30%, var(--border));
+    border-radius: 10px;
+    padding: 9px 12px;
+    font-size: 13px;
+    line-height: 1.45;
   }
 
-  .text {
+  .notice-text {
+    flex: 1;
     min-width: 0;
-    overflow-wrap: anywhere;
+    color: var(--muted);
   }
 
-  .transcript li.system .who {
-    color: #5b7fb0;
-  }
-
-  .placeholder {
-    text-align: center;
-    padding: 52px 28px;
-  }
-
-  .placeholder-title {
-    font-size: 17px;
+  .notice-text strong {
+    color: var(--text);
     font-weight: 600;
   }
 
-  .placeholder-sub {
-    margin: 10px auto 0;
-    max-width: 430px;
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.6;
+  .notice-actions {
+    flex: none;
+    display: flex;
+    gap: 7px;
   }
 
-  .sources {
-    margin-bottom: 24px;
+  .notice.error {
+    background: color-mix(in srgb, var(--stop) 9%, var(--bg));
+    border-color: color-mix(in srgb, var(--stop) 35%, var(--border));
+    color: var(--stop);
+    display: block;
+  }
+
+  /* Advanced — collapsed by default, so it costs almost no vertical space. */
+  .advanced {
+    flex: none;
+  }
+
+  .advanced > summary {
+    cursor: pointer;
+    list-style: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 7px 12px;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background 0.15s;
+  }
+
+  .advanced > summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .advanced > summary::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform 0.15s;
+  }
+
+  .advanced[open] > summary::before {
+    transform: rotate(45deg);
+  }
+
+  .advanced > summary:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+    background: var(--surface-active);
+  }
+
+  .advanced-grid {
     display: flex;
     flex-direction: column;
     gap: 10px;
+    margin-top: 10px;
+    padding: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
   }
 
   .source-row {
@@ -1006,59 +924,120 @@
     cursor: pointer;
   }
 
-  .source-row select:disabled {
-    opacity: 0.5;
-  }
-  .advanced {
-    margin-bottom: 24px;
+  .hint {
+    color: var(--muted);
+    font-size: 12.5px;
+    line-height: 1.55;
+    margin: 2px 0 0;
   }
 
-  .advanced > summary {
-    cursor: pointer;
+  /* The feed — the dominant area and the only scroller. */
+  .feed {
+    flex: 1 1 auto;
+    min-height: 0;
+    overflow-y: auto;
     list-style: none;
-    display: inline-flex;
-    align-items: center;
+    margin: 0;
+    padding: 2px 6px 2px 0;
+    display: flex;
+    flex-direction: column;
     gap: 8px;
-    width: fit-content;
-    font-size: 13px;
-    font-weight: 500;
-    color: var(--muted);
+    scroll-behavior: smooth;
+  }
+
+  .feed li {
+    display: flex;
+    align-items: baseline;
+    gap: 16px;
+    padding: 13px 18px;
     background: var(--surface);
     border: 1px solid var(--border);
-    border-radius: 9px;
-    padding: 8px 13px;
-    transition: color 0.15s, border-color 0.15s, background 0.15s;
+    border-radius: 12px;
+    font-size: 16px;
+    line-height: 1.5;
   }
 
-  .advanced > summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .advanced > summary::before {
-    content: "";
-    width: 6px;
-    height: 6px;
-    border-right: 1.5px solid currentColor;
-    border-bottom: 1.5px solid currentColor;
-    transform: rotate(-45deg);
-    transition: transform 0.15s;
-  }
-
-  .advanced[open] > summary::before {
-    transform: rotate(45deg);
-  }
-
-  .advanced > summary:hover {
-    color: var(--text);
+  .feed li:last-child {
     border-color: var(--border-strong);
-    background: var(--surface-active);
   }
 
-  .advanced[open] > summary {
-    margin-bottom: 12px;
+  .feed li.partial {
+    opacity: 0.55;
+    font-style: italic;
   }
 
-  .advanced .sources {
-    margin-bottom: 0;
+  .meta {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+    width: 54px;
+    padding-top: 1px;
+  }
+
+  .time {
+    font-family: var(--font-mono);
+    color: var(--muted);
+    font-size: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .who {
+    font-family: var(--font-mono);
+    color: var(--accent);
+    font-size: 11px;
+    text-transform: lowercase;
+  }
+
+  .feed li.system .who {
+    color: #5b7fb0;
+  }
+
+  .text {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+  }
+
+  .feed li.empty {
+    display: block;
+    color: var(--muted);
+    background: transparent;
+    border: 1px dashed var(--border-strong);
+    text-align: center;
+    padding: 40px 16px;
+    font-size: 14px;
+  }
+
+  .feed li.empty em {
+    color: var(--accent);
+    font-style: normal;
+  }
+
+  /* File / Cloud placeholders fill the same space, centered. */
+  .placeholder {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    border: 1px dashed var(--border-strong);
+    border-radius: 14px;
+    padding: 28px;
+  }
+
+  .placeholder-title {
+    font-size: 18px;
+    font-weight: 600;
+  }
+
+  .placeholder-sub {
+    margin: 10px auto 0;
+    max-width: 420px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
   }
 </style>
