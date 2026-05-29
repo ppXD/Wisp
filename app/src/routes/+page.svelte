@@ -216,7 +216,7 @@
   {/if}
 
   <ul class="transcript">
-    {#each segments as seg (seg.id)}
+    {#each segments as seg (seg.source + "-" + seg.id)}
       <li class:partial={!seg.isFinal} class:meeting={seg.source === "System"}>
         <span class="time">{fmtTime(seg.startMs)}</span>
         <span class="who">{sourceLabel(seg.source)}</span>
