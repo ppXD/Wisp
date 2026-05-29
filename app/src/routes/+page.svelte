@@ -404,7 +404,9 @@
     {#if running}
       <button class="btn primary stop" onclick={stop}>Stop</button>
     {:else}
-      <button class="btn primary" onclick={start} disabled={!canStart}>Start listening</button>
+      <button class="btn primary" onclick={start} disabled={!canStart || downloading !== null}>
+        {downloading !== null ? "Downloading…" : "Start listening"}
+      </button>
     {/if}
     <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
     <span class="status" class:live={running}>
@@ -416,7 +418,7 @@
     <p class="error">{error}</p>
   {/if}
 
-  <ul class="transcript" class:tall={running} bind:this={transcriptEl} onscroll={onTranscriptScroll}>
+  <ul class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
     {#each segments as seg (seg.source + "-" + seg.id)}
       <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
         <span class="time">{fmtTime(seg.startMs)}</span>
@@ -475,7 +477,11 @@
   .app {
     max-width: 720px;
     margin: 0 auto;
-    padding: 40px 28px 56px;
+    padding: 32px 28px 24px;
+    height: 100vh;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
   }
 
   .topbar {
@@ -833,14 +839,10 @@
     display: flex;
     flex-direction: column;
     gap: 7px;
-    max-height: 56vh;
+    flex: 1;
+    min-height: 0;
     overflow-y: auto;
     scroll-behavior: smooth;
-    transition: max-height 0.2s;
-  }
-
-  .transcript.tall {
-    max-height: 72vh;
   }
 
   .transcript li {
@@ -888,6 +890,11 @@
     color: var(--accent);
     font-size: 12px;
     text-transform: lowercase;
+  }
+
+  .text {
+    min-width: 0;
+    overflow-wrap: anywhere;
   }
 
   .transcript li.system .who {
