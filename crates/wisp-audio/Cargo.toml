@@ -18,6 +18,7 @@ mic = ["dep:cpal"]
 
 [dev-dependencies]
 tempfile = "3"
+wisp-core = { path = "../wisp-core", features = ["testing"] }
 
 [lints]
 workspace = true
