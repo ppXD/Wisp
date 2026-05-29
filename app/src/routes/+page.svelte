@@ -296,17 +296,13 @@
   // ── File mode ────────────────────────────────────────────────────────────
   let fileSegments = $state<Segment[]>([]);
   let fileName = $state("");
-  let fileTotalMs = $state(0);
   let fileTranscribing = $state(false);
+  // Timeline (timestamps) is opt-in: off = most accurate plain text; on = timed for SRT/VTT.
+  let fileTimestamps = $state(false);
+  let fileHasTimestamps = $state(false);
   let dragOver = $state(false);
   let fileListeners: UnlistenFn[] = [];
   let dropUnlisten: UnlistenFn | undefined;
-
-  const filePct = $derived(
-    fileTotalMs > 0 && fileSegments.length
-      ? Math.min(100, Math.round((fileSegments[fileSegments.length - 1].endMs / fileTotalMs) * 100))
-      : 0,
-  );
 
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
@@ -317,9 +313,10 @@
     error = "";
     fileSegments = [];
     fileName = path.split(/[\\/]/).pop() ?? path;
+    fileHasTimestamps = fileTimestamps;
     fileTranscribing = true;
     try {
-      await invoke("transcribe_file", { path });
+      await invoke("transcribe_file", { path, timestamps: fileTimestamps });
     } catch (e) {
       error = String(e);
       fileTranscribing = false;
@@ -329,7 +326,6 @@
   function resetFile() {
     fileSegments = [];
     fileName = "";
-    fileTotalMs = 0;
   }
 
   async function pickFile() {
@@ -375,7 +371,6 @@
     fileListeners.push(
       await listen<{ name: string; totalMs: number }>("file://meta", (e) => {
         fileName = e.payload.name;
-        fileTotalMs = e.payload.totalMs;
       }),
     );
     fileListeners.push(
@@ -608,24 +603,19 @@
         <div class="box-head">
           <span class="active-model">{fileName || "File"}</span>
           <span class="status" class:live={fileTranscribing}>
-            <span class="status-dot"></span>{fileTranscribing ? `transcribing · ${filePct}%` : "done"}
+            <span class="status-dot"></span>{fileTranscribing ? "transcribing…" : "done"}
           </span>
         </div>
-        {#if fileTranscribing}
-          <div class="box-aux">
-            <div class="dl-bar">
-              <div class="dl-track"><div class="dl-fill" style="width:{filePct}%"></div></div>
-            </div>
-          </div>
-        {/if}
         <ul class="feed">
           {#each fileSegments as seg (seg.id)}
             <li>
-              <span class="meta"><span class="time">{fmtTime(seg.startMs)}</span></span>
+              {#if fileHasTimestamps}
+                <span class="meta"><span class="time">{fmtTime(seg.startMs)}</span></span>
+              {/if}
               <span class="text">{seg.text}</span>
             </li>
           {:else}
-            <li class="empty">Decoding…</li>
+            <li class="empty">Transcribing… large files take a little while.</li>
           {/each}
         </ul>
         <div class="box-foot">
@@ -633,8 +623,10 @@
             {#if fileSegments.length && !fileTranscribing}
               <span class="export-label">Export</span>
               <button class="btn outline sm" onclick={() => exportFile("txt")}>TXT</button>
-              <button class="btn outline sm" onclick={() => exportFile("srt")}>SRT</button>
-              <button class="btn outline sm" onclick={() => exportFile("vtt")}>VTT</button>
+              {#if fileHasTimestamps}
+                <button class="btn outline sm" onclick={() => exportFile("srt")}>SRT</button>
+                <button class="btn outline sm" onclick={() => exportFile("vtt")}>VTT</button>
+              {/if}
             {/if}
           </div>
           <button class="btn ghost" onclick={resetFile} disabled={fileTranscribing}>
@@ -644,6 +636,10 @@
       {:else}
         <div class="box-head">
           {@render modelPicker()}
+          <label class="toggle">
+            <input type="checkbox" bind:checked={fileTimestamps} />
+            <span>Timeline</span>
+          </label>
         </div>
         <button
           class="dropzone"
@@ -656,7 +652,9 @@
           <p class="dropzone-sub">
             {#if canStart}
               mp3, m4a, wav, flac, mp4, mov… transcribed locally with
-              <strong>{activeModel?.name}</strong>.
+              <strong>{activeModel?.name}</strong>{fileTimestamps
+                ? ", with subtitle timing"
+                : " — plain text, most accurate"}.
             {:else}
               Download a model in the Live tab first.
             {/if}
@@ -1345,6 +1343,22 @@
     font-size: 13px;
     color: var(--muted);
     margin-right: 2px;
+  }
+
+  .toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    flex: none;
+    font-size: 13px;
+    color: var(--muted);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .toggle input {
+    accent-color: var(--accent);
+    cursor: pointer;
   }
 
   .dropzone-title {

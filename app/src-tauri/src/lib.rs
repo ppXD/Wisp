@@ -13,7 +13,10 @@ use serde::Serialize;
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
 use wisp_aec::WebrtcEchoCanceller;
-use wisp_audio::{tee, ChannelSource, EchoCancellingSource, MediaSource, MicSource, Tee};
+use wisp_audio::{
+    tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource, MicSource, Tee,
+    TARGET_SAMPLE_RATE,
+};
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::engine::AsrEngine;
@@ -615,14 +618,17 @@ fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     }
 }
 
-/// Transcribes an audio/video file at `path` with the active model. Emits the clip duration up
-/// front (`file://meta`), each segment as it's produced (`file://segment`), and a completion signal
-/// (`file://done`); the segments are retained for export.
+/// Transcribes an audio/video file at `path` with the active model, prioritising accuracy: the
+/// whole clip is decoded and run through the engine's native long-form path (no VAD chunking).
+/// `timestamps` requests per-segment timings (for SRT/VTT); pass `false` for the most accurate
+/// plain-text result. Emits `file://meta`, then the segments and `file://done`; segments are
+/// retained for export.
 #[tauri::command]
 async fn transcribe_file(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
+    timestamps: bool,
 ) -> Result<(), String> {
     let active = state
         .active
@@ -649,7 +655,7 @@ async fn transcribe_file(
     let task_app = app.clone();
     let segments =
         tauri::async_runtime::spawn_blocking(move || -> WispResult<Vec<TranscriptSegment>> {
-            let source = MediaSource::open(Path::new(&path))?;
+            let mut source = MediaSource::open(Path::new(&path))?;
             let _ = task_app.emit(
                 FILE_META_EVENT,
                 FileMetaDto {
@@ -658,32 +664,25 @@ async fn transcribe_file(
                 },
             );
 
-            let engine = build_engine(&descriptor, &dir, &language)?;
-            let transcriber = Transcriber::new(engine, AudioSourceKind::File);
-            let segmenter = build_segmenter(&task_app, AudioSourceKind::File);
+            // Decode the whole clip to 16 kHz mono — no VAD chunking, so the engine sees the full
+            // audio with cross-window context (much more accurate than per-utterance chunks).
+            let mut audio = Vec::new();
+            while let Some(frame) = source.next_frame()? {
+                audio.extend_from_slice(&to_mono_16k(&frame));
+            }
 
-            // Collect segments (for export) while also streaming them to the UI.
-            let collected = Arc::new(Mutex::new(Vec::new()));
-            let sink_collected = Arc::clone(&collected);
-            let emitter = task_app.clone();
-            let sink: wisp_pipeline::EventSink = Box::new(move |event| {
-                if let TranscriptEvent::Segment(segment) = event {
-                    let _ = emitter.emit(FILE_SEGMENT_EVENT, SegmentDto::from(&segment));
-                    if let Ok(mut c) = sink_collected.lock() {
-                        c.push(segment);
-                    }
-                }
-            });
+            let mut engine = build_engine(&descriptor, &dir, &language)?;
+            let result = engine.transcribe_clip(&audio, TARGET_SAMPLE_RATE, timestamps)?;
 
-            // A file is a finite source: the decoupled session runs it to completion, then joins.
-            Session::spawn_live(segmenter, transcriber, Box::new(source), sink).join()?;
-
-            let out = std::mem::take(
-                &mut *collected
-                    .lock()
-                    .map_err(|_| WispError::Engine("collector lock poisoned".to_owned()))?,
-            );
-            Ok(out)
+            let mut collected = Vec::with_capacity(result.segments.len());
+            for (i, mut segment) in result.segments.into_iter().enumerate() {
+                segment.id = i as u64;
+                segment.source = AudioSourceKind::File;
+                segment.status = SegmentStatus::Final;
+                let _ = task_app.emit(FILE_SEGMENT_EVENT, SegmentDto::from(&segment));
+                collected.push(segment);
+            }
+            Ok(collected)
         })
         .await
         .map_err(|e| e.to_string())?

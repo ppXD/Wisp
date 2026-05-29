@@ -128,6 +128,69 @@ impl AsrEngine for WhisperCppEngine {
         Ok(to_result(text.trim(), audio))
     }
 
+    fn transcribe_clip(
+        &mut self,
+        audio: &[f32],
+        _sample_rate: u32,
+        with_timestamps: bool,
+    ) -> Result<TranscriptionResult> {
+        // Native long-form: feed the whole clip and carry context across whisper's 30 s windows for
+        // far better consistency than per-utterance chunks. Timestamps are opt-in, so a text-only
+        // export gets the decoder's full attention (most accurate).
+        // SAFETY: live context; valid slice; `self.language` outlives the call.
+        let segments = unsafe {
+            let mut params = sys::whisper_full_default_params(
+                sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY,
+            );
+            params.n_threads = self.n_threads;
+            params.language = self.language.as_ptr();
+            params.translate = false;
+            params.no_context = false; // carry context across windows
+            params.no_timestamps = !with_timestamps;
+            params.print_progress = false;
+            params.print_realtime = false;
+            params.print_special = false;
+            params.print_timestamps = false;
+            params.single_segment = false;
+
+            let rc = sys::whisper_full(self.ctx, params, audio.as_ptr(), audio.len() as c_int);
+            if rc != 0 {
+                return Err(WispError::Engine(format!(
+                    "whisper.cpp: whisper_full failed (rc={rc})"
+                )));
+            }
+
+            let mut segments = Vec::new();
+            for i in 0..sys::whisper_full_n_segments(self.ctx) {
+                let ptr = sys::whisper_full_get_segment_text(self.ctx, i);
+                if ptr.is_null() {
+                    continue;
+                }
+                let text = CStr::from_ptr(ptr).to_string_lossy().trim().to_owned();
+                if text.is_empty() {
+                    continue;
+                }
+                let (start, end) = if with_timestamps {
+                    // whisper.cpp reports segment times in centiseconds (10 ms units).
+                    let t0 = sys::whisper_full_get_segment_t0(self.ctx, i).max(0) as u64 * 10;
+                    let t1 = sys::whisper_full_get_segment_t1(self.ctx, i).max(0) as u64 * 10;
+                    (Duration::from_millis(t0), Duration::from_millis(t1))
+                } else {
+                    (Duration::ZERO, Duration::ZERO)
+                };
+                segments.push(TranscriptSegment::new(
+                    0,
+                    text.as_str(),
+                    start..end,
+                    AudioSourceKind::File,
+                ));
+            }
+            segments
+        };
+
+        Ok(TranscriptionResult { segments })
+    }
+
     fn reset(&mut self) {
         // `no_context = true` makes each `transcribe` independent — there is no carried state.
     }
