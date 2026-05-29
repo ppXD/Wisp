@@ -1,0 +1,16 @@
+[package]
+name = "wisp-engine-whisper-cpp"
+version = "0.0.0"
+description = "whisper.cpp (Metal) ASR engine for Wisp"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+
+[build-dependencies]
+cmake = "0.1"
+bindgen = "0.70"
+
+[dev-dependencies]
+hound = "3"
