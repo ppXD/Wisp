@@ -70,10 +70,16 @@ impl FsModelStore {
         verify_file(path, &file.sha256)
     }
 
-    fn fetch_file(&self, dir: &Path, file: &ModelFile) -> Result<()> {
+    fn fetch_file(
+        &self,
+        dir: &Path,
+        file: &ModelFile,
+        on_bytes: &mut dyn FnMut(u64),
+    ) -> Result<()> {
         let dest = dir.join(&file.name);
 
         if dest.is_file() && self.verify(&dest, file).is_ok() {
+            on_bytes(file.size_bytes); // already present — count it as done
             return Ok(());
         }
 
@@ -85,7 +91,8 @@ impl FsModelStore {
         }
 
         let part = dir.join(format!("{}.part", file.name));
-        self.downloader.download(&file.url, &part)?;
+        self.downloader
+            .download_with_progress(&file.url, &part, on_bytes)?;
 
         if let Err(e) = self.verify(&part, file) {
             let _ = fs::remove_file(&part);
@@ -94,6 +101,38 @@ impl FsModelStore {
 
         fs::rename(&part, &dest)?;
         Ok(())
+    }
+
+    /// Like [`ensure`](ModelStore::ensure) but reports download progress as `(downloaded, total)`
+    /// bytes across all of the model's files, so a caller can drive a progress bar.
+    pub fn ensure_with_progress(
+        &self,
+        id: &ModelId,
+        on_progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<PathBuf> {
+        let descriptor = self.descriptor(id)?;
+        let dir = self.model_dir(id);
+        let total = descriptor.total_size_bytes();
+
+        if self.is_complete(id) {
+            on_progress(total, total);
+            return Ok(dir);
+        }
+
+        fs::create_dir_all(&dir)?;
+
+        let mut done = 0u64;
+        for file in &descriptor.files {
+            self.fetch_file(&dir, file, &mut |file_bytes| {
+                on_progress((done + file_bytes).min(total), total);
+            })?;
+            done += file.size_bytes;
+            on_progress(done.min(total), total);
+        }
+
+        fs::write(dir.join(COMPLETE_MARKER), id.as_str())?;
+        on_progress(total, total);
+        Ok(dir)
     }
 }
 
@@ -112,21 +151,7 @@ impl ModelStore for FsModelStore {
     }
 
     fn ensure(&self, id: &ModelId) -> Result<PathBuf> {
-        let descriptor = self.descriptor(id)?;
-        let dir = self.model_dir(id);
-
-        if self.is_complete(id) {
-            return Ok(dir);
-        }
-
-        fs::create_dir_all(&dir)?;
-
-        for file in &descriptor.files {
-            self.fetch_file(&dir, file)?;
-        }
-
-        fs::write(dir.join(COMPLETE_MARKER), id.as_str())?;
-        Ok(dir)
+        self.ensure_with_progress(id, &mut |_, _| {})
     }
 
     fn remove(&self, id: &ModelId) -> Result<()> {
@@ -169,12 +194,24 @@ mod tests {
 
     impl FileDownloader for FakeDownloader {
         fn download(&self, url: &str, dest: &Path) -> Result<()> {
+            self.download_with_progress(url, dest, &mut |_| {})
+        }
+
+        fn download_with_progress(
+            &self,
+            url: &str,
+            dest: &Path,
+            on_bytes: &mut dyn FnMut(u64),
+        ) -> Result<()> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             let bytes = self
                 .files
                 .get(url)
                 .ok_or_else(|| WispError::Model(format!("no fake for {url}")))?;
             std::fs::write(dest, bytes)?;
+            // Report in two steps to exercise cumulative progress accounting.
+            on_bytes((bytes.len() / 2) as u64);
+            on_bytes(bytes.len() as u64);
             Ok(())
         }
     }
@@ -302,6 +339,60 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let store = FsModelStore::new(root.path(), vec![], Box::new(downloader));
         assert!(store.ensure(&ModelId("nope".into())).is_err());
+    }
+
+    #[test]
+    fn ensure_with_progress_reports_cumulative_bytes() {
+        let a = b"aaaaaaaa".to_vec(); // 8 bytes
+        let b = b"bbbb".to_vec(); // 4 bytes
+        let total = (a.len() + b.len()) as u64;
+
+        let mut files = HashMap::new();
+        files.insert("https://x/a".to_string(), a.clone());
+        files.insert("https://x/b".to_string(), b.clone());
+        let (downloader, _calls) = FakeDownloader::new(files);
+
+        let desc = ModelDescriptor {
+            id: ModelId("m".into()),
+            family: ModelFamily::SenseVoice,
+            quant: Quant::Q8,
+            display_name: "m".into(),
+            files: vec![
+                ModelFile {
+                    name: "a.onnx".into(),
+                    url: "https://x/a".into(),
+                    sha256: String::new(),
+                    size_bytes: a.len() as u64,
+                },
+                ModelFile {
+                    name: "b.onnx".into(),
+                    url: "https://x/b".into(),
+                    sha256: String::new(),
+                    size_bytes: b.len() as u64,
+                },
+            ],
+            languages: vec![],
+            description: String::new(),
+        };
+
+        let root = tempfile::tempdir().unwrap();
+        let store = FsModelStore::new(root.path(), vec![desc], Box::new(downloader));
+
+        let mut updates: Vec<(u64, u64)> = Vec::new();
+        store
+            .ensure_with_progress(&ModelId("m".into()), &mut |d, t| updates.push((d, t)))
+            .unwrap();
+
+        assert!(!updates.is_empty());
+        assert!(
+            updates.iter().all(|(_, t)| *t == total),
+            "total is constant"
+        );
+        assert!(
+            updates.windows(2).all(|w| w[0].0 <= w[1].0),
+            "downloaded is non-decreasing"
+        );
+        assert_eq!(updates.last().unwrap().0, total, "ends at 100%");
     }
 
     #[test]

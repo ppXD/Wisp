@@ -6,6 +6,7 @@
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
@@ -27,6 +28,9 @@ mod permissions;
 
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
+
+/// Event channel the UI listens on for model-download progress.
+const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
 
 /// Sentinel "device" id selecting one-click system-audio capture (ScreenCaptureKit, no setup).
 /// Must match the value used by the UI.
@@ -77,6 +81,15 @@ impl From<&TranscriptSegment> for SegmentDto {
             is_final: matches!(segment.status, SegmentStatus::Final),
         }
     }
+}
+
+/// Download progress for a model, streamed to the UI.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadProgressDto {
+    id: String,
+    downloaded: u64,
+    total: u64,
 }
 
 /// A catalog model with its install/active status, for the picker UI.
@@ -204,13 +217,33 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
 }
 
 #[tauri::command]
-async fn download_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
+async fn download_model(app: AppHandle, state: State<'_, AppState>, id: String) -> Result<(), String> {
     let store = Arc::clone(&state.store);
-    let model_id = ModelId(id);
-    tauri::async_runtime::spawn_blocking(move || store.ensure(&model_id))
-        .await
-        .map_err(|e| e.to_string())?
-        .map_err(|e| e.to_string())?;
+    let model_id = ModelId(id.clone());
+    let emitter = app.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // Throttle progress events to ~8/s; always send the final 100%.
+        let mut last: Option<Instant> = None;
+        let mut on_progress = |downloaded: u64, total: u64| {
+            let now = Instant::now();
+            let throttle_ok = match last {
+                Some(t) => now.duration_since(t) >= Duration::from_millis(120),
+                None => true,
+            };
+            if downloaded >= total || throttle_ok {
+                last = Some(now);
+                let _ = emitter.emit(
+                    DOWNLOAD_PROGRESS_EVENT,
+                    DownloadProgressDto { id: id.clone(), downloaded, total },
+                );
+            }
+        };
+        store.ensure_with_progress(&model_id, &mut on_progress)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
