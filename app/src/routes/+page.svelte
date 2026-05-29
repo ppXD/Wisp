@@ -4,6 +4,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWebview } from "@tauri-apps/api/webview";
+  import { open } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
   import { slide } from "svelte/transition";
 
@@ -331,6 +332,28 @@
     fileTotalMs = 0;
   }
 
+  async function pickFile() {
+    if (!canStart) {
+      error = "Download a model in the Live tab first.";
+      return;
+    }
+    try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        filters: [
+          {
+            name: "Audio / Video",
+            extensions: ["mp3", "m4a", "aac", "wav", "flac", "ogg", "opus", "mp4", "mov", "m4v", "webm", "mkv"],
+          },
+        ],
+      });
+      if (typeof path === "string") await transcribeFile(path);
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   let fileListenersReady = false;
   async function ensureFileListeners() {
     if (fileListenersReady) return;
@@ -394,49 +417,55 @@
     <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
   </nav>
 
+  {#snippet modelPicker()}
+    {#if models.length}
+      <div class="picker">
+        <button
+          class="picker-trigger"
+          class:open={pickerOpen}
+          onclick={() => (pickerOpen = !pickerOpen)}
+          disabled={downloading !== null}
+        >
+          <span class="picker-label">{chosenModel?.name ?? "Select a model"}</span>
+          <span class="picker-caret"></span>
+        </button>
+        {#if pickerOpen}
+          <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
+          ></button>
+          <div class="picker-menu" transition:slide={{ duration: 120 }}>
+            {#if installedModels.length}
+              <div class="picker-section">Installed</div>
+              {#each installedModels as m (m.id)}
+                <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
+                  <span class="picker-opt-name">{m.name}</span>
+                  {#if m.active}<span class="picker-tag">active</span>{/if}
+                </button>
+              {/each}
+            {/if}
+            {#if availableModels.length}
+              <div class="picker-section">Available to download</div>
+              {#each availableModels as m (m.id)}
+                <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
+                  <span class="picker-opt-name">{m.name}</span>
+                  <span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span>
+                </button>
+              {/each}
+            {/if}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <span class="muted">Loading models…</span>
+    {/if}
+  {/snippet}
+
   {#if mode === "live"}
     <section class="box">
       <div class="box-head">
         {#if running}
           <span class="active-model"><span class="live-pip"></span>{activeModel?.name ?? "Model"}</span>
-        {:else if models.length}
-          <div class="picker">
-            <button
-              class="picker-trigger"
-              class:open={pickerOpen}
-              onclick={() => (pickerOpen = !pickerOpen)}
-              disabled={downloading !== null}
-            >
-              <span class="picker-label">{chosenModel?.name ?? "Select a model"}</span>
-              <span class="picker-caret"></span>
-            </button>
-            {#if pickerOpen}
-              <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
-              ></button>
-              <div class="picker-menu" transition:slide={{ duration: 120 }}>
-                {#if installedModels.length}
-                  <div class="picker-section">Installed</div>
-                  {#each installedModels as m (m.id)}
-                    <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
-                      <span class="picker-opt-name">{m.name}</span>
-                      {#if m.active}<span class="picker-tag">active</span>{/if}
-                    </button>
-                  {/each}
-                {/if}
-                {#if availableModels.length}
-                  <div class="picker-section">Available to download</div>
-                  {#each availableModels as m (m.id)}
-                    <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
-                      <span class="picker-opt-name">{m.name}</span>
-                      <span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span>
-                    </button>
-                  {/each}
-                {/if}
-              </div>
-            {/if}
-          </div>
         {:else}
-          <span class="muted">Loading models…</span>
+          {@render modelPicker()}
         {/if}
         <span class="status" class:live={running}>
           <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "no model"}
@@ -591,8 +620,17 @@
           </button>
         </div>
       {:else}
-        <div class="dropzone" class:over={dragOver}>
-          <div class="dropzone-title">Drop an audio or video file</div>
+        <div class="box-head">
+          {@render modelPicker()}
+        </div>
+        <button
+          class="dropzone"
+          class:over={dragOver}
+          onclick={pickFile}
+          disabled={!canStart}
+          aria-label="Choose a file to transcribe"
+        >
+          <div class="dropzone-title">Click to choose a file, or drop one here</div>
           <p class="dropzone-sub">
             {#if canStart}
               mp3, m4a, wav, flac, mp4, mov… transcribed locally with
@@ -601,7 +639,7 @@
               Download a model in the Live tab first.
             {/if}
           </p>
-        </div>
+        </button>
       {/if}
     </section>
   {:else}
@@ -1253,16 +1291,26 @@
     align-items: center;
     justify-content: center;
     text-align: center;
+    font-family: inherit;
+    color: var(--text);
+    background: transparent;
     border: 2px dashed var(--border-strong);
     border-radius: 14px;
+    cursor: pointer;
     transition:
       border-color 0.15s,
       background 0.15s;
   }
 
+  .dropzone:hover:not(:disabled),
   .dropzone.over {
     border-color: var(--accent);
     background: var(--surface-active);
+  }
+
+  .dropzone:disabled {
+    cursor: default;
+    opacity: 0.6;
   }
 
   .dropzone-title {
