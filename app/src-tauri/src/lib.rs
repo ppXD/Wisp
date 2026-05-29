@@ -19,9 +19,14 @@ use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, Tra
 use wisp_engine_sherpa::SenseVoiceEngine;
 use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
 use wisp_pipeline::{EnergyVad, Pipeline, Session, DEFAULT_SILENCE_HANGOVER};
+use wisp_screencapture::ScreenCaptureSource;
 
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
+
+/// Sentinel "device" id selecting one-click system-audio capture (ScreenCaptureKit, no setup).
+/// Must match the value used by the UI.
+const SYSTEM_CAPTURE_ID: &str = "__wisp_system_audio__";
 
 /// Shared application state.
 struct AppState {
@@ -175,6 +180,11 @@ fn list_input_devices() -> Vec<String> {
 }
 
 #[tauri::command]
+fn system_audio_id() -> &'static str {
+    SYSTEM_CAPTURE_ID
+}
+
+#[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
     mic: Option<String>,
@@ -235,6 +245,9 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
     let system_source: Option<Box<dyn AudioSource>> = match system_device {
+        Some(name) if name == SYSTEM_CAPTURE_ID => Some(Box::new(
+            ScreenCaptureSource::new().map_err(|e| e.to_string())?,
+        )),
         Some(name) => Some(Box::new(
             MicSource::from_device(&name).map_err(|e| e.to_string())?,
         )),
@@ -320,6 +333,7 @@ pub fn run() {
             download_model,
             select_model,
             list_input_devices,
+            system_audio_id,
             set_devices,
             start_session,
             stop_session

@@ -27,3 +27,4 @@ wisp-audio = { path = "../../crates/wisp-audio", features = ["mic"] }
 wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa" }
+wisp-screencapture = { path = "../../crates/wisp-screencapture" }
