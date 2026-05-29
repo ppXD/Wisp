@@ -53,6 +53,8 @@ struct AppState {
     active: Mutex<Option<ModelId>>,
     mic_device: Mutex<Option<String>>,
     system_device: Mutex<Option<String>>,
+    /// Transcription language code (`zh`/`yue`/…); empty = auto-detect.
+    language: Mutex<String>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
     /// File where the active model id is persisted, so the choice survives a restart.
@@ -108,8 +110,13 @@ struct ModelInfoDto {
     active: bool,
 }
 
-/// Builds the ASR engine for a downloaded model based on its family.
-fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn AsrEngine>> {
+/// Builds the ASR engine for a downloaded model. `language` is a code (`zh`/`yue`/`en`/…) or empty
+/// for auto-detection.
+fn build_engine(
+    descriptor: &ModelDescriptor,
+    dir: &Path,
+    language: &str,
+) -> WispResult<Box<dyn AsrEngine>> {
     match descriptor.family {
         ModelFamily::SenseVoice => {
             let model_name = descriptor
@@ -118,7 +125,8 @@ fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn 
                 .find(|f| f.name.ends_with(".onnx"))
                 .map(|f| f.name.clone())
                 .ok_or_else(|| WispError::Model("model descriptor has no .onnx file".to_owned()))?;
-            let engine = SenseVoiceEngine::new(&dir.join(model_name), &dir.join("tokens.txt"))?;
+            let engine =
+                SenseVoiceEngine::new(&dir.join(model_name), &dir.join("tokens.txt"), language)?;
             Ok(Box::new(engine))
         }
         ModelFamily::Whisper => {
@@ -139,8 +147,13 @@ fn build_engine(descriptor: &ModelDescriptor, dir: &Path) -> WispResult<Box<dyn 
                 .find(|f| f.name.ends_with("tokens.txt"))
                 .map(|f| dir.join(&f.name))
                 .ok_or_else(|| WispError::Model("whisper model has no tokens file".to_owned()))?;
-            // Empty language → Whisper auto-detects (handles mixed Cantonese/English meetings).
-            let engine = WhisperEngine::new(&encoder, &decoder, &tokens, "")?;
+            // Cantonese (yue) tokens exist only in Whisper large-v3; smaller sizes fall back to zh.
+            let language = if language == "yue" && !descriptor.id.as_str().contains("large-v3") {
+                "zh"
+            } else {
+                language
+            };
+            let engine = WhisperEngine::new(&encoder, &decoder, &tokens, language)?;
             Ok(Box::new(engine))
         }
         other => Err(WispError::Engine(format!(
@@ -162,8 +175,9 @@ fn spawn_session(
     source: Box<dyn AudioSource>,
     kind: AudioSourceKind,
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
+    language: &str,
 ) -> WispResult<Session> {
-    let engine = build_engine(descriptor, dir)?;
+    let engine = build_engine(descriptor, dir, language)?;
     let pipeline = Pipeline::new(
         engine,
         match kind {
@@ -318,6 +332,15 @@ fn session_running(state: State<'_, AppState>) -> Result<bool, String> {
 }
 
 #[tauri::command]
+fn set_language(state: State<'_, AppState>, language: String) -> Result<(), String> {
+    *state
+        .language
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = language;
+    Ok(())
+}
+
+#[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
     mic: Option<String>,
@@ -360,6 +383,11 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .store
         .local_path(&active)
         .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
+    let language = state
+        .language
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
 
     // Open the audio sources first (these can fail: device missing / no mic permission).
     let mic_device = state
@@ -413,6 +441,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     aec_mic,
                     AudioSourceKind::Microphone,
                     Some(Arc::clone(&dedup)),
+                    &language,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -427,6 +456,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     meeting,
                     AudioSourceKind::System,
                     Some(dedup),
+                    &language,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -447,6 +477,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     mic,
                     AudioSourceKind::Microphone,
                     None,
+                    &language,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -462,6 +493,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     system,
                     AudioSourceKind::System,
                     None,
+                    &language,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -541,6 +573,7 @@ pub fn run() {
                 mic_device: Mutex::new(None),
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
+                language: Mutex::new(String::new()),
                 tee: Mutex::new(None),
                 active_model_path,
             });
@@ -558,6 +591,7 @@ pub fn run() {
             open_privacy_settings,
             microphone_blocked,
             session_running,
+            set_language,
             set_devices,
             start_session,
             stop_session

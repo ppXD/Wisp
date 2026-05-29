@@ -37,6 +37,7 @@
   let devices = $state<string[]>([]);
   let micDevice = $state("");
   let systemDevice = $state("");
+  let language = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
   let mode = $state<"live" | "file" | "cloud">("live");
@@ -137,6 +138,14 @@
     }
   }
 
+  async function applyLanguage() {
+    try {
+      await invoke("set_language", { language });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function sourceLabel(source: string): string {
     if (source === "Microphone") return "mic";
     if (source === "System") return "system";
@@ -213,6 +222,7 @@
     error = "";
     try {
       await applyDevices();
+      await applyLanguage();
       await ensureListener();
       await invoke("start_session");
       running = true;
@@ -377,8 +387,19 @@
   </section>
 
   <details class="advanced" transition:slide={{ duration: 200 }}>
-    <summary>Advanced · audio sources</summary>
+    <summary>Advanced · language & audio</summary>
     <section class="card sources">
+    <label class="source-row">
+      <span class="source-name">Language</span>
+      <select bind:value={language} onchange={applyLanguage} disabled={running}>
+        <option value="">Auto-detect</option>
+        <option value="yue">Cantonese</option>
+        <option value="zh">Chinese (Mandarin)</option>
+        <option value="en">English</option>
+        <option value="ja">Japanese</option>
+        <option value="ko">Korean</option>
+      </select>
+    </label>
     <label class="source-row">
       <span class="source-name">Microphone <em>(you)</em></span>
       <select bind:value={micDevice} onchange={applyDevices} disabled={running}>
@@ -395,7 +416,7 @@
         {#each devices as d (d)}<option value={d}>{d}</option>{/each}
       </select>
     </label>
-    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>, with <strong>echo cancellation</strong> so audio your mic re-hears from the speakers is removed automatically. Want system audio only? Set Microphone to Off. System audio asks for Screen Recording permission once.</p>
+    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>, with <strong>echo cancellation</strong> so audio your mic re-hears from the speakers is removed automatically. Want system audio only? Set Microphone to Off. System audio asks for Screen Recording permission once. Set a specific <strong>Language</strong> if auto-detect gets it wrong — recommended for Cantonese.</p>
     </section>
   </details>
   {/if}
