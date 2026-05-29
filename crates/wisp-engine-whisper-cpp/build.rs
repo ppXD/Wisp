@@ -20,6 +20,11 @@ fn main() {
     // library into the binary so nothing extra has to ship at runtime.
     let dst = cmake::Config::new(&src)
         .profile("Release")
+        // ggml uses std::filesystem (introduced in macOS 10.15). Pin a modern deployment target so
+        // the C++ build doesn't inherit a lower one from the embedding app's build environment
+        // (Tauri defaults low), which otherwise breaks the build with "unavailable" errors.
+        .env("MACOSX_DEPLOYMENT_TARGET", "11.0")
+        .define("CMAKE_OSX_DEPLOYMENT_TARGET", "11.0")
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("WHISPER_BUILD_EXAMPLES", "OFF")
         .define("WHISPER_BUILD_TESTS", "OFF")
