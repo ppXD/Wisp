@@ -4,6 +4,7 @@
   import { invoke } from "@tauri-apps/api/core";
   import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { onDestroy, onMount } from "svelte";
+  import { slide } from "svelte/transition";
 
   type Segment = {
     id: number;
@@ -273,14 +274,22 @@
     </div>
   {/if}
 
-  <section class="card models">
+  {#if running}
+    <div class="active-model" transition:slide={{ duration: 200 }}>
+      <span class="live-pip"></span>
+      <span class="active-model-name">{activeModel?.name ?? "Model"}</span>
+    </div>
+  {:else}
+  <section class="card models" transition:slide={{ duration: 200 }}>
     <div class="section-label">Model</div>
     {#if models.length}
-      <select class="model-select" value={chosenId} onchange={(e) => pickModel(e.currentTarget.value)} disabled={running}>
-        {#each models as m (m.id)}
-          <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
-        {/each}
-      </select>
+      <div class="select-wrap">
+        <select class="model-select" value={chosenId} onchange={(e) => pickModel(e.currentTarget.value)} disabled={running}>
+          {#each models as m (m.id)}
+            <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
+          {/each}
+        </select>
+      </div>
 
       {#if chosenModel}
         <div class="model-detail">
@@ -309,7 +318,7 @@
     {/if}
   </section>
 
-  <details class="advanced">
+  <details class="advanced" transition:slide={{ duration: 200 }}>
     <summary>Advanced · audio sources</summary>
     <section class="card sources">
     <label class="source-row">
@@ -331,6 +340,7 @@
     <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>, with <strong>echo cancellation</strong> so audio your mic re-hears from the speakers is removed automatically. Want system audio only? Set Microphone to Off. System audio asks for Screen Recording permission once.</p>
     </section>
   </details>
+  {/if}
 
   <div class="controls">
     {#if running}
@@ -348,7 +358,7 @@
     <p class="error">{error}</p>
   {/if}
 
-  <ul class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
+  <ul class="transcript" class:tall={running} bind:this={transcriptEl} onscroll={onTranscriptScroll}>
     {#each segments as seg (seg.source + "-" + seg.id)}
       <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
         <span class="time">{fmtTime(seg.startMs)}</span>
@@ -494,19 +504,48 @@
     margin-bottom: 24px;
   }
 
+  .select-wrap {
+    position: relative;
+  }
+
+  .select-wrap::after {
+    content: "";
+    position: absolute;
+    right: 15px;
+    top: 50%;
+    width: 7px;
+    height: 7px;
+    margin-top: -5px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    transform: rotate(45deg);
+    pointer-events: none;
+  }
+
   .model-select {
     width: 100%;
+    appearance: none;
+    -webkit-appearance: none;
     font-family: inherit;
     font-size: 14px;
+    font-weight: 500;
     color: var(--text);
     background: var(--bg);
     border: 1px solid var(--border-strong);
-    border-radius: 9px;
-    padding: 10px 12px;
+    border-radius: 10px;
+    padding: 11px 34px 11px 13px;
+    cursor: pointer;
+    transition: border-color 0.15s, background 0.15s;
+  }
+
+  .model-select:hover {
+    border-color: var(--muted);
+    background: var(--surface-active);
   }
 
   .model-select:disabled {
     opacity: 0.5;
+    cursor: default;
   }
 
   .model-tags {
@@ -535,6 +574,29 @@
 
   .model-action {
     margin-top: 12px;
+  }
+
+  .active-model {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 9px 14px;
+    margin-bottom: 4px;
+  }
+
+  .live-pip {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--live);
+    box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
+    flex-shrink: 0;
   }
 
   .controls {
@@ -689,6 +751,11 @@
     max-height: 56vh;
     overflow-y: auto;
     scroll-behavior: smooth;
+    transition: max-height 0.2s;
+  }
+
+  .transcript.tall {
+    max-height: 72vh;
   }
 
   .transcript li {
@@ -785,14 +852,20 @@
   }
 
   .source-row select {
+    appearance: none;
+    -webkit-appearance: none;
     font-family: inherit;
     font-size: 13px;
     color: var(--text);
-    background: var(--bg);
+    background-color: var(--bg);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6' fill='none' stroke='%2378736a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l3.5 3.5L8 1'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
     border: 1px solid var(--border-strong);
     border-radius: 8px;
-    padding: 7px 10px;
+    padding: 7px 26px 7px 10px;
     max-width: 280px;
+    cursor: pointer;
   }
 
   .source-row select:disabled {
@@ -805,20 +878,46 @@
   .advanced > summary {
     cursor: pointer;
     list-style: none;
-    font-family: var(--font-mono);
-    font-size: 11px;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    width: fit-content;
+    font-size: 13px;
+    font-weight: 500;
     color: var(--muted);
-    padding: 4px 0;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    padding: 8px 13px;
+    transition: color 0.15s, border-color 0.15s, background 0.15s;
   }
 
   .advanced > summary::-webkit-details-marker {
     display: none;
   }
 
+  .advanced > summary::before {
+    content: "";
+    width: 6px;
+    height: 6px;
+    border-right: 1.5px solid currentColor;
+    border-bottom: 1.5px solid currentColor;
+    transform: rotate(-45deg);
+    transition: transform 0.15s;
+  }
+
+  .advanced[open] > summary::before {
+    transform: rotate(45deg);
+  }
+
+  .advanced > summary:hover {
+    color: var(--text);
+    border-color: var(--border-strong);
+    background: var(--surface-active);
+  }
+
   .advanced[open] > summary {
-    margin-bottom: 10px;
+    margin-bottom: 12px;
   }
 
   .advanced .sources {
