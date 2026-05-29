@@ -92,6 +92,20 @@ impl FrameReceiver {
                 .expect("frame channel poisoned");
         }
     }
+
+    /// Returns a frame if one is immediately available, otherwise `None`; never blocks.
+    ///
+    /// Unlike [`recv`](Self::recv), a `None` does not distinguish "empty" from "closed and
+    /// drained" — this drains whatever is buffered right now without waiting. Used to pull the
+    /// latest reference audio without stalling the caller.
+    pub fn try_recv(&self) -> Option<AudioFrame> {
+        self.shared
+            .state
+            .lock()
+            .expect("frame channel poisoned")
+            .frames
+            .pop_front()
+    }
 }
 
 #[cfg(test)]
@@ -129,5 +143,16 @@ mod tests {
         tx.close();
         assert_eq!(rx.recv().unwrap().samples, vec![1.0]); // drains remaining
         assert!(rx.recv().is_none()); // then None
+    }
+
+    #[test]
+    fn try_recv_drains_without_blocking() {
+        let (tx, rx) = frame_channel(4);
+        assert!(rx.try_recv().is_none()); // empty → None, does not block
+        tx.send(frame(1.0));
+        tx.send(frame(2.0));
+        assert_eq!(rx.try_recv().unwrap().samples, vec![1.0]);
+        assert_eq!(rx.try_recv().unwrap().samples, vec![2.0]);
+        assert!(rx.try_recv().is_none()); // drained → None again
     }
 }
