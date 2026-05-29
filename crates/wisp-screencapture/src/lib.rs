@@ -6,8 +6,8 @@
 #![cfg(target_os = "macos")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Receiver, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::mpsc::{self, Sender};
+use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -15,18 +15,23 @@ use screencapturekit::cm::AudioBufferList;
 use screencapturekit::prelude::*;
 
 use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
+use wisp_core::channel::{frame_channel, FrameReceiver, FrameSender};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::AudioSourceKind;
 
 /// Rate requested from ScreenCaptureKit; the pipeline resamples to 16 kHz downstream.
 const CAPTURE_SAMPLE_RATE: u32 = 48_000;
 
+/// Bounded capacity of the capture→pipeline frame channel. Drop-oldest on overflow keeps capture
+/// real-time if the consumer briefly stalls, instead of letting a backlog grow without bound.
+const FRAME_CHANNEL_CAPACITY: usize = 256;
+
 /// An [`AudioSource`] capturing system audio through ScreenCaptureKit.
 ///
 /// The `SCStream` (which is not `Send`) is owned by a dedicated thread that feeds frames to a
 /// channel; this struct holds only the receiver + a stop flag, so it stays `Send`.
 pub struct ScreenCaptureSource {
-    rx: Receiver<AudioFrame>,
+    rx: FrameReceiver,
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -35,7 +40,7 @@ impl ScreenCaptureSource {
     /// Starts capturing system audio. Prompts for Screen Recording permission on first use;
     /// errors if permission is denied or no display is available.
     pub fn new() -> Result<Self> {
-        let (tx, rx) = mpsc::channel::<AudioFrame>();
+        let (tx, rx) = frame_channel(FRAME_CHANNEL_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::channel::<std::result::Result<(), String>>();
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_thread = Arc::clone(&stop);
@@ -43,7 +48,11 @@ impl ScreenCaptureSource {
         let handle = thread::spawn(move || capture_loop(tx, &stop_for_thread, &ready_tx));
 
         match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self { rx, stop, handle: Some(handle) }),
+            Ok(Ok(())) => Ok(Self {
+                rx,
+                stop,
+                handle: Some(handle),
+            }),
             Ok(Err(e)) => Err(WispError::Audio(e)),
             Err(_) => Err(WispError::Audio(
                 "screen-capture thread exited before signalling readiness".to_owned(),
@@ -54,11 +63,14 @@ impl ScreenCaptureSource {
 
 impl AudioSource for ScreenCaptureSource {
     fn info(&self) -> AudioSourceInfo {
-        AudioSourceInfo { kind: AudioSourceKind::System, name: "System audio".to_owned() }
+        AudioSourceInfo {
+            kind: AudioSourceKind::System,
+            name: "System audio".to_owned(),
+        }
     }
 
     fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
-        Ok(self.rx.recv().ok())
+        Ok(self.rx.recv())
     }
 }
 
@@ -75,9 +87,9 @@ impl Drop for ScreenCaptureSource {
 /// ScreenCaptureKit output handler: turns each audio sample buffer into a mono [`AudioFrame`].
 ///
 /// `SCStream` may invoke this from arbitrary dispatch-queue threads, so it must be `Send + Sync`;
-/// the channel sender is wrapped in a `Mutex` to satisfy `Sync`.
+/// [`FrameSender`] is already `Sync`, so it is held directly (no `Mutex` needed).
 struct AudioHandler {
-    tx: Mutex<Sender<AudioFrame>>,
+    tx: FrameSender,
     start: Instant,
 }
 
@@ -96,13 +108,15 @@ impl SCStreamOutputTrait for AudioHandler {
         }
 
         let frame = AudioFrame::new(mono, CAPTURE_SAMPLE_RATE, 1, self.start.elapsed());
-        if let Ok(tx) = self.tx.lock() {
-            let _ = tx.send(frame);
-        }
+        self.tx.send(frame);
     }
 }
 
-fn capture_loop(tx: Sender<AudioFrame>, stop: &AtomicBool, ready: &Sender<std::result::Result<(), String>>) {
+fn capture_loop(
+    tx: FrameSender,
+    stop: &AtomicBool,
+    ready: &Sender<std::result::Result<(), String>>,
+) {
     match build_and_start(tx) {
         Ok(stream) => {
             let _ = ready.send(Ok(()));
@@ -118,12 +132,17 @@ fn capture_loop(tx: Sender<AudioFrame>, stop: &AtomicBool, ready: &Sender<std::r
     }
 }
 
-fn build_and_start(tx: Sender<AudioFrame>) -> std::result::Result<SCStream, String> {
+fn build_and_start(tx: FrameSender) -> std::result::Result<SCStream, String> {
     let content = SCShareableContent::get().map_err(|e| format!("shareable content: {e}"))?;
     let displays = content.displays();
-    let display = displays.first().ok_or_else(|| "no display available".to_owned())?;
+    let display = displays
+        .first()
+        .ok_or_else(|| "no display available".to_owned())?;
 
-    let filter = SCContentFilter::create().with_display(display).with_excluding_windows(&[]).build();
+    let filter = SCContentFilter::create()
+        .with_display(display)
+        .with_excluding_windows(&[])
+        .build();
 
     let config = SCStreamConfiguration::new()
         .with_captures_audio(true)
@@ -131,8 +150,16 @@ fn build_and_start(tx: Sender<AudioFrame>) -> std::result::Result<SCStream, Stri
         .with_channel_count(2);
 
     let mut stream = SCStream::new(&filter, &config);
-    stream.add_output_handler(AudioHandler { tx: Mutex::new(tx), start: Instant::now() }, SCStreamOutputType::Audio);
-    stream.start_capture().map_err(|e| format!("start capture: {e}"))?;
+    stream.add_output_handler(
+        AudioHandler {
+            tx,
+            start: Instant::now(),
+        },
+        SCStreamOutputType::Audio,
+    );
+    stream
+        .start_capture()
+        .map_err(|e| format!("start capture: {e}"))?;
     Ok(stream)
 }
 
@@ -152,12 +179,16 @@ fn downmix_buffer_list(list: &AudioBufferList) -> Vec<f32> {
         if channels <= 1 {
             return samples;
         }
-        return samples.chunks(channels).map(|c| c.iter().sum::<f32>() / channels as f32).collect();
+        return samples
+            .chunks(channels)
+            .map(|c| c.iter().sum::<f32>() / channels as f32)
+            .collect();
     }
 
     // Planar: one channel per buffer — average element-wise.
-    let channels: Vec<Vec<f32>> =
-        (0..buffers).filter_map(|i| list.get(i).map(|b| bytes_to_f32(b.data()))).collect();
+    let channels: Vec<Vec<f32>> = (0..buffers)
+        .filter_map(|i| list.get(i).map(|b| bytes_to_f32(b.data())))
+        .collect();
     let len = channels.iter().map(Vec::len).min().unwrap_or(0);
     (0..len)
         .map(|i| channels.iter().map(|c| c[i]).sum::<f32>() / channels.len() as f32)
@@ -165,5 +196,8 @@ fn downmix_buffer_list(list: &AudioBufferList) -> Vec<f32> {
 }
 
 fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    bytes
+        .chunks_exact(4)
+        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
