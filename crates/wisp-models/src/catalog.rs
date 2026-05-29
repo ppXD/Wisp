@@ -46,6 +46,10 @@ fn sense_voice_int8() -> ModelDescriptor {
             sense_voice_tokens(),
         ],
         languages: sense_voice_languages(),
+        description:
+            "Small multilingual model (~234M params), int8-quantized. Fast and light on memory \
+             with great everyday accuracy — the recommended default."
+                .to_owned(),
     }
 }
 
@@ -65,6 +69,10 @@ fn sense_voice_fp32() -> ModelDescriptor {
             sense_voice_tokens(),
         ],
         languages: sense_voice_languages(),
+        description:
+            "Small multilingual model (~234M params), full precision. Highest accuracy, but a \
+             much larger download and a little slower than int8."
+                .to_owned(),
     }
 }
 

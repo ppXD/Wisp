@@ -192,6 +192,7 @@ mod tests {
                 size_bytes: bytes.len() as u64,
             }],
             languages: vec![],
+            description: String::new(),
         }
     }
 
@@ -283,6 +284,7 @@ mod tests {
                 size_bytes: bytes.len() as u64,
             }],
             languages: vec![],
+            description: String::new(),
         };
         let (downloader, calls) = fake_for(url, &bytes);
         let root = tempfile::tempdir().unwrap();

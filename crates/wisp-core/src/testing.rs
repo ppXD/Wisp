@@ -213,6 +213,7 @@ mod tests {
             display_name: "M1".into(),
             files: vec![],
             languages: vec![],
+            description: String::new(),
         };
         let store = MockModelStore::new([desc]);
         assert!(store.installed().unwrap().is_empty());
