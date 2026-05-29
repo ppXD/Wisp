@@ -15,14 +15,68 @@ const WHISPER_LARGE_V3_BASE: &str =
 const WHISPER_MEDIUM_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main";
 
+/// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed).
+const WHISPER_CPP_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
+        whisper_turbo_q5(),
+        whisper_turbo_q8(),
         sense_voice_int8(),
         sense_voice_fp32(),
         whisper_large_v3(),
         whisper_medium(),
     ]
+}
+
+/// Languages every Whisper model covers well (a subset surfaced in the UI).
+fn whisper_languages() -> Vec<String> {
+    ["yue", "zh", "en", "ja"]
+        .iter()
+        .map(|s| (*s).to_owned())
+        .collect()
+}
+
+fn whisper_turbo_q5() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-large-v3-turbo-q5".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q5,
+        display_name: "Whisper large-v3-turbo · GPU (Metal) · q5".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-large-v3-turbo-q5_0.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo-q5_0.bin"),
+            sha256: String::new(),
+            size_bytes: 574_041_195,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Whisper large-v3-turbo on the GPU (Metal) — real Cantonese (yue) + ~99 languages, \
+             near-large-v3 accuracy but far faster because it runs on the GPU instead of the CPU. \
+             Recommended. q5-quantized (~0.55 GB)."
+                .to_owned(),
+    }
+}
+
+fn whisper_turbo_q8() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-large-v3-turbo-q8".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q8,
+        display_name: "Whisper large-v3-turbo · GPU (Metal) · q8 (most accurate)".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-large-v3-turbo-q8_0.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo-q8_0.bin"),
+            sha256: String::new(),
+            size_bytes: 874_188_075,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Same large-v3-turbo on the GPU (Metal), at higher q8 precision for the best accuracy \
+             — ideal for Cantonese on a capable machine. Larger download (~0.85 GB)."
+                .to_owned(),
+    }
 }
 
 fn sense_voice_languages() -> Vec<String> {
@@ -172,17 +226,25 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 4);
+        assert_eq!(catalog.len(), 6);
 
         let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
 
         for descriptor in &catalog {
-            assert!(descriptor.files.iter().any(|f| f.name.ends_with(".onnx")));
-            assert!(descriptor
-                .files
-                .iter()
-                .any(|f| f.name.ends_with("tokens.txt")));
+            // sherpa families ship ONNX + tokens; whisper.cpp ships a single GGUF `.bin`.
+            match descriptor.family {
+                ModelFamily::WhisperCpp => {
+                    assert!(descriptor.files.iter().any(|f| f.name.ends_with(".bin")));
+                }
+                _ => {
+                    assert!(descriptor.files.iter().any(|f| f.name.ends_with(".onnx")));
+                    assert!(descriptor
+                        .files
+                        .iter()
+                        .any(|f| f.name.ends_with("tokens.txt")));
+                }
+            }
             assert!(!descriptor.description.is_empty());
             assert!(descriptor.total_size_bytes() > 0);
         }
