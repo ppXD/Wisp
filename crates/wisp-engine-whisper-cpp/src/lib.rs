@@ -21,7 +21,7 @@ use std::os::raw::c_int;
 use std::path::Path;
 use std::time::Duration;
 
-use wisp_core::engine::{AsrEngine, EngineInfo, TranscriptionResult};
+use wisp_core::engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 
@@ -65,6 +65,7 @@ impl WhisperCppEngine {
         let ctx = unsafe {
             let mut cparams = sys::whisper_context_default_params();
             cparams.use_gpu = true; // Metal
+            cparams.flash_attn = true; // faster + less memory on Metal, accuracy-neutral
             sys::whisper_init_from_file_with_params(model_c.as_ptr(), cparams)
         };
         if ctx.is_null() {
@@ -132,21 +133,25 @@ impl AsrEngine for WhisperCppEngine {
         &mut self,
         audio: &[f32],
         _sample_rate: u32,
-        with_timestamps: bool,
+        options: ClipOptions,
     ) -> Result<TranscriptionResult> {
         // Native long-form: feed the whole clip and carry context across whisper's 30 s windows for
-        // far better consistency than per-utterance chunks. Timestamps are opt-in, so a text-only
-        // export gets the decoder's full attention (most accurate).
+        // far better consistency than per-utterance chunks. Beam search (vs greedy) and timestamps
+        // follow `options`, so the caller can trade accuracy against speed.
+        let strategy = if options.beam {
+            sys::whisper_sampling_strategy::WHISPER_SAMPLING_BEAM_SEARCH
+        } else {
+            sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY
+        };
         // SAFETY: live context; valid slice; `self.language` outlives the call.
         let segments = unsafe {
-            let mut params = sys::whisper_full_default_params(
-                sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY,
-            );
+            let mut params = sys::whisper_full_default_params(strategy);
             params.n_threads = self.n_threads;
             params.language = self.language.as_ptr();
             params.translate = false;
             params.no_context = false; // carry context across windows
-            params.no_timestamps = !with_timestamps;
+            params.no_timestamps = !options.timestamps;
+            params.suppress_nst = true; // suppress non-speech tokens (fewer hallucinations)
             params.print_progress = false;
             params.print_realtime = false;
             params.print_special = false;
@@ -170,7 +175,7 @@ impl AsrEngine for WhisperCppEngine {
                 if text.is_empty() {
                     continue;
                 }
-                let (start, end) = if with_timestamps {
+                let (start, end) = if options.timestamps {
                     // whisper.cpp reports segment times in centiseconds (10 ms units).
                     let t0 = sys::whisper_full_get_segment_t0(self.ctx, i).max(0) as u64 * 10;
                     let t1 = sys::whisper_full_get_segment_t1(self.ctx, i).max(0) as u64 * 10;

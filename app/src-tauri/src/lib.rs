@@ -19,7 +19,7 @@ use wisp_audio::{
 };
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
-use wisp_core::engine::AsrEngine;
+use wisp_core::engine::{AsrEngine, ClipOptions};
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
@@ -629,6 +629,7 @@ async fn transcribe_file(
     state: State<'_, AppState>,
     path: String,
     timestamps: bool,
+    accurate: bool,
 ) -> Result<(), String> {
     let active = state
         .active
@@ -672,7 +673,8 @@ async fn transcribe_file(
             }
 
             let mut engine = build_engine(&descriptor, &dir, &language)?;
-            let result = engine.transcribe_clip(&audio, TARGET_SAMPLE_RATE, timestamps)?;
+            let result =
+                engine.transcribe_clip(&audio, TARGET_SAMPLE_RATE, ClipOptions::new(timestamps, accurate))?;
 
             let mut collected = Vec::with_capacity(result.segments.len());
             for (i, mut segment) in result.segments.into_iter().enumerate() {
