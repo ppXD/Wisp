@@ -183,6 +183,24 @@
     segments = [];
   }
 
+  let transcriptEl = $state<HTMLUListElement>();
+  let pinnedToBottom = true;
+
+  function onTranscriptScroll() {
+    if (!transcriptEl) return;
+    const gap = transcriptEl.scrollHeight - transcriptEl.scrollTop - transcriptEl.clientHeight;
+    pinnedToBottom = gap < 48;
+  }
+
+  // Auto-follow the newest line (like a live feed) unless the user scrolled up to read back.
+  $effect(() => {
+    segments.length;
+    if (pinnedToBottom && transcriptEl) {
+      const el = transcriptEl;
+      requestAnimationFrame(() => (el.scrollTop = el.scrollHeight));
+    }
+  });
+
   onMount(() => {
     refreshModels();
     refreshDevices();
@@ -302,7 +320,7 @@
     <p class="error">{error}</p>
   {/if}
 
-  <ul class="transcript">
+  <ul class="transcript" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
     {#each segments as seg (seg.source + "-" + seg.id)}
       <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
         <span class="time">{fmtTime(seg.startMs)}</span>
@@ -629,10 +647,13 @@
   .transcript {
     list-style: none;
     margin: 8px 0 0;
-    padding: 0;
+    padding: 0 4px 0 0;
     display: flex;
     flex-direction: column;
     gap: 7px;
+    max-height: 56vh;
+    overflow-y: auto;
+    scroll-behavior: smooth;
   }
 
   .transcript li {
