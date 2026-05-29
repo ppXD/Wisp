@@ -23,8 +23,9 @@ use wisp_core::transcript::AudioSourceKind;
 const CAPTURE_SAMPLE_RATE: u32 = 48_000;
 
 /// Bounded capacity of the capture→pipeline frame channel. Drop-oldest on overflow keeps capture
-/// real-time if the consumer briefly stalls, instead of letting a backlog grow without bound.
-const FRAME_CHANNEL_CAPACITY: usize = 256;
+/// real-time if the consumer briefly stalls. Generous headroom (~10-20 s) so a slow engine
+/// transcribing one utterance doesn't drop the audio of the next.
+const FRAME_CHANNEL_CAPACITY: usize = 1024;
 
 /// An [`AudioSource`] capturing system audio through ScreenCaptureKit.
 ///

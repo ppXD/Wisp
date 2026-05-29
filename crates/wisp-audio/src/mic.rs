@@ -19,10 +19,10 @@ use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::AudioSourceKind;
 
 /// Bounded capacity of the capture→pipeline frame channel. Drop-oldest on overflow keeps capture
-/// real-time if the consumer briefly stalls, instead of letting a backlog grow without bound (which
-/// would climb in latency and memory until the stream appears stuck). ~256 cpal buffers is a couple
-/// of seconds of audio — far more headroom than a healthy consumer ever needs.
-const FRAME_CHANNEL_CAPACITY: usize = 256;
+/// real-time if the consumer briefly stalls, instead of letting a backlog grow without bound. Sized
+/// with generous headroom (~10-20 s of audio) so a slow engine like Whisper transcribing one
+/// utterance doesn't drop the audio of the next; drop-oldest still bounds memory.
+const FRAME_CHANNEL_CAPACITY: usize = 1024;
 
 /// Framing metadata shared with the capture callback.
 #[derive(Clone, Copy)]
