@@ -34,10 +34,16 @@
   let systemDevice = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
+  let screenAuthorized = $state(true);
+  let permissionBusy = $state(false);
   let unlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
   const canStart = $derived(!!activeModel?.installed);
+  // System audio on macOS needs Screen Recording permission; only relevant for the one-click source.
+  const needsScreenRecording = $derived(
+    !!systemAudioId && systemDevice === systemAudioId && !screenAuthorized,
+  );
 
   function fmtTime(ms: number): string {
     const total = Math.floor(ms / 1000);
@@ -66,6 +72,28 @@
       if (!systemDevice) systemDevice = systemAudioId;
     } catch (e) {
       error = String(e);
+    }
+  }
+
+  async function checkPermissions() {
+    try {
+      screenAuthorized = await invoke<boolean>("screen_recording_authorized");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function grantScreenRecording() {
+    permissionBusy = true;
+    try {
+      const granted = await invoke<boolean>("request_screen_recording");
+      screenAuthorized = granted;
+      // After a prior denial macOS won't re-prompt — send the user to System Settings to flip it.
+      if (!granted) await invoke("open_privacy_settings", { pane: "screen" });
+    } catch (e) {
+      error = String(e);
+    } finally {
+      permissionBusy = false;
     }
   }
 
@@ -140,6 +168,11 @@
   onMount(() => {
     refreshModels();
     refreshDevices();
+    checkPermissions();
+    // Re-check when the window regains focus, so granting in System Settings clears the banner.
+    const onFocus = () => checkPermissions();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
   });
   onDestroy(() => unlisten?.());
 </script>
@@ -152,6 +185,21 @@
     </div>
     <p class="tagline">Local, real-time meeting transcription · on-device</p>
   </header>
+
+  {#if needsScreenRecording}
+    <div class="permission">
+      <div class="permission-body">
+        <div class="permission-title">Allow Screen Recording to hear the meeting</div>
+        <p class="permission-sub">
+          Wisp captures system/meeting audio through macOS Screen Recording. Grant access once —
+          nothing leaves your device.
+        </p>
+      </div>
+      <button class="btn primary" onclick={grantScreenRecording} disabled={permissionBusy}>
+        {permissionBusy ? "Requesting…" : "Grant access"}
+      </button>
+    </div>
+  {/if}
 
   <section class="card models">
     <div class="section-label">Model</div>
@@ -444,6 +492,38 @@
     padding: 11px 14px;
     border-radius: 10px;
     font-size: 13px;
+  }
+
+  .permission {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    background: var(--surface-active);
+    border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
+    border-radius: 14px;
+    padding: 15px 18px;
+    margin-bottom: 24px;
+  }
+
+  .permission-body {
+    flex: 1;
+    min-width: 0;
+  }
+
+  .permission-title {
+    font-size: 14.5px;
+    font-weight: 600;
+  }
+
+  .permission-sub {
+    margin: 4px 0 0;
+    color: var(--muted);
+    font-size: 13px;
+    line-height: 1.5;
+  }
+
+  .permission .btn {
+    flex-shrink: 0;
   }
 
   .hint {

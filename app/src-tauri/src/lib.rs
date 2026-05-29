@@ -23,6 +23,8 @@ use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
 use wisp_pipeline::{EnergyVad, Pipeline, Session, DEFAULT_SILENCE_HANGOVER};
 use wisp_screencapture::ScreenCaptureSource;
 
+mod permissions;
+
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
 
@@ -214,6 +216,21 @@ fn system_audio_id() -> &'static str {
 #[tauri::command]
 fn mic_off_id() -> &'static str {
     MIC_OFF_ID
+}
+
+#[tauri::command]
+fn screen_recording_authorized() -> bool {
+    permissions::screen_recording_authorized()
+}
+
+#[tauri::command]
+fn request_screen_recording() -> bool {
+    permissions::request_screen_recording()
+}
+
+#[tauri::command]
+fn open_privacy_settings(pane: String) -> Result<(), String> {
+    permissions::open_privacy_settings(&pane)
 }
 
 #[tauri::command]
@@ -441,6 +458,9 @@ pub fn run() {
             list_input_devices,
             system_audio_id,
             mic_off_id,
+            screen_recording_authorized,
+            request_screen_recording,
+            open_privacy_settings,
             set_devices,
             start_session,
             stop_session
