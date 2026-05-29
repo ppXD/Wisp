@@ -700,6 +700,7 @@ async fn transcribe_file(
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
