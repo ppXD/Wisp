@@ -10,7 +10,8 @@ use std::sync::{Arc, Mutex};
 use serde::Serialize;
 use tauri::{AppHandle, Emitter, Manager, State};
 
-use wisp_audio::MicSource;
+use wisp_aec::WebrtcEchoCanceller;
+use wisp_audio::{tee, ChannelSource, EchoCancellingSource, MicSource, Tee};
 use wisp_core::audio::AudioSource;
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::{Result as WispResult, WispError};
@@ -38,6 +39,8 @@ struct AppState {
     active: Mutex<Option<ModelId>>,
     mic_device: Mutex<Option<String>>,
     system_device: Mutex<Option<String>>,
+    /// The system-audio fan-out, present only while mic + system run together (AEC active).
+    tee: Mutex<Option<Tee>>,
 }
 
 /// Serializable transcript segment delivered to the UI.
@@ -267,33 +270,61 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         None => None,
     };
 
-    if mic_source.is_none() && system_source.is_none() {
-        return Err("no audio source — enable the microphone or select meeting audio".to_owned());
-    }
+    match (mic_source, system_source) {
+        // Both on → the mic re-hears the system audio on speakers (echo). Tee the system capture
+        // into the meeting pipeline and the AEC far-end reference, and clean the mic against it.
+        (Some(mic), Some(system)) => {
+            let system_info = system.info();
+            let (tee_handle, meeting_rx, reference_rx) = tee(system);
 
-    if let Some(mic_source) = mic_source {
-        sessions.push(
-            spawn_session(
-                &app,
-                &descriptor,
-                &dir,
-                mic_source,
-                AudioSourceKind::Microphone,
-            )
-            .map_err(|e| e.to_string())?,
-        );
-    }
-    if let Some(system_source) = system_source {
-        sessions.push(
-            spawn_session(
-                &app,
-                &descriptor,
-                &dir,
-                system_source,
-                AudioSourceKind::System,
-            )
-            .map_err(|e| e.to_string())?,
-        );
+            let canceller = Box::new(WebrtcEchoCanceller::new().map_err(|e| e.to_string())?);
+            let aec_mic: Box<dyn AudioSource> =
+                Box::new(EchoCancellingSource::new(mic, reference_rx, canceller));
+            sessions.push(
+                spawn_session(
+                    &app,
+                    &descriptor,
+                    &dir,
+                    aec_mic,
+                    AudioSourceKind::Microphone,
+                )
+                .map_err(|e| e.to_string())?,
+            );
+
+            let meeting: Box<dyn AudioSource> =
+                Box::new(ChannelSource::new(meeting_rx, system_info));
+            sessions.push(
+                spawn_session(&app, &descriptor, &dir, meeting, AudioSourceKind::System)
+                    .map_err(|e| e.to_string())?,
+            );
+
+            *state
+                .tee
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())? = Some(tee_handle);
+        }
+
+        // Mic only → no playback to echo; capture it directly.
+        (Some(mic), None) => {
+            sessions.push(
+                spawn_session(&app, &descriptor, &dir, mic, AudioSourceKind::Microphone)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+
+        // System only → clean digital capture, no echo path; transcribe it directly.
+        (None, Some(system)) => {
+            sessions.push(
+                spawn_session(&app, &descriptor, &dir, system, AudioSourceKind::System)
+                    .map_err(|e| e.to_string())?,
+            );
+        }
+
+        (None, None) => {
+            return Err(
+                "no audio source — enable the microphone or select meeting audio".to_owned(),
+            );
+        }
     }
     Ok(())
 }
@@ -313,6 +344,14 @@ fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
             last_error = Some(e.to_string());
         }
     }
+
+    // Tear down the system-audio tee (present only when AEC was active): dropping it stops the
+    // pump thread and the underlying capture.
+    *state
+        .tee
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = None;
+
     match last_error {
         Some(e) => Err(e),
         None => Ok(()),
@@ -345,6 +384,7 @@ pub fn run() {
                 mic_device: Mutex::new(None),
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
+                tee: Mutex::new(None),
             });
             Ok(())
         })

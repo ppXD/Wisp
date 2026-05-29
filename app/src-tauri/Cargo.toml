@@ -28,3 +28,4 @@ wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa" }
 wisp-screencapture = { path = "../../crates/wisp-screencapture" }
+wisp-aec = { path = "../../crates/wisp-aec" }

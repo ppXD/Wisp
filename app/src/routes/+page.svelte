@@ -195,7 +195,7 @@
         {#each devices as d (d)}<option value={d}>{d}</option>{/each}
       </select>
     </label>
-    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong> (you + anything playing). On speakers the mic re-hears the audio (echo) — use headphones, or set Microphone to Off. System audio asks for Screen Recording permission once.</p>
+    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong> (you + anything playing), with <strong>echo cancellation</strong> so the meeting audio your mic re-hears on speakers is removed automatically. Want meeting audio only? Set Microphone to Off. System audio asks for Screen Recording permission once.</p>
     </section>
   </details>
 
