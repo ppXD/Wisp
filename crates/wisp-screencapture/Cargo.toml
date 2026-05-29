@@ -1,0 +1,12 @@
+[package]
+name = "wisp-screencapture"
+version = "0.0.0"
+description = "macOS system-audio capture for Wisp via ScreenCaptureKit (no virtual device)"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+screencapturekit = { version = "6", features = ["macos_13_0"] }

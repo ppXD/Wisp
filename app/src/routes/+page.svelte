@@ -32,6 +32,7 @@
   let devices = $state<string[]>([]);
   let micDevice = $state("");
   let systemDevice = $state("");
+  let systemAudioId = $state("");
   let unlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
@@ -58,6 +59,7 @@
   async function refreshDevices() {
     try {
       devices = await invoke<string[]>("list_input_devices");
+      systemAudioId = await invoke<string>("system_audio_id");
     } catch (e) {
       error = String(e);
     }
@@ -183,10 +185,11 @@
       <span class="source-name">Meeting audio <em>(others)</em></span>
       <select bind:value={systemDevice} onchange={applyDevices} disabled={running}>
         <option value="">Off</option>
+        {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
         {#each devices as d (d)}<option value={d}>{d}</option>{/each}
       </select>
     </label>
-    <p class="hint">Meeting audio needs a loopback device — install <strong>BlackHole</strong>, route system output to it, then select it here.</p>
+    <p class="hint"><strong>System audio — no setup</strong> captures the meeting directly (grant the one-time macOS Screen Recording permission). Or pick a loopback device like BlackHole.</p>
   </section>
 
   <div class="controls">

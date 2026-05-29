@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/*"]
 # Kept out of the library CI build: the Tauri app, and the sherpa engine (heavy native
 # onnxruntime download at build time, verified by running the app on macOS).
-exclude = ["app/src-tauri", "crates/wisp-engine-sherpa"]
+exclude = ["app/src-tauri", "crates/wisp-engine-sherpa", "crates/wisp-screencapture"]
 
 [workspace.package]
 edition = "2021"
