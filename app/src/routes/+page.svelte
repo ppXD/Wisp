@@ -61,6 +61,17 @@
     const m = models.find((x) => x.id === id);
     if (m?.installed) await selectModel(id); // installed → make it the active model
   }
+
+  // Custom model dropdown. Logical order: ready-to-use (installed) models first, then ones to
+  // download — each kept in catalog (recommendation) order.
+  let pickerOpen = $state(false);
+  const installedModels = $derived(models.filter((m) => m.installed));
+  const availableModels = $derived(models.filter((m) => !m.installed));
+
+  async function choose(id: string) {
+    pickerOpen = false;
+    await pickModel(id);
+  }
   // System audio on macOS needs Screen Recording permission; only relevant for the one-click source.
   const needsScreenRecording = $derived(
     !!systemAudioId && systemDevice === systemAudioId && !screenAuthorized,
@@ -310,17 +321,40 @@
         {#if running}
           <span class="active-model"><span class="live-pip"></span>{activeModel?.name ?? "Model"}</span>
         {:else if models.length}
-          <div class="select-wrap">
-            <select
-              class="model-select"
-              value={chosenId}
-              onchange={(e) => pickModel(e.currentTarget.value)}
+          <div class="picker">
+            <button
+              class="picker-trigger"
+              class:open={pickerOpen}
+              onclick={() => (pickerOpen = !pickerOpen)}
               disabled={downloading !== null}
             >
-              {#each models as m (m.id)}
-                <option value={m.id}>{m.name}{m.installed ? "" : " — not downloaded"}</option>
-              {/each}
-            </select>
+              <span class="picker-label">{chosenModel?.name ?? "Select a model"}</span>
+              <span class="picker-caret"></span>
+            </button>
+            {#if pickerOpen}
+              <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
+              ></button>
+              <div class="picker-menu" transition:slide={{ duration: 120 }}>
+                {#if installedModels.length}
+                  <div class="picker-section">Installed</div>
+                  {#each installedModels as m (m.id)}
+                    <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
+                      <span class="picker-opt-name">{m.name}</span>
+                      {#if m.active}<span class="picker-tag">active</span>{/if}
+                    </button>
+                  {/each}
+                {/if}
+                {#if availableModels.length}
+                  <div class="picker-section">Available to download</div>
+                  {#each availableModels as m (m.id)}
+                    <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
+                      <span class="picker-opt-name">{m.name}</span>
+                      <span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span>
+                    </button>
+                  {/each}
+                {/if}
+              </div>
+            {/if}
           </div>
         {:else}
           <span class="muted">Loading models…</span>
@@ -587,31 +621,19 @@
     border-top: 1px solid var(--border);
   }
 
-  .select-wrap {
+  /* Custom Claude-style model dropdown. */
+  .picker {
     position: relative;
     flex: 1 1 auto;
     min-width: 0;
     max-width: 460px;
   }
 
-  .select-wrap::after {
-    content: "";
-    position: absolute;
-    right: 13px;
-    top: 50%;
-    width: 7px;
-    height: 7px;
-    margin-top: -5px;
-    border-right: 1.5px solid var(--muted);
-    border-bottom: 1.5px solid var(--muted);
-    transform: rotate(45deg);
-    pointer-events: none;
-  }
-
-  .model-select {
+  .picker-trigger {
     width: 100%;
-    appearance: none;
-    -webkit-appearance: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
     font-family: inherit;
     font-size: 13.5px;
     font-weight: 500;
@@ -619,22 +641,129 @@
     background: var(--bg);
     border: 1px solid var(--border-strong);
     border-radius: 9px;
-    padding: 8px 30px 8px 12px;
+    padding: 8px 12px;
     cursor: pointer;
-    text-overflow: ellipsis;
     transition:
       border-color 0.15s,
       background 0.15s;
   }
 
-  .model-select:hover:not(:disabled) {
+  .picker-trigger:hover:not(:disabled),
+  .picker-trigger.open {
     border-color: var(--muted);
     background: var(--surface-active);
   }
 
-  .model-select:disabled {
+  .picker-trigger:disabled {
     opacity: 0.55;
     cursor: default;
+  }
+
+  .picker-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+
+  .picker-caret {
+    flex: none;
+    width: 7px;
+    height: 7px;
+    border-right: 1.5px solid var(--muted);
+    border-bottom: 1.5px solid var(--muted);
+    transform: rotate(45deg);
+    transition: transform 0.15s;
+  }
+
+  .picker-trigger.open .picker-caret {
+    transform: rotate(-135deg);
+  }
+
+  .picker-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: transparent;
+    border: none;
+    cursor: default;
+  }
+
+  .picker-menu {
+    position: absolute;
+    top: calc(100% + 6px);
+    left: 0;
+    right: 0;
+    z-index: 21;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    box-shadow: 0 14px 34px -10px rgba(40, 30, 20, 0.28);
+    padding: 6px;
+    max-height: 56vh;
+    overflow-y: auto;
+  }
+
+  .picker-section {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    text-transform: uppercase;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    padding: 8px 10px 4px;
+  }
+
+  .picker-opt {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-family: inherit;
+    font-size: 13.5px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 10px;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.12s;
+  }
+
+  .picker-opt:hover {
+    background: var(--surface-active);
+  }
+
+  .picker-opt.sel {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .picker-opt-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .picker-opt-size {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .picker-tag {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--live);
   }
 
   .active-model {
