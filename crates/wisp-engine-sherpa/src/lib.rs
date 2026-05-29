@@ -9,6 +9,11 @@
 //!
 //! Both transcribe a whole utterance at once; the pipeline supplies VAD-segmented utterances and
 //! offsets the returned segment's timestamps.
+//!
+//! [`SileroSegmenter`] adapts sherpa-onnx's Silero neural VAD to the pipeline's segmentation trait.
+
+mod silero;
+pub use silero::SileroSegmenter;
 
 use std::path::Path;
 use std::time::Duration;
@@ -67,7 +72,11 @@ impl SenseVoiceEngine {
     ///
     /// `language` is a SenseVoice code (`zh`/`en`/`ja`/`ko`/`yue`); an empty string means `auto`.
     pub fn new(model: &Path, tokens: &Path, language: &str) -> Result<Self> {
-        let language = if language.is_empty() { "auto" } else { language };
+        let language = if language.is_empty() {
+            "auto"
+        } else {
+            language
+        };
         let config = SenseVoiceConfig {
             model: model.to_string_lossy().into_owned(),
             tokens: tokens.to_string_lossy().into_owned(),
