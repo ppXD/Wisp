@@ -12,7 +12,9 @@
 //! verified by running the app on macOS. Building it requires `meson` and `ninja` on `PATH`
 //! (`brew install meson ninja`) plus a C/C++ toolchain.
 
-use webrtc_audio_processing::config::EchoCanceller as AecMode;
+use webrtc_audio_processing::config::{
+    EchoCanceller as AecMode, HighPassFilter, NoiseSuppression, NoiseSuppressionLevel,
+};
 use webrtc_audio_processing::{Config, Processor};
 
 use wisp_core::aec::EchoCanceller;
@@ -39,6 +41,14 @@ impl WebrtcEchoCanceller {
         processor.set_config(Config {
             echo_canceller: Some(AecMode::Full {
                 stream_delay_ms: None,
+            }),
+            // High-pass removes low-frequency rumble; noise suppression lowers the residual noise
+            // floor so that, once echo is cancelled, the near-silent mic gives the ASR far less to
+            // hallucinate words from.
+            high_pass_filter: Some(HighPassFilter::default()),
+            noise_suppression: Some(NoiseSuppression {
+                level: NoiseSuppressionLevel::High,
+                ..Default::default()
             }),
             ..Default::default()
         });
