@@ -1,9 +1,14 @@
 //! Audio DSP: channel downmixing and sample-rate conversion to the engine's input format.
 
+use std::time::Duration;
+
 use wisp_core::audio::AudioFrame;
 
 /// Sample rate (Hz) expected by the ASR engines: 16 kHz, mono.
 pub const TARGET_SAMPLE_RATE: u32 = 16_000;
+
+/// Default frame length, in milliseconds, that file-backed sources emit.
+pub const FRAME_CHUNK_MS: u64 = 100;
 
 /// Downmix interleaved multi-channel samples to mono by averaging each channel group.
 pub fn downmix_to_mono(samples: &[f32], channels: u16) -> Vec<f32> {
@@ -51,6 +56,39 @@ pub fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> 
 pub fn to_mono_16k(frame: &AudioFrame) -> Vec<f32> {
     let mono = downmix_to_mono(&frame.samples, frame.channels);
     resample_linear(&mono, frame.sample_rate, TARGET_SAMPLE_RATE)
+}
+
+/// Split decoded interleaved `samples` into `chunk_ms`-long [`AudioFrame`]s, each stamped with its
+/// offset from the start. Shared by the file-backed sources (WAV and media decoders).
+pub fn chunk_into_frames(
+    samples: &[f32],
+    sample_rate: u32,
+    channels: u16,
+    chunk_ms: u64,
+) -> Vec<AudioFrame> {
+    let channels = channels.max(1) as usize;
+    let instants_per_chunk = (u64::from(sample_rate) * chunk_ms / 1000).max(1) as usize;
+    let per_chunk = instants_per_chunk * channels;
+
+    let mut frames = Vec::new();
+    let mut instants_emitted: u64 = 0;
+
+    for chunk in samples.chunks(per_chunk) {
+        let timestamp = if sample_rate == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(instants_emitted as f64 / f64::from(sample_rate))
+        };
+        frames.push(AudioFrame::new(
+            chunk.to_vec(),
+            sample_rate,
+            channels as u16,
+            timestamp,
+        ));
+        instants_emitted += (chunk.len() / channels) as u64;
+    }
+
+    frames
 }
 
 #[cfg(test)]

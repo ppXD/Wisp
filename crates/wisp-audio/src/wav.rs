@@ -4,14 +4,12 @@ use std::collections::VecDeque;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::time::Duration;
 
 use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::AudioSourceKind;
 
-/// Duration of each emitted frame.
-const CHUNK_MS: u64 = 100;
+use crate::dsp::{chunk_into_frames, FRAME_CHUNK_MS};
 
 /// An [`AudioSource`] that decodes a WAV file up front and yields it as ~100 ms frames.
 ///
@@ -30,7 +28,8 @@ impl WavSource {
             .map_err(|e| WispError::Audio(format!("open wav {}: {e}", path.display())))?;
         let spec = reader.spec();
         let samples = read_samples(reader)?;
-        let frames = chunk_frames(samples, spec.sample_rate, spec.channels);
+        let frames =
+            chunk_into_frames(&samples, spec.sample_rate, spec.channels, FRAME_CHUNK_MS).into();
 
         let name = path
             .file_name()
@@ -76,32 +75,6 @@ fn read_samples(reader: hound::WavReader<BufReader<File>>) -> Result<Vec<f32>> {
                 .map_err(|e| WispError::Audio(format!("read int wav: {e}")))
         }
     }
-}
-
-fn chunk_frames(samples: Vec<f32>, sample_rate: u32, channels: u16) -> VecDeque<AudioFrame> {
-    let channels = channels.max(1) as usize;
-    let instants_per_chunk = (u64::from(sample_rate) * CHUNK_MS / 1000).max(1) as usize;
-    let per_chunk = instants_per_chunk * channels;
-
-    let mut frames = VecDeque::new();
-    let mut instants_emitted: u64 = 0;
-
-    for chunk in samples.chunks(per_chunk) {
-        let timestamp = if sample_rate == 0 {
-            Duration::ZERO
-        } else {
-            Duration::from_secs_f64(instants_emitted as f64 / f64::from(sample_rate))
-        };
-        frames.push_back(AudioFrame::new(
-            chunk.to_vec(),
-            sample_rate,
-            channels as u16,
-            timestamp,
-        ));
-        instants_emitted += (chunk.len() / channels) as u64;
-    }
-
-    frames
 }
 
 #[cfg(test)]
