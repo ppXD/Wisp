@@ -34,6 +34,7 @@
   let systemDevice = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
+  let mode = $state<"live" | "file" | "cloud">("live");
   let screenAuthorized = $state(true);
   let micBlocked = $state(false);
   let permissionBusy = $state(false);
@@ -119,8 +120,8 @@
   }
 
   function sourceLabel(source: string): string {
-    if (source === "Microphone") return "me";
-    if (source === "System") return "meeting";
+    if (source === "Microphone") return "mic";
+    if (source === "System") return "system";
     return source.toLowerCase();
   }
 
@@ -160,6 +161,10 @@
       await ensureListener();
       await invoke("start_session");
       running = true;
+      // Capture started, so the permissions it needed are granted — clear any stale prompts
+      // (macOS can report a stale status to a running process after a Settings change).
+      screenAuthorized = true;
+      micBlocked = false;
     } catch (e) {
       error = String(e);
     }
@@ -192,20 +197,28 @@
 
 <main class="app">
   <header>
-    <div class="brand">
-      <span class="dot"></span>
-      <h1>Wisp</h1>
+    <div class="topbar">
+      <div class="brand">
+        <span class="dot"></span>
+        <h1>Wisp</h1>
+      </div>
+      <nav class="modes">
+        <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
+        <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
+        <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
+      </nav>
     </div>
-    <p class="tagline">Local, real-time meeting transcription · on-device</p>
+    <p class="tagline">On-device transcription — live, files, or cloud</p>
   </header>
 
+  {#if mode === "live"}
   {#if needsScreenRecording}
     <div class="permission">
       <div class="permission-body">
-        <div class="permission-title">Allow Screen Recording to hear the meeting</div>
+        <div class="permission-title">Allow Screen Recording to capture system audio</div>
         <p class="permission-sub">
-          Wisp captures system/meeting audio through macOS Screen Recording. Grant access once —
-          nothing leaves your device.
+          Wisp captures system audio through macOS Screen Recording. Grant access once — nothing
+          leaves your device.
         </p>
       </div>
       <button class="btn primary" onclick={grantScreenRecording} disabled={permissionBusy}>
@@ -220,7 +233,7 @@
         <div class="permission-title">Microphone access is off</div>
         <p class="permission-sub">
           Wisp needs the microphone to transcribe your voice. Enable it in System Settings, or set
-          Microphone to Off under Advanced to capture meeting audio only.
+          Microphone to Off under Advanced to capture system audio only.
         </p>
       </div>
       <button class="btn primary" onclick={openMicSettings}>Open settings</button>
@@ -262,14 +275,14 @@
       </select>
     </label>
     <label class="source-row">
-      <span class="source-name">Meeting audio <em>(others)</em></span>
+      <span class="source-name">System audio <em>(everything playing)</em></span>
       <select bind:value={systemDevice} onchange={applyDevices} disabled={running}>
         <option value="">Off</option>
         {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
         {#each devices as d (d)}<option value={d}>{d}</option>{/each}
       </select>
     </label>
-    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong> (you + anything playing), with <strong>echo cancellation</strong> so the meeting audio your mic re-hears on speakers is removed automatically. Want meeting audio only? Set Microphone to Off. System audio asks for Screen Recording permission once.</p>
+    <p class="hint">By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>, with <strong>echo cancellation</strong> so audio your mic re-hears from the speakers is removed automatically. Want system audio only? Set Microphone to Off. System audio asks for Screen Recording permission once.</p>
     </section>
   </details>
 
@@ -291,7 +304,7 @@
 
   <ul class="transcript">
     {#each segments as seg (seg.source + "-" + seg.id)}
-      <li class:partial={!seg.isFinal} class:meeting={seg.source === "System"}>
+      <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
         <span class="time">{fmtTime(seg.startMs)}</span>
         <span class="who">{sourceLabel(seg.source)}</span>
         <span class="text">{seg.text}</span>
@@ -300,6 +313,23 @@
       <li class="empty">Pick a model, press <em>Start listening</em>, and speak.</li>
     {/each}
   </ul>
+  {:else if mode === "file"}
+    <section class="placeholder card">
+      <div class="placeholder-title">Transcribe a file</div>
+      <p class="placeholder-sub">
+        Drop in an audio or video file and Wisp transcribes it with your local model, then lets you
+        export the text (TXT / SRT / VTT). Coming next.
+      </p>
+    </section>
+  {:else}
+    <section class="placeholder card">
+      <div class="placeholder-title">Cloud realtime</div>
+      <p class="placeholder-sub">
+        Stream live audio to a realtime transcription API (e.g. OpenAI Realtime) for the highest
+        accuracy with no local model. Coming soon.
+      </p>
+    </section>
+  {/if}
 </main>
 
 <style>
@@ -334,10 +364,48 @@
     padding: 40px 28px 56px;
   }
 
+  .topbar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
   .brand {
     display: flex;
     align-items: center;
     gap: 10px;
+  }
+
+  .modes {
+    display: inline-flex;
+    gap: 2px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 3px;
+  }
+
+  .modes button {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+
+  .modes button:hover {
+    color: var(--text);
+  }
+
+  .modes button.active {
+    background: var(--accent);
+    color: #fff;
   }
 
   .dot {
@@ -614,8 +682,26 @@
     text-transform: lowercase;
   }
 
-  .transcript li.meeting .who {
+  .transcript li.system .who {
     color: #5b7fb0;
+  }
+
+  .placeholder {
+    text-align: center;
+    padding: 52px 28px;
+  }
+
+  .placeholder-title {
+    font-size: 17px;
+    font-weight: 600;
+  }
+
+  .placeholder-sub {
+    margin: 10px auto 0;
+    max-width: 430px;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.6;
   }
 
   .sources {
