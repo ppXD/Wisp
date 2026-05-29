@@ -64,11 +64,14 @@ pub struct SenseVoiceEngine {
 
 impl SenseVoiceEngine {
     /// Loads a SenseVoice model (`model.onnx` or `model.int8.onnx`) and its `tokens.txt`.
-    pub fn new(model: &Path, tokens: &Path) -> Result<Self> {
+    ///
+    /// `language` is a SenseVoice code (`zh`/`en`/`ja`/`ko`/`yue`); an empty string means `auto`.
+    pub fn new(model: &Path, tokens: &Path, language: &str) -> Result<Self> {
+        let language = if language.is_empty() { "auto" } else { language };
         let config = SenseVoiceConfig {
             model: model.to_string_lossy().into_owned(),
             tokens: tokens.to_string_lossy().into_owned(),
-            language: "auto".to_owned(),
+            language: language.to_owned(),
             use_itn: true,
             ..Default::default()
         };
