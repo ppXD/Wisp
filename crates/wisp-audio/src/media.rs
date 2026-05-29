@@ -7,6 +7,7 @@
 use std::collections::VecDeque;
 use std::fs::File;
 use std::path::Path;
+use std::time::Duration;
 
 use symphonia::core::audio::SampleBuffer;
 use symphonia::core::codecs::{DecoderOptions, CODEC_TYPE_NULL};
@@ -26,6 +27,7 @@ use crate::dsp::{chunk_into_frames, FRAME_CHUNK_MS};
 pub struct MediaSource {
     frames: VecDeque<AudioFrame>,
     info: AudioSourceInfo,
+    duration: Duration,
 }
 
 impl MediaSource {
@@ -38,6 +40,13 @@ impl MediaSource {
                 path.display()
             )));
         }
+
+        let instants = samples.len() / (channels.max(1) as usize);
+        let duration = if sample_rate == 0 {
+            Duration::ZERO
+        } else {
+            Duration::from_secs_f64(instants as f64 / f64::from(sample_rate))
+        };
 
         let frames = chunk_into_frames(&samples, sample_rate, channels, FRAME_CHUNK_MS).into();
         let name = path
@@ -52,7 +61,13 @@ impl MediaSource {
                 kind: AudioSourceKind::File,
                 name,
             },
+            duration,
         })
+    }
+
+    /// Total decoded duration of the clip.
+    pub fn duration(&self) -> Duration {
+        self.duration
     }
 }
 
@@ -153,6 +168,7 @@ mod tests {
 
         let mut src = MediaSource::open(&path).unwrap();
         assert_eq!(src.info().kind, AudioSourceKind::File);
+        assert_eq!(src.duration().as_millis(), 500); // 8000 samples @ 16 kHz
 
         let mut total = 0usize;
         while let Some(frame) = src.next_frame().unwrap() {

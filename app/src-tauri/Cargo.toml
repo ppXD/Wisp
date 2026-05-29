@@ -23,7 +23,7 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 wisp-core = { path = "../../crates/wisp-core" }
-wisp-audio = { path = "../../crates/wisp-audio", features = ["mic"] }
+wisp-audio = { path = "../../crates/wisp-audio", features = ["mic", "file"] }
 wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa" }

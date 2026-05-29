@@ -13,7 +13,7 @@ use serde::Serialize;
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
 use wisp_aec::WebrtcEchoCanceller;
-use wisp_audio::{tee, ChannelSource, EchoCancellingSource, MicSource, Tee};
+use wisp_audio::{tee, ChannelSource, EchoCancellingSource, MediaSource, MicSource, Tee};
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::engine::AsrEngine;
@@ -34,6 +34,12 @@ const SEGMENT_EVENT: &str = "transcript://segment";
 
 /// Event channel the UI listens on for model-download progress.
 const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
+
+/// Event channels for file transcription: total duration up front, each segment as it's produced,
+/// and a completion signal.
+const FILE_META_EVENT: &str = "file://meta";
+const FILE_SEGMENT_EVENT: &str = "file://segment";
+const FILE_DONE_EVENT: &str = "file://done";
 
 /// Sentinel "device" id selecting one-click system-audio capture (ScreenCaptureKit, no setup).
 /// Must match the value used by the UI.
@@ -58,6 +64,8 @@ struct AppState {
     language: Mutex<String>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
+    /// Segments from the most recent file transcription, kept for export.
+    file_segments: Mutex<Vec<TranscriptSegment>>,
     /// File where the active model id is persisted, so the choice survives a restart.
     active_model_path: PathBuf,
 }
@@ -96,6 +104,14 @@ struct DownloadProgressDto {
     id: String,
     downloaded: u64,
     total: u64,
+}
+
+/// Metadata emitted at the start of a file transcription (for the progress bar).
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileMetaDto {
+    name: String,
+    total_ms: u64,
 }
 
 /// A catalog model with its install/active status, for the picker UI.
@@ -598,6 +614,88 @@ fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     }
 }
 
+/// Transcribes an audio/video file at `path` with the active model. Emits the clip duration up
+/// front (`file://meta`), each segment as it's produced (`file://segment`), and a completion signal
+/// (`file://done`); the segments are retained for export.
+#[tauri::command]
+async fn transcribe_file(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<(), String> {
+    let active = state
+        .active
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone()
+        .ok_or("no model selected")?;
+    let descriptor = state
+        .store
+        .available()
+        .into_iter()
+        .find(|d| d.id == active)
+        .ok_or("selected model is not in the catalog")?;
+    let dir = state
+        .store
+        .local_path(&active)
+        .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
+    let language = state
+        .language
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+
+    let task_app = app.clone();
+    let segments =
+        tauri::async_runtime::spawn_blocking(move || -> WispResult<Vec<TranscriptSegment>> {
+            let source = MediaSource::open(Path::new(&path))?;
+            let _ = task_app.emit(
+                FILE_META_EVENT,
+                FileMetaDto {
+                    name: source.info().name,
+                    total_ms: source.duration().as_millis() as u64,
+                },
+            );
+
+            let engine = build_engine(&descriptor, &dir, &language)?;
+            let transcriber = Transcriber::new(engine, AudioSourceKind::File);
+            let segmenter = build_segmenter(&task_app, AudioSourceKind::File);
+
+            // Collect segments (for export) while also streaming them to the UI.
+            let collected = Arc::new(Mutex::new(Vec::new()));
+            let sink_collected = Arc::clone(&collected);
+            let emitter = task_app.clone();
+            let sink: wisp_pipeline::EventSink = Box::new(move |event| {
+                if let TranscriptEvent::Segment(segment) = event {
+                    let _ = emitter.emit(FILE_SEGMENT_EVENT, SegmentDto::from(&segment));
+                    if let Ok(mut c) = sink_collected.lock() {
+                        c.push(segment);
+                    }
+                }
+            });
+
+            // A file is a finite source: the decoupled session runs it to completion, then joins.
+            Session::spawn_live(segmenter, transcriber, Box::new(source), sink).join()?;
+
+            let out = std::mem::take(
+                &mut *collected
+                    .lock()
+                    .map_err(|_| WispError::Engine("collector lock poisoned".to_owned()))?,
+            );
+            Ok(out)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+
+    *state
+        .file_segments
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = segments;
+    let _ = app.emit(FILE_DONE_EVENT, ());
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -636,6 +734,7 @@ pub fn run() {
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
                 language: Mutex::new(String::new()),
                 tee: Mutex::new(None),
+                file_segments: Mutex::new(Vec::new()),
                 active_model_path,
             });
             Ok(())
@@ -656,7 +755,8 @@ pub fn run() {
             set_language,
             set_devices,
             start_session,
-            stop_session
+            stop_session,
+            transcribe_file
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
