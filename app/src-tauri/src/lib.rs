@@ -75,8 +75,8 @@ struct AppState {
     system_device: Mutex<Option<String>>,
     /// Transcription language code (`zh`/`yue`/…); empty = auto-detect.
     language: Mutex<String>,
-    /// Whether to denoise the live capture before transcribing (built-in RNNoise).
-    live_denoise: Mutex<bool>,
+    /// Denoiser id for the live capture (`"rnnoise"`, `"denoise-gtcrn"`), or `None` for off.
+    live_denoiser: Mutex<Option<String>>,
     /// Speaker-ID model id for live diarization, or `None` to skip live speaker labels.
     live_diarize_model: Mutex<Option<String>>,
     /// Live biasing prompt (names, jargon); empty for none.
@@ -277,7 +277,10 @@ fn silero_model_path(app: &AppHandle) -> Option<PathBuf> {
 /// Per-session live transcription settings, read from app state when a session starts.
 struct LiveSettings {
     language: String,
-    denoise: bool,
+    /// Denoiser id (`"rnnoise"`, `"denoise-gtcrn"`), or `None` for off.
+    denoiser: Option<String>,
+    /// Downloaded directory for a model-based denoiser (GTCRN); `None` for the built-in / off.
+    denoise_dir: Option<PathBuf>,
     /// Downloaded diarization model directory for live speaker labels, or `None` to skip.
     diarize_dir: Option<PathBuf>,
     /// Biasing prompt (names, jargon) for the streaming engine; empty for none.
@@ -313,11 +316,12 @@ fn spawn_session(
             Err(e) => eprintln!("wisp: live diarizer load failed ({e}); skipping speaker labels"),
         }
     }
-    // Built-in RNNoise streams frame-by-frame, so it suits live capture (the downloadable models
-    // are clip-based). A fresh, stateful instance per session.
-    let denoiser: Option<Box<dyn Denoiser>> = settings
-        .denoise
-        .then(|| Box::new(RnnoiseDenoiser::new()) as Box<dyn Denoiser>);
+    // Per-session denoiser: built-in RNNoise (streams frame-by-frame) or a downloaded model
+    // (GTCRN), built the same way as the File path.
+    let denoiser = settings
+        .denoiser
+        .as_deref()
+        .and_then(|id| build_denoiser(id, settings.denoise_dir.as_deref()));
 
     let emitter = app.clone();
     let sink: wisp_pipeline::EventSink = Box::new(move |event| {
@@ -524,13 +528,13 @@ fn set_language(state: State<'_, AppState>, language: String) -> Result<(), Stri
     Ok(())
 }
 
-/// Toggles live noise reduction (applied to the next session that starts).
+/// Sets the live denoiser id (`"rnnoise"`/`"denoise-gtcrn"`/none), applied to the next session.
 #[tauri::command]
-fn set_denoise(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+fn set_denoise(state: State<'_, AppState>, denoiser: Option<String>) -> Result<(), String> {
     *state
-        .live_denoise
+        .live_denoiser
         .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = enabled;
+        .map_err(|_| "state lock poisoned".to_owned())? = denoiser;
     Ok(())
 }
 
@@ -610,10 +614,20 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
-    let denoise = *state
-        .live_denoise
+    let denoiser = state
+        .live_denoiser
         .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?;
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+    let denoise_dir = match denoiser.as_deref() {
+        Some(id) if id != "rnnoise" => Some(
+            state
+                .store
+                .local_path(&ModelId(id.to_owned()))
+                .ok_or_else(|| format!("denoise model '{id}' is not downloaded yet"))?,
+        ),
+        _ => None,
+    };
     let diarize_dir = match &*state
         .live_diarize_model
         .lock()
@@ -638,7 +652,8 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .map_err(|_| "state lock poisoned".to_owned())?;
     let settings = LiveSettings {
         language,
-        denoise,
+        denoiser,
+        denoise_dir,
         diarize_dir,
         prompt,
         accurate,
@@ -1071,7 +1086,7 @@ pub fn run() {
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
                 language: Mutex::new(String::new()),
-                live_denoise: Mutex::new(false),
+                live_denoiser: Mutex::new(None),
                 live_diarize_model: Mutex::new(None),
                 live_prompt: Mutex::new(String::new()),
                 live_accurate: Mutex::new(false),
