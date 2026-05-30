@@ -79,6 +79,10 @@ struct AppState {
     live_denoise: Mutex<bool>,
     /// Speaker-ID model id for live diarization, or `None` to skip live speaker labels.
     live_diarize_model: Mutex<Option<String>>,
+    /// Live biasing prompt (names, jargon); empty for none.
+    live_prompt: Mutex<String>,
+    /// Live decoding: beam search (accurate) vs greedy (fast).
+    live_accurate: Mutex<bool>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
     /// Segments from the most recent file transcription, kept for export.
@@ -276,6 +280,10 @@ struct LiveSettings {
     denoise: bool,
     /// Downloaded diarization model directory for live speaker labels, or `None` to skip.
     diarize_dir: Option<PathBuf>,
+    /// Biasing prompt (names, jargon) for the streaming engine; empty for none.
+    prompt: String,
+    /// Beam search (accurate) vs greedy (fast) for the streaming engine.
+    accurate: bool,
 }
 
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
@@ -293,7 +301,8 @@ fn spawn_session(
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
     settings: &LiveSettings,
 ) -> WispResult<Session> {
-    let engine = build_engine(descriptor, dir, &settings.language)?;
+    let mut engine = build_engine(descriptor, dir, &settings.language)?;
+    engine.configure_streaming(&settings.prompt, settings.accurate);
     let segmenter = build_segmenter(app, kind);
     let mut transcriber = Transcriber::new(engine, kind);
     // Live speaker labels: a per-session diarizer (separate numbering per stream). Best-effort —
@@ -535,6 +544,24 @@ fn set_live_diarize(state: State<'_, AppState>, model: Option<String>) -> Result
     Ok(())
 }
 
+/// Sets the live decoding options — biasing prompt (hints) and accurate/fast — for the next session.
+#[tauri::command]
+fn set_live_decode(
+    state: State<'_, AppState>,
+    prompt: String,
+    accurate: bool,
+) -> Result<(), String> {
+    *state
+        .live_prompt
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = prompt;
+    *state
+        .live_accurate
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = accurate;
+    Ok(())
+}
+
 #[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
@@ -600,10 +627,21 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         ),
         None => None,
     };
+    let prompt = state
+        .live_prompt
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+    let accurate = *state
+        .live_accurate
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
     let settings = LiveSettings {
         language,
         denoise,
         diarize_dir,
+        prompt,
+        accurate,
     };
 
     // Open the audio sources first (these can fail: device missing / no mic permission).
@@ -1035,6 +1073,8 @@ pub fn run() {
                 language: Mutex::new(String::new()),
                 live_denoise: Mutex::new(false),
                 live_diarize_model: Mutex::new(None),
+                live_prompt: Mutex::new(String::new()),
+                live_accurate: Mutex::new(false),
                 tee: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
                 active_model_path,
@@ -1059,6 +1099,7 @@ pub fn run() {
             set_language,
             set_denoise,
             set_live_diarize,
+            set_live_decode,
             set_devices,
             start_session,
             stop_session,

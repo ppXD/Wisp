@@ -128,6 +128,9 @@ pub struct WhisperCppEngine {
     language: CString,
     n_threads: i32,
     thresholds: DecodeThresholds,
+    /// Streaming-path (live) biasing prompt and beam-search choice, set via `configure_streaming`.
+    stream_prompt: CString,
+    stream_beam: bool,
 }
 
 unsafe impl Send for WhisperCppEngine {}
@@ -173,6 +176,8 @@ impl WhisperCppEngine {
             language,
             n_threads: decode_threads(),
             thresholds: thresholds_from_env(),
+            stream_prompt: CString::default(),
+            stream_beam: false,
         })
     }
 }
@@ -186,12 +191,15 @@ impl AsrEngine for WhisperCppEngine {
     }
 
     fn transcribe(&mut self, audio: &[f32], _sample_rate: u32) -> Result<TranscriptionResult> {
-        // SAFETY: `self.ctx` is a live context; `audio` is a valid slice; `self.language` outlives
-        // the call so its pointer stays valid for the duration of `whisper_full`.
+        let strategy = if self.stream_beam {
+            sys::whisper_sampling_strategy::WHISPER_SAMPLING_BEAM_SEARCH
+        } else {
+            sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY
+        };
+        // SAFETY: `self.ctx` is a live context; `audio` is a valid slice; `self.language` and
+        // `self.stream_prompt` outlive the call so their pointers stay valid through `whisper_full`.
         let text = unsafe {
-            let mut params = sys::whisper_full_default_params(
-                sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY,
-            );
+            let mut params = sys::whisper_full_default_params(strategy);
             params.n_threads = self.n_threads;
             params.language = self.language.as_ptr();
             params.translate = false;
@@ -202,6 +210,9 @@ impl AsrEngine for WhisperCppEngine {
             params.print_special = false;
             params.print_timestamps = false;
             params.single_segment = false;
+            if !self.stream_prompt.as_bytes().is_empty() {
+                params.initial_prompt = self.stream_prompt.as_ptr();
+            }
             apply_thresholds(&mut params, self.thresholds);
 
             let rc = sys::whisper_full(self.ctx, params, audio.as_ptr(), audio.len() as c_int);
@@ -303,6 +314,11 @@ impl AsrEngine for WhisperCppEngine {
         };
 
         Ok(TranscriptionResult { segments })
+    }
+
+    fn configure_streaming(&mut self, prompt: &str, beam: bool) {
+        self.stream_prompt = CString::new(prompt).unwrap_or_default();
+        self.stream_beam = beam;
     }
 
     fn reset(&mut self) {
