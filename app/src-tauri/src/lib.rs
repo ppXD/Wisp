@@ -31,7 +31,8 @@ use wisp_engine_sherpa::{
     WhisperEngine,
 };
 use wisp_models::{
-    builtin_catalog, denoise_models, diarization_models, FsModelStore, HttpDownloader,
+    builtin_catalog, denoise_models, diarization_models, recommended_default_model, FsModelStore,
+    HttpDownloader,
 };
 use wisp_pipeline::{
     remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
@@ -146,6 +147,8 @@ struct ModelInfoDto {
     description: String,
     installed: bool,
     active: bool,
+    /// Whether this is the model recommended for the user's Mac (by available memory).
+    recommended: bool,
 }
 
 /// Per-file transcription options sent from the UI as one object.
@@ -354,14 +357,46 @@ fn spawn_session(
     ))
 }
 
+/// Total physical memory in bytes, via `sysctl hw.memsize`. Falls back to 16 GiB (treated as
+/// "ample") if the query fails, so model recommendation never errors out.
+#[cfg(target_os = "macos")]
+fn machine_ram_bytes() -> u64 {
+    let mut value: u64 = 0;
+    let mut size = std::mem::size_of::<u64>();
+    // SAFETY: `hw.memsize` is a valid C string; `value`/`size` are correctly-sized out-pointers and
+    // the remaining args are the documented null/zero for "no new value".
+    let rc = unsafe {
+        libc::sysctlbyname(
+            c"hw.memsize".as_ptr(),
+            &mut value as *mut u64 as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && value > 0 {
+        value
+    } else {
+        16 * 1024 * 1024 * 1024
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn machine_ram_bytes() -> u64 {
+    16 * 1024 * 1024 * 1024
+}
+
 /// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.
+/// `recommended` is the machine-appropriate default; `None` for non-ASR lists that don't recommend.
 fn to_model_info(
     d: ModelDescriptor,
     store: &FsModelStore,
     active: Option<&ModelId>,
+    recommended: Option<&ModelId>,
 ) -> ModelInfoDto {
     let installed = store.local_path(&d.id).is_some();
     let is_active = active == Some(&d.id);
+    let is_recommended = recommended == Some(&d.id);
     let size_bytes = d.total_size_bytes();
     ModelInfoDto {
         id: d.id.0,
@@ -371,6 +406,7 @@ fn to_model_info(
         description: d.description,
         installed,
         active: is_active,
+        recommended: is_recommended,
     }
 }
 
@@ -381,12 +417,13 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
+    let recommended = recommended_default_model(machine_ram_bytes());
     let models = state
         .store
         .available()
         .into_iter()
         .filter(|d| d.family != ModelFamily::Diarization)
-        .map(|d| to_model_info(d, &state.store, active.as_ref()))
+        .map(|d| to_model_info(d, &state.store, active.as_ref(), Some(&recommended)))
         .collect();
     Ok(models)
 }
@@ -400,7 +437,7 @@ fn list_diarization_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDt
         .available()
         .into_iter()
         .filter(|d| d.family == ModelFamily::Diarization)
-        .map(|d| to_model_info(d, &state.store, None))
+        .map(|d| to_model_info(d, &state.store, None, None))
         .collect();
     Ok(models)
 }
@@ -414,7 +451,7 @@ fn list_denoise_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, 
         .available()
         .into_iter()
         .filter(|d| d.family == ModelFamily::Denoise)
-        .map(|d| to_model_info(d, &state.store, None))
+        .map(|d| to_model_info(d, &state.store, None, None))
         .collect();
     Ok(models)
 }
@@ -1071,7 +1108,7 @@ pub fn run() {
             ));
 
             // Prefer the last chosen model (if still installed), then the first installed, then the
-            // first in the catalog.
+            // model recommended for this Mac's memory.
             let persisted = fs::read_to_string(&active_model_path)
                 .ok()
                 .map(|s| ModelId(s.trim().to_owned()))
@@ -1083,7 +1120,7 @@ pub fn run() {
                         .find(|d| store.local_path(&d.id).is_some())
                         .map(|d| d.id.clone())
                 })
-                .or_else(|| asr_catalog.first().map(|d| d.id.clone()));
+                .or_else(|| Some(recommended_default_model(machine_ram_bytes())));
 
             app.manage(AppState {
                 store,

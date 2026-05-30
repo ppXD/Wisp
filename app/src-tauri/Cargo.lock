@@ -79,6 +79,7 @@ checksum = "170433209e817da6aae2c51aa0dd443009a613425dd041ebfb2492d1c4c11a25"
 name = "app"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "objc2",
  "serde",
  "serde_json",
