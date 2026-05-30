@@ -47,3 +47,8 @@ wisp-screencapture = { path = "../../crates/wisp-screencapture" }
 wisp-aec = { path = "../../crates/wisp-aec" }
 # GPU (Metal) Whisper engine.
 wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }
+
+# Windows-only native deps. System-audio capture via WASAPI loopback — the counterpart to macOS
+# ScreenCaptureKit, so Windows gets the same one-click "capture the meeting" Live experience.
+[target.'cfg(target_os = "windows")'.dependencies]
+wisp-loopback = { path = "../../crates/wisp-loopback" }

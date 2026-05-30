@@ -32,6 +32,8 @@ use wisp_engine_sherpa::{
     GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
     WhisperEngine,
 };
+#[cfg(target_os = "windows")]
+use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
     builtin_catalog, coreml_asset, denoise_models, diarization_models, recommended_default_model,
     Accelerator, FsModelStore, HttpDownloader, MachineProfile,
@@ -714,8 +716,8 @@ fn set_devices(
 }
 
 /// Opens the system-audio capture source for this platform, or an error so the caller degrades to
-/// mic-only. Only macOS has an impl (ScreenCaptureKit) today; other platforms report unavailable
-/// until their own (e.g. WASAPI loopback) is added.
+/// mic-only. macOS uses ScreenCaptureKit and Windows uses WASAPI loopback — both one-click, no
+/// virtual device; other platforms report unavailable until their own is added.
 #[cfg(target_os = "macos")]
 fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
     ScreenCaptureSource::new()
@@ -723,7 +725,14 @@ fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(target_os = "windows")]
+fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
+    WasapiLoopbackSource::new()
+        .map(|s| Box::new(s) as Box<dyn AudioSource>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
     Err("system-audio capture isn't available on this platform yet".to_owned())
 }
