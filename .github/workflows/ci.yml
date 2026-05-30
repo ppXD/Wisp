@@ -50,15 +50,17 @@ jobs:
 
   # Proves the Tauri shell + its cross-platform deps (sherpa-onnx, cpal) build on Windows, where the
   # macOS-only bits (ScreenCaptureKit, WebRTC AEC, Metal whisper.cpp) are absent and degrade.
+  #
+  # No rust-cache here: sherpa-rs-sys downloads its prebuilt C library to a dir *outside* the cached
+  # target/ + ~/.cargo (AppData\Local\sherpa-rs), then bakes that absolute path into the build
+  # script's link-search directives. A cache hit restores target/ with those directives but not the
+  # download they point at, so link.exe fails with "cannot open input file 'cargs.lib'". Build clean.
   windows-app:
     name: app builds (windows)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: app/src-tauri
       - uses: actions/setup-node@v4
         with:
           node-version: 20
