@@ -7,6 +7,7 @@
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
   import { slide } from "svelte/transition";
+  import Modal from "$lib/Modal.svelte";
 
   type Segment = {
     id: number;
@@ -47,6 +48,9 @@
   let systemAudioId = $state("");
   let micOffId = $state("");
   let mode = $state<"live" | "file" | "cloud">("live");
+  // Settings modals (replace the old inline disclosures, so opening them never shifts the layout).
+  let liveAdvancedOpen = $state(false);
+  let fileOptionsOpen = $state(false);
   let screenAuthorized = $state(true);
   let micBlocked = $state(false);
   let permissionBusy = $state(false);
@@ -706,9 +710,23 @@
     </section>
 
     {#if !running}
-      <details class="advanced-panel">
-        <summary>Advanced · audio, language, speakers</summary>
-        <div class="advanced-grid">
+      <button class="advanced-trigger" onclick={() => (liveAdvancedOpen = true)}>
+        <svg
+          class="trigger-icon"
+          viewBox="0 0 16 16"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.5"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
+          <path d="M2 5h6M11.5 5H14M2 11h2.5M8 11h6" />
+          <circle cx="9.5" cy="5" r="1.6" />
+          <circle cx="6" cy="11" r="1.6" />
+        </svg>
+        Advanced · audio, language, speakers
+      </button>
+      <Modal bind:open={liveAdvancedOpen} title="Advanced settings">
           <div class="opt-group">
             <span class="group-title">Audio</span>
             <label class="source-row">
@@ -858,8 +876,7 @@
               similar-sounding voices apart better; downloads a small model the first time.
             </p>
           </div>
-        </div>
-      </details>
+      </Modal>
     {/if}
   {:else if mode === "file"}
     <section class="box">
@@ -934,11 +951,27 @@
             {/if}
           </p>
         </button>
-        <!-- Sensible defaults (Accurate, plain text) work for most files; power options stay
-             tucked away so a first-time user isn't faced with a wall of controls. -->
-        <details class="advanced-panel file-options">
-          <summary>Options · accuracy, hints, speakers</summary>
-          <div class="file-opts">
+        <!-- Power options open in a modal, so showing them never reflows the drop zone. -->
+        <button
+          class="advanced-trigger file-options-trigger"
+          onclick={() => (fileOptionsOpen = true)}
+        >
+          <svg
+            class="trigger-icon"
+            viewBox="0 0 16 16"
+            fill="none"
+            stroke="currentColor"
+            stroke-width="1.5"
+            stroke-linecap="round"
+            aria-hidden="true"
+          >
+            <path d="M2 5h6M11.5 5H14M2 11h2.5M8 11h6" />
+            <circle cx="9.5" cy="5" r="1.6" />
+            <circle cx="6" cy="11" r="1.6" />
+          </svg>
+          Options · accuracy, hints, speakers
+        </button>
+        <Modal bind:open={fileOptionsOpen} title="Options">
             <div class="opt-group">
               <div class="opt-row">
                 <span class="opt-label">Mode</span>
@@ -1053,8 +1086,7 @@
                 Downloads a small model the first time.
               </p>
             </div>
-          </div>
-        </details>
+        </Modal>
       {/if}
     </section>
   {:else}
@@ -1546,17 +1578,17 @@
   }
 
   /* Advanced panel sits below the content box; collapsed by default so it costs ~no height. */
-  .advanced-panel {
+  /* Pill button that opens a settings modal (replaces the old inline disclosure, so the panel
+     never reflows the page when shown). */
+  .advanced-trigger {
     flex: none;
-  }
-
-  .advanced-panel > summary {
+    align-self: start;
     cursor: pointer;
-    list-style: none;
     display: inline-flex;
     align-items: center;
     gap: 8px;
     width: fit-content;
+    font-family: inherit;
     font-size: 13px;
     font-weight: 500;
     color: var(--muted);
@@ -1570,43 +1602,21 @@
       background 0.15s;
   }
 
-  .advanced-panel > summary::-webkit-details-marker {
-    display: none;
-  }
-
-  .advanced-panel > summary::before {
-    content: "";
-    width: 6px;
-    height: 6px;
-    border-right: 1.5px solid currentColor;
-    border-bottom: 1.5px solid currentColor;
-    transform: rotate(-45deg);
-    transition: transform 0.15s;
-  }
-
-  .advanced-panel[open] > summary::before {
-    transform: rotate(45deg);
-  }
-
-  .advanced-panel > summary:hover {
+  .advanced-trigger:hover {
     color: var(--text);
     border-color: var(--border-strong);
     background: var(--surface-active);
   }
 
-  .advanced-panel[open] > summary {
-    margin-bottom: 10px;
+  .trigger-icon {
+    flex: none;
+    width: 14px;
+    height: 14px;
   }
 
-  .advanced-grid {
-    display: flex;
-    flex-direction: column;
-    /* The `.opt-group` blocks inside manage their own spacing + dividers. */
-    gap: 0;
-    padding: 14px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 12px;
+  /* The File trigger sits inside the drop-zone box, so it needs the same inset the panel had. */
+  .file-options-trigger {
+    margin: 0 14px 14px;
   }
 
   /* Small section header above each group of related controls (Audio / Transcription / Speakers). */
@@ -1800,21 +1810,6 @@
     cursor: pointer;
   }
 
-  .file-opts {
-    flex: none;
-    padding: 11px 14px 12px;
-    border-bottom: 1px solid var(--border);
-  }
-
-  /* When the options live inside the collapsible disclosure, drop the section chrome. */
-  .file-options {
-    margin: 0 14px 14px;
-  }
-
-  .file-options .file-opts {
-    padding: 0;
-    border-bottom: none;
-  }
 
   /* Each option (mode, noise, hints, speakers) is its own block, separated by a hairline so they
      read as distinct choices rather than one dense wall. */
