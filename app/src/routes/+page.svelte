@@ -304,14 +304,59 @@
   let fileHasTimestamps = $state(false);
   // Optional context primer (names, jargon, domain terms) that biases the decoder's spelling.
   let filePrompt = $state("");
+  // Speaker diarization (who-said-what), opt-in. The models load and download on demand.
+  let diarizeModels = $state<ModelInfo[]>([]);
+  let diarizeOn = $state(false);
+  let diarizeId = $state("");
+  const diarizeChosen = $derived(diarizeModels.find((m) => m.id === diarizeId));
+  $effect(() => {
+    if (!diarizeId && diarizeModels.length) diarizeId = diarizeModels[0].id;
+  });
   let dragOver = $state(false);
   let fileListeners: UnlistenFn[] = [];
   let dropUnlisten: UnlistenFn | undefined;
+
+  // A distinct colour per speaker (cycled), and a 1-based label matching the export.
+  const SPEAKER_COLORS = ["#c96442", "#3f7e6b", "#6a5acd", "#b58a2e", "#9c4d6b", "#4a7aa8"];
+  const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
+  const speakerLabel = (n: number) => `Speaker ${n + 1}`;
+  // Short segmented-control label for a diarization model (last "·" segment of its display name).
+  const diarizeShortName = (m: ModelInfo) => (m.name.split("·").pop() ?? m.name).trim();
+
+  async function refreshDiarizeModels() {
+    try {
+      diarizeModels = await invoke<ModelInfo[]>("list_diarization_models");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Download a diarization model. Like `download` but it never becomes the active ASR model.
+  async function downloadDiarize(id: string) {
+    error = "";
+    downloadFailed = null;
+    downloading = id;
+    downloadProgress = { downloaded: 0, total: diarizeModels.find((m) => m.id === id)?.sizeBytes ?? 0 };
+    try {
+      await invoke("download_model", { id });
+      await refreshDiarizeModels();
+    } catch (e) {
+      downloadFailed = id;
+      error = String(e);
+    } finally {
+      downloading = null;
+      downloadProgress = null;
+    }
+  }
 
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
     if (!canStart) {
       error = "Download a model in the Live tab first.";
+      return;
+    }
+    if (diarizeOn && !diarizeChosen?.installed) {
+      error = "Download the speaker model first.";
       return;
     }
     error = "";
@@ -325,6 +370,7 @@
         timestamps: fileTimestamps,
         accurate: fileAccurate,
         prompt: filePrompt.trim(),
+        diarizeModel: diarizeOn ? diarizeId : null,
       });
     } catch (e) {
       error = String(e);
@@ -410,6 +456,7 @@
 
   onMount(() => {
     refreshModels();
+    refreshDiarizeModels();
     refreshDevices();
     checkPermissions();
     ensureProgressListener();
@@ -621,7 +668,11 @@
               {#if fileHasTimestamps}
                 <span class="meta"><span class="time">{fmtTime(seg.startMs)}</span></span>
               {/if}
-              <span class="text">{seg.text}</span>
+              <span class="text"
+                >{#if seg.speaker !== null}<span
+                    class="speaker"
+                    style="--spk: {speakerColor(seg.speaker)}">{speakerLabel(seg.speaker)}</span
+                  >{/if}{seg.text}</span>
             </li>
           {:else}
             <li class="empty">Transcribing… large files take a little while.</li>
@@ -679,6 +730,38 @@
             <p class="opt-hint">
               <strong>Hints</strong> prime the decoder with your spellings (people, places, acronyms)
               so it transcribes them correctly. Comma-separated, no need for full sentences.
+            </p>
+          </div>
+          <div class="opt-field">
+            <label class="toggle">
+              <input type="checkbox" bind:checked={diarizeOn} />
+              <span>Identify speakers</span>
+            </label>
+            {#if diarizeOn}
+              <div class="opt-row diarize-row">
+                <div class="seg">
+                  {#each diarizeModels as m (m.id)}
+                    <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
+                      {diarizeShortName(m)}
+                    </button>
+                  {/each}
+                </div>
+                {#if diarizeChosen && !diarizeChosen.installed}
+                  <button
+                    class="btn outline sm"
+                    onclick={() => downloadDiarize(diarizeId)}
+                    disabled={downloading === diarizeId}
+                  >
+                    {downloading === diarizeId
+                      ? `Downloading… ${downloadPct}%`
+                      : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+                  </button>
+                {/if}
+              </div>
+            {/if}
+            <p class="opt-hint">
+              <strong>Identify speakers</strong> labels each line by who's talking (Speaker 1, 2…).
+              Runs locally after transcription; downloads a small model the first time.
             </p>
           </div>
         </div>
@@ -1490,6 +1573,17 @@
 
   .opt-field .opt-hint {
     margin-top: 7px;
+  }
+
+  .diarize-row {
+    margin-top: 9px;
+  }
+
+  /* Speaker name prefix on a transcript line, tinted per speaker via the `--spk` variable. */
+  .speaker {
+    margin-right: 7px;
+    font-weight: 600;
+    color: var(--spk);
   }
 
   .dropzone-title {
