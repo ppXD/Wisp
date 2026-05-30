@@ -1,0 +1,12 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/silero_vad.onnx": "resources/silero_vad.onnx",
+      "target/release/onnxruntime.dll": "onnxruntime.dll",
+      "target/release/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+      "target/release/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",
+      "target/release/cargs.dll": "cargs.dll"
+    }
+  }
+}
