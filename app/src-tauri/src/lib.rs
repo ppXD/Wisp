@@ -12,11 +12,13 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
+#[cfg(target_os = "macos")]
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
     MicSource, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
+use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
@@ -38,6 +40,7 @@ use wisp_pipeline::{
     remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
     DEFAULT_SILENCE_HANGOVER,
 };
+#[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
 
 mod permissions;
@@ -710,6 +713,41 @@ fn set_devices(
     Ok(())
 }
 
+/// Opens the system-audio capture source for this platform, or an error so the caller degrades to
+/// mic-only. Only macOS has an impl (ScreenCaptureKit) today; other platforms report unavailable
+/// until their own (e.g. WASAPI loopback) is added.
+#[cfg(target_os = "macos")]
+fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
+    ScreenCaptureSource::new()
+        .map(|s| Box::new(s) as Box<dyn AudioSource>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
+    Err("system-audio capture isn't available on this platform yet".to_owned())
+}
+
+/// The echo canceller for this platform: WebRTC AEC on macOS (falling back to passthrough if it
+/// won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>` lets the dual-stream
+/// path stay identical on every platform — the cross-stream dedup handles residual echo where there
+/// is no real AEC.
+#[cfg(target_os = "macos")]
+fn echo_canceller() -> Box<dyn EchoCanceller> {
+    match WebrtcEchoCanceller::new() {
+        Ok(c) => Box::new(c),
+        Err(e) => {
+            eprintln!("wisp: AEC unavailable ({e}); passing the microphone through");
+            Box::new(PassthroughEchoCanceller)
+        }
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn echo_canceller() -> Box<dyn EchoCanceller> {
+    Box::new(PassthroughEchoCanceller)
+}
+
 /// Starts a live session. Returns an optional non-fatal notice (e.g. system audio was unavailable
 /// so it fell back to mic-only) for the UI to surface; `None` means everything started as requested.
 #[tauri::command]
@@ -814,8 +852,8 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
     // the whole session — so live transcription works on every Mac, just without meeting audio.
     let mut degraded_notice: Option<String> = None;
     let system_source: Option<Box<dyn AudioSource>> = match system_device {
-        Some(name) if name == SYSTEM_CAPTURE_ID => match ScreenCaptureSource::new() {
-            Ok(source) => Some(Box::new(source)),
+        Some(name) if name == SYSTEM_CAPTURE_ID => match open_system_capture() {
+            Ok(source) => Some(source),
             Err(e) => {
                 degraded_notice = Some(format!(
                     "System audio unavailable ({e}) — capturing the microphone only."
@@ -839,9 +877,10 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
             // Shared across both sessions: drops any residual echo AEC leaves on the mic stream.
             let dedup = Arc::new(Mutex::new(CrossStreamEchoFilter::new()));
 
-            let canceller = Box::new(WebrtcEchoCanceller::new().map_err(|e| e.to_string())?);
+            // Echo-cancel the mic against the system reference (WebRTC on macOS, passthrough where
+            // there's no platform AEC); either way the reference is consumed and the dedup mops up.
             let aec_mic: Box<dyn AudioSource> =
-                Box::new(EchoCancellingSource::new(mic, reference_rx, canceller));
+                Box::new(EchoCancellingSource::new(mic, reference_rx, echo_canceller()));
             sessions.push(
                 spawn_session(
                     &app,

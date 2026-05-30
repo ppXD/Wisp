@@ -33,14 +33,17 @@ wisp-core = { path = "../../crates/wisp-core" }
 wisp-audio = { path = "../../crates/wisp-audio", features = ["mic", "file"] }
 wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
+# sherpa-onnx engines (SenseVoice, Whisper-ONNX, diarization, denoise) — cross-platform.
 wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa" }
-wisp-screencapture = { path = "../../crates/wisp-screencapture" }
-wisp-aec = { path = "../../crates/wisp-aec" }
 
-# Querying microphone authorization status (AVFoundation) for the permission prompt.
+# macOS-only native deps. System-audio capture (ScreenCaptureKit), WebRTC AEC (needs meson), the
+# Metal Whisper engine, and the AVFoundation/sysctl helpers all live here; other platforms degrade
+# to mic-only + the cross-platform sherpa engines until their own impls are added.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 # Reading total physical memory (sysctl hw.memsize) to recommend a machine-appropriate model.
 libc = "0.2"
-# GPU (Metal) Whisper engine — macOS only.
+wisp-screencapture = { path = "../../crates/wisp-screencapture" }
+wisp-aec = { path = "../../crates/wisp-aec" }
+# GPU (Metal) Whisper engine.
 wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }
