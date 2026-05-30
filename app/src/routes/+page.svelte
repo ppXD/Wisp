@@ -645,7 +645,7 @@
               {#each installedModels as m (m.id)}
                 <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
                   <span class="picker-opt-name">{m.name}</span>
-                  {#if m.recommended}<span class="picker-tag rec">for your Mac</span>{/if}
+                  {#if m.recommended}<span class="picker-tag rec">for this machine</span>{/if}
                   {#if m.active}<span class="picker-tag">active</span>{/if}
                 </button>
               {/each}
@@ -655,7 +655,7 @@
               {#each availableModels as m (m.id)}
                 <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
                   <span class="picker-opt-name">{m.name}</span>
-                  {#if m.recommended}<span class="picker-tag rec">for your Mac</span>{/if}
+                  {#if m.recommended}<span class="picker-tag rec">for this machine</span>{/if}
                   <span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span>
                 </button>
               {/each}

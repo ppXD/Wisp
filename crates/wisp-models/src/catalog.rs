@@ -31,23 +31,6 @@ const SPEAKER_EMB_BASE: &str =
 const GTCRN_BASE: &str =
     "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models";
 
-/// RAM at/above which the accuracy-first q8 default is recommended; below it, the lighter q5.
-const Q8_MIN_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
-
-/// Recommends the default ASR model for a Mac with `ram_bytes` of unified memory.
-///
-/// The accuracy-first turbo-q8 when there's headroom (≥ 16 GB), the lighter and faster turbo-q5 on
-/// memory-constrained machines (e.g. an 8 GB base model) so a fresh install isn't sluggish or
-/// swapping. Both ids always exist in [`builtin_catalog`] (pinned by a test). RAM is the signal that
-/// matters here — every Apple-Silicon GPU runs turbo comfortably; memory is what differs.
-pub fn recommended_default_model(ram_bytes: u64) -> ModelId {
-    if ram_bytes >= Q8_MIN_RAM_BYTES {
-        ModelId("whisper-large-v3-turbo-q8".to_owned())
-    } else {
-        ModelId("whisper-large-v3-turbo-q5".to_owned())
-    }
-}
-
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
@@ -396,35 +379,6 @@ mod tests {
             }
             assert!(!descriptor.description.is_empty());
             assert!(descriptor.total_size_bytes() > 0);
-        }
-    }
-
-    #[test]
-    fn recommends_q8_with_headroom_and_q5_when_constrained() {
-        let gib = 1024 * 1024 * 1024;
-        // Memory-constrained Macs (e.g. 8 GB) get the lighter, faster model.
-        assert_eq!(
-            recommended_default_model(8 * gib),
-            ModelId("whisper-large-v3-turbo-q5".to_owned())
-        );
-        // The boundary (16 GB) and above get the accuracy-first q8 default.
-        assert_eq!(
-            recommended_default_model(16 * gib),
-            ModelId("whisper-large-v3-turbo-q8".to_owned())
-        );
-        assert_eq!(
-            recommended_default_model(64 * gib),
-            ModelId("whisper-large-v3-turbo-q8".to_owned())
-        );
-    }
-
-    #[test]
-    fn recommended_models_exist_in_the_catalog() {
-        // The recommender must only ever return ids the picker can actually install.
-        let ids: std::collections::HashSet<_> =
-            builtin_catalog().into_iter().map(|d| d.id).collect();
-        for ram in [4u64, 8, 16, 128].map(|g| g * 1024 * 1024 * 1024) {
-            assert!(ids.contains(&recommended_default_model(ram)));
         }
     }
 
