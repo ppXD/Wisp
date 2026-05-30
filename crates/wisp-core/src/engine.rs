@@ -29,26 +29,34 @@ impl TranscriptionResult {
 /// How a whole-clip transcription should trade accuracy against speed.
 #[derive(Debug, Clone, Copy)]
 #[non_exhaustive]
-pub struct ClipOptions {
+pub struct ClipOptions<'a> {
     /// Emit per-segment timestamps (for subtitle export). Off lets the decoder focus on text.
     pub timestamps: bool,
     /// Use beam search — keeps several candidate sentences and picks the best overall (more
     /// accurate, slower) — instead of greedy decoding (faster, slightly less accurate).
     pub beam: bool,
+    /// Optional context primer (names, jargon, domain terms) that biases the decoder toward the
+    /// correct spellings. Empty = none.
+    pub prompt: &'a str,
 }
 
-impl ClipOptions {
-    /// Options with the given timestamp and beam-search choices.
-    pub fn new(timestamps: bool, beam: bool) -> Self {
-        Self { timestamps, beam }
+impl<'a> ClipOptions<'a> {
+    /// Options with the given timestamp, beam-search, and biasing-prompt choices.
+    pub fn new(timestamps: bool, beam: bool, prompt: &'a str) -> Self {
+        Self {
+            timestamps,
+            beam,
+            prompt,
+        }
     }
 }
 
-impl Default for ClipOptions {
+impl Default for ClipOptions<'_> {
     fn default() -> Self {
         Self {
             timestamps: false,
             beam: true,
+            prompt: "",
         }
     }
 }
@@ -73,7 +81,7 @@ pub trait AsrEngine: Send {
         &mut self,
         audio: &[f32],
         sample_rate: u32,
-        options: ClipOptions,
+        options: ClipOptions<'_>,
     ) -> Result<TranscriptionResult> {
         let _ = options;
         self.transcribe(audio, sample_rate)
@@ -114,6 +122,16 @@ mod tests {
     #[test]
     fn empty_result_has_no_segments() {
         assert!(TranscriptionResult::empty().segments.is_empty());
+    }
+
+    #[test]
+    fn clip_options_carry_prompt() {
+        assert_eq!(ClipOptions::default().prompt, "", "default has no biasing");
+
+        let opts = ClipOptions::new(true, false, "Acme, Inc.; kubectl");
+        assert!(opts.timestamps);
+        assert!(!opts.beam);
+        assert_eq!(opts.prompt, "Acme, Inc.; kubectl");
     }
 
     #[test]

@@ -133,7 +133,7 @@ impl AsrEngine for WhisperCppEngine {
         &mut self,
         audio: &[f32],
         _sample_rate: u32,
-        options: ClipOptions,
+        options: ClipOptions<'_>,
     ) -> Result<TranscriptionResult> {
         // Native long-form: feed the whole clip and carry context across whisper's 30 s windows for
         // far better consistency than per-utterance chunks. Beam search (vs greedy) and timestamps
@@ -143,7 +143,10 @@ impl AsrEngine for WhisperCppEngine {
         } else {
             sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY
         };
-        // SAFETY: live context; valid slice; `self.language` outlives the call.
+        // Context primer (names, jargon) biasing the decoder toward correct spellings. Held in this
+        // scope so its pointer stays valid for the whole `whisper_full` call; empty = no biasing.
+        let prompt = CString::new(options.prompt).unwrap_or_default();
+        // SAFETY: live context; valid slice; `self.language` and `prompt` outlive the call.
         let segments = unsafe {
             let mut params = sys::whisper_full_default_params(strategy);
             params.n_threads = self.n_threads;
@@ -152,6 +155,9 @@ impl AsrEngine for WhisperCppEngine {
             params.no_context = false; // carry context across windows
             params.no_timestamps = !options.timestamps;
             params.suppress_nst = true; // suppress non-speech tokens (fewer hallucinations)
+            if !options.prompt.is_empty() {
+                params.initial_prompt = prompt.as_ptr();
+            }
             params.print_progress = false;
             params.print_realtime = false;
             params.print_special = false;
