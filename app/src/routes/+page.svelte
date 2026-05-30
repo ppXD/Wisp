@@ -306,8 +306,12 @@
   let filePrompt = $state("");
   // Skip non-speech (silence/music) before decoding, opt-in: stops hallucinated words in the gaps.
   let fileGate = $state(false);
-  // Denoiser backend id (null = off, "rnnoise" = light). Downloadable models slot in later.
+  // Denoiser backend id (null = off, "rnnoise" = light built-in, else a downloadable model id).
   let fileDenoiser = $state<string | null>(null);
+  // Downloadable denoiser models (e.g. GTCRN), loaded on demand like the speaker models.
+  let denoiseModels = $state<ModelInfo[]>([]);
+  const denoiseModelId = $derived(denoiseModels[0]?.id ?? "denoise-gtcrn");
+  const denoiseChosen = $derived(denoiseModels.find((m) => m.id === fileDenoiser));
   // Speaker diarization (who-said-what), opt-in. The models load and download on demand.
   let diarizeModels = $state<ModelInfo[]>([]);
   let diarizeOn = $state(false);
@@ -353,6 +357,32 @@
     }
   }
 
+  async function refreshDenoiseModels() {
+    try {
+      denoiseModels = await invoke<ModelInfo[]>("list_denoise_models");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Download a denoiser model (e.g. GTCRN). Like `downloadDiarize`; never the active ASR model.
+  async function downloadDenoise(id: string) {
+    error = "";
+    downloadFailed = null;
+    downloading = id;
+    downloadProgress = { downloaded: 0, total: denoiseModels.find((m) => m.id === id)?.sizeBytes ?? 0 };
+    try {
+      await invoke("download_model", { id });
+      await refreshDenoiseModels();
+    } catch (e) {
+      downloadFailed = id;
+      error = String(e);
+    } finally {
+      downloading = null;
+      downloadProgress = null;
+    }
+  }
+
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
     if (!canStart) {
@@ -361,6 +391,10 @@
     }
     if (diarizeOn && !diarizeChosen?.installed) {
       error = "Download the speaker model first.";
+      return;
+    }
+    if (fileDenoiser === denoiseModelId && !denoiseChosen?.installed) {
+      error = "Download the noise-reduction model first.";
       return;
     }
     error = "";
@@ -465,6 +499,7 @@
   onMount(() => {
     refreshModels();
     refreshDiarizeModels();
+    refreshDenoiseModels();
     refreshDevices();
     checkPermissions();
     ensureProgressListener();
@@ -763,12 +798,33 @@
                   class:active={fileDenoiser === "rnnoise"}
                   onclick={() => (fileDenoiser = "rnnoise")}>Light</button
                 >
+                <button
+                  class:active={fileDenoiser === denoiseModelId}
+                  onclick={() => (fileDenoiser = denoiseModelId)}>Balanced</button
+                >
               </div>
+              {#if denoiseChosen && !denoiseChosen.installed}
+                <button
+                  class="btn outline sm"
+                  onclick={() => downloadDenoise(denoiseModelId)}
+                  disabled={downloading === denoiseModelId}
+                >
+                  {downloading === denoiseModelId
+                    ? `Downloading… ${downloadPct}%`
+                    : `Download ${fmtSize(denoiseChosen.sizeBytes)}`}
+                </button>
+              {/if}
             </div>
-            {#if fileDenoiser}
+            {#if fileDenoiser === "rnnoise"}
               <p class="opt-hint">
-                <strong>Light</strong> noise reduction (RNNoise) removes steady background noise —
-                fans, hum, hiss — before transcribing. Best left off for clean recordings.
+                <strong>Light</strong> (RNNoise) removes steady background noise — fans, hum, hiss —
+                before transcribing. Best left off for clean recordings.
+              </p>
+            {:else if fileDenoiser === denoiseModelId}
+              <p class="opt-hint">
+                <strong>Balanced</strong> (GTCRN) is a neural denoiser that also handles real-world
+                noise like traffic or café chatter, not just steady hum. Tiny download (~0.5 MB),
+                runs on the CPU.
               </p>
             {/if}
             <div class="opt-field">

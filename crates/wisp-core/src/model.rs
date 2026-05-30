@@ -20,6 +20,8 @@ pub enum ModelFamily {
     SenseVoice,
     /// Speaker diarization (segmentation + embedding) — labels who speaks when, not an ASR engine.
     Diarization,
+    /// Speech denoiser (e.g. GTCRN) — cleans audio before ASR, not an ASR engine.
+    Denoise,
 }
 
 /// Quantization level of a model's weights.
