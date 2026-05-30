@@ -692,8 +692,10 @@ fn set_devices(
     Ok(())
 }
 
+/// Starts a live session. Returns an optional non-fatal notice (e.g. system audio was unavailable
+/// so it fell back to mic-only) for the UI to surface; `None` means everything started as requested.
 #[tauri::command]
-fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), String> {
+fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
     let mut sessions = state
         .sessions
         .lock()
@@ -789,10 +791,20 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
+    // System audio is best-effort: if ScreenCaptureKit can't start (a macOS that doesn't support
+    // it, no Screen Recording permission, no display), fall back to mic-only rather than failing
+    // the whole session — so live transcription works on every Mac, just without meeting audio.
+    let mut degraded_notice: Option<String> = None;
     let system_source: Option<Box<dyn AudioSource>> = match system_device {
-        Some(name) if name == SYSTEM_CAPTURE_ID => Some(Box::new(
-            ScreenCaptureSource::new().map_err(|e| e.to_string())?,
-        )),
+        Some(name) if name == SYSTEM_CAPTURE_ID => match ScreenCaptureSource::new() {
+            Ok(source) => Some(Box::new(source)),
+            Err(e) => {
+                degraded_notice = Some(format!(
+                    "System audio unavailable ({e}) — capturing the microphone only."
+                ));
+                None
+            }
+        },
         Some(name) => Some(Box::new(
             MicSource::from_device(&name).map_err(|e| e.to_string())?,
         )),
@@ -879,12 +891,14 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         }
 
         (None, None) => {
-            return Err(
-                "no audio source — enable the microphone or select meeting audio".to_owned(),
-            );
+            // If system audio was wanted but failed and the mic is off, surface that reason — it's
+            // more actionable than a generic "no source" message.
+            return Err(degraded_notice.unwrap_or_else(|| {
+                "no audio source — enable the microphone or select meeting audio".to_owned()
+            }));
         }
     }
-    Ok(())
+    Ok(degraded_notice)
 }
 
 #[tauri::command]
