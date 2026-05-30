@@ -27,6 +27,7 @@
     description: string;
     installed: boolean;
     active: boolean;
+    recommended: boolean;
   };
 
   let running = $state(false);
@@ -608,6 +609,7 @@
               {#each installedModels as m (m.id)}
                 <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
                   <span class="picker-opt-name">{m.name}</span>
+                  {#if m.recommended}<span class="picker-tag rec">for your Mac</span>{/if}
                   {#if m.active}<span class="picker-tag">active</span>{/if}
                 </button>
               {/each}
@@ -617,6 +619,7 @@
               {#each availableModels as m (m.id)}
                 <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
                   <span class="picker-opt-name">{m.name}</span>
+                  {#if m.recommended}<span class="picker-tag rec">for your Mac</span>{/if}
                   <span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span>
                 </button>
               {/each}
@@ -1361,6 +1364,14 @@
     text-transform: uppercase;
     letter-spacing: 0.06em;
     color: var(--live);
+  }
+
+  /* The machine recommendation reads as a pill so it stands apart from the "active" marker. */
+  .picker-tag.rec {
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    padding: 1px 6px;
+    border-radius: 999px;
   }
 
   .active-model {
