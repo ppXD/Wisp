@@ -21,6 +21,17 @@ pub enum AudioSourceKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SpeakerId(pub u32);
 
+/// A single word (or CJK token) with its own time span, from word-level alignment.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Word {
+    /// The word text, keeping its original leading spacing so a line can be reconstructed exactly.
+    pub text: String,
+    /// Start offset from the clip/session start.
+    pub start: Duration,
+    /// End offset from the clip/session start.
+    pub end: Duration,
+}
+
 /// Whether a segment is still being revised or has been committed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SegmentStatus {
@@ -49,6 +60,8 @@ pub struct TranscriptSegment {
     pub speaker: Option<SpeakerId>,
     /// Engine confidence in `[0.0, 1.0]`, when available.
     pub confidence: Option<f32>,
+    /// Word-level timings from alignment, when the engine produced them; empty otherwise.
+    pub words: Vec<Word>,
 }
 
 impl TranscriptSegment {
@@ -71,6 +84,7 @@ impl TranscriptSegment {
             source,
             speaker: None,
             confidence: None,
+            words: Vec::new(),
         }
     }
 
