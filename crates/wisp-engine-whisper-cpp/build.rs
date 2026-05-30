@@ -32,6 +32,11 @@ fn main() {
         .define("GGML_METAL", "ON")
         .define("GGML_METAL_EMBED_LIBRARY", "ON")
         .define("GGML_OPENMP", "OFF")
+        // Core ML encoder path: when a `*-encoder.mlmodelc` sits next to the model, whisper.cpp runs
+        // the encoder on the Apple Neural Engine. ALLOW_FALLBACK keeps Metal working when it's
+        // absent, so this is safe even before (or without) the optional Core ML model download.
+        .define("WHISPER_COREML", "ON")
+        .define("WHISPER_COREML_ALLOW_FALLBACK", "ON")
         .build();
 
     // The static libs land in the install prefix and/or the build tree — search both so we're
@@ -49,6 +54,8 @@ fn main() {
 
     for lib in [
         "whisper",
+        // The Core ML encoder lib (Objective-C++); `whisper` references it, so it follows here.
+        "whisper.coreml",
         "ggml",
         "ggml-cpu",
         "ggml-metal",
@@ -58,9 +65,10 @@ fn main() {
         println!("cargo:rustc-link-lib=static={lib}");
     }
 
-    // C++ runtime + the Apple frameworks the Metal and Accelerate backends need.
+    // C++ runtime + the Apple frameworks the Metal, Accelerate, and Core ML backends need.
     println!("cargo:rustc-link-lib=c++");
     for framework in [
+        "CoreML",
         "Metal",
         "MetalKit",
         "Foundation",
