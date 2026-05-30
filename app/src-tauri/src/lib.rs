@@ -74,6 +74,8 @@ struct AppState {
     system_device: Mutex<Option<String>>,
     /// Transcription language code (`zh`/`yue`/…); empty = auto-detect.
     language: Mutex<String>,
+    /// Whether to denoise the live capture before transcribing (built-in RNNoise).
+    live_denoise: Mutex<bool>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
     /// Segments from the most recent file transcription, kept for export.
@@ -265,6 +267,12 @@ fn silero_model_path(app: &AppHandle) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+/// Per-session live transcription settings, read from app state when a session starts.
+struct LiveSettings {
+    language: String,
+    denoise: bool,
+}
+
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
 /// forwarding them to the webview.
 ///
@@ -278,11 +286,16 @@ fn spawn_session(
     source: Box<dyn AudioSource>,
     kind: AudioSourceKind,
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
-    language: &str,
+    settings: &LiveSettings,
 ) -> WispResult<Session> {
-    let engine = build_engine(descriptor, dir, language)?;
+    let engine = build_engine(descriptor, dir, &settings.language)?;
     let segmenter = build_segmenter(app, kind);
     let transcriber = Transcriber::new(engine, kind);
+    // Built-in RNNoise streams frame-by-frame, so it suits live capture (the downloadable models
+    // are clip-based). A fresh, stateful instance per session.
+    let denoiser: Option<Box<dyn Denoiser>> = settings
+        .denoise
+        .then(|| Box::new(RnnoiseDenoiser::new()) as Box<dyn Denoiser>);
 
     let emitter = app.clone();
     let sink: wisp_pipeline::EventSink = Box::new(move |event| {
@@ -299,7 +312,13 @@ fn spawn_session(
 
     // Decoupled live session: capture+segmentation runs real-time; the (slow) engine runs on its
     // own thread draining complete utterances, so it never stalls capture or drops mid-sentence.
-    Ok(Session::spawn_live(segmenter, transcriber, source, sink))
+    Ok(Session::spawn_live(
+        segmenter,
+        transcriber,
+        source,
+        sink,
+        denoiser,
+    ))
 }
 
 /// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.
@@ -483,6 +502,16 @@ fn set_language(state: State<'_, AppState>, language: String) -> Result<(), Stri
     Ok(())
 }
 
+/// Toggles live noise reduction (applied to the next session that starts).
+#[tauri::command]
+fn set_denoise(state: State<'_, AppState>, enabled: bool) -> Result<(), String> {
+    *state
+        .live_denoise
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = enabled;
+    Ok(())
+}
+
 #[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
@@ -531,6 +560,11 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
+    let denoise = *state
+        .live_denoise
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let settings = LiveSettings { language, denoise };
 
     // Open the audio sources first (these can fail: device missing / no mic permission).
     let mic_device = state
@@ -584,7 +618,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     aec_mic,
                     AudioSourceKind::Microphone,
                     Some(Arc::clone(&dedup)),
-                    &language,
+                    &settings,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -599,7 +633,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     meeting,
                     AudioSourceKind::System,
                     Some(dedup),
-                    &language,
+                    &settings,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -620,7 +654,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     mic,
                     AudioSourceKind::Microphone,
                     None,
-                    &language,
+                    &settings,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -636,7 +670,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
                     system,
                     AudioSourceKind::System,
                     None,
-                    &language,
+                    &settings,
                 )
                 .map_err(|e| e.to_string())?,
             );
@@ -959,6 +993,7 @@ pub fn run() {
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
                 language: Mutex::new(String::new()),
+                live_denoise: Mutex::new(false),
                 tee: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
                 active_model_path,
@@ -981,6 +1016,7 @@ pub fn run() {
             microphone_blocked,
             session_running,
             set_language,
+            set_denoise,
             set_devices,
             start_session,
             stop_session,
