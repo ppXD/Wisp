@@ -790,20 +790,36 @@
                 <span>{liveDiarize ? "On" : "Off"}</span>
               </label>
             </div>
-            {#if liveDiarize && diarizeChosen && !diarizeChosen.installed}
-              <button
-                class="btn outline sm diarize-dl"
-                onclick={() => downloadDiarize(diarizeId)}
-                disabled={downloading === diarizeId}
-              >
-                {downloading === diarizeId
-                  ? `Downloading… ${downloadPct}%`
-                  : `Download speaker model ${fmtSize(diarizeChosen.sizeBytes)}`}
-              </button>
+            {#if liveDiarize}
+              <div class="source-row">
+                <span class="source-name">Model</span>
+                <div class="seg">
+                  {#each diarizeModels as m (m.id)}
+                    <button
+                      class:active={diarizeId === m.id}
+                      onclick={() => {
+                        diarizeId = m.id;
+                        applyLiveDiarize();
+                      }}>{diarizeShortName(m)}</button
+                    >
+                  {/each}
+                </div>
+              </div>
+              {#if diarizeChosen && !diarizeChosen.installed}
+                <button
+                  class="btn outline sm diarize-dl"
+                  onclick={() => downloadDiarize(diarizeId)}
+                  disabled={downloading === diarizeId}
+                >
+                  {downloading === diarizeId
+                    ? `Downloading… ${downloadPct}%`
+                    : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+                </button>
+              {/if}
             {/if}
             <p class="hint">
-              Labels each line by who's talking (Speaker 1, 2…). Downloads a small model the first
-              time.
+              Labels each line by who's talking (Speaker 1, 2…). <strong>Accurate</strong> tells
+              similar-sounding voices apart better; downloads a small model the first time.
             </p>
           </div>
         </div>
