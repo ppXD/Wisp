@@ -5,6 +5,7 @@
 //! [`wisp_core::AudioSource`] and is added with the application, where it can be verified on
 //! real hardware.
 
+pub mod denoise;
 pub mod dsp;
 pub mod echo;
 #[cfg(feature = "file")]
@@ -15,6 +16,7 @@ pub mod preprocess;
 pub mod stream;
 pub mod wav;
 
+pub use denoise::RnnoiseDenoiser;
 pub use dsp::{
     chunk_into_frames, resample_linear, to_mono_16k, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };

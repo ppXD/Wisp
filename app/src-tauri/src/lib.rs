@@ -15,10 +15,11 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
-    MicSource, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
+    MicSource, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
+use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
 use wisp_core::engine::{AsrEngine, ClipOptions};
 use wisp_core::error::{Result as WispResult, WispError};
@@ -147,6 +148,8 @@ struct FileTranscribeOptions {
     diarize_model: Option<String>,
     /// Drop non-speech (silence/music) before decoding so the engine can't hallucinate in it.
     gate_speech: bool,
+    /// Denoiser id (`"rnnoise"`, …) to clean the audio before ASR, or `None` to leave it untouched.
+    denoiser: Option<String>,
 }
 
 /// Builds the ASR engine for a downloaded model. `language` is a code (`zh`/`yue`/`en`/…) or empty
@@ -725,6 +728,14 @@ async fn transcribe_file(
                 audio.extend_from_slice(&to_mono_16k(&frame));
             }
 
+            // Optionally suppress background noise first, so everything downstream — level
+            // normalization, VAD gating, the engine, and diarization — works on the cleaner signal.
+            if let Some(id) = options.denoiser.as_deref() {
+                if let Some(mut denoiser) = build_denoiser(id) {
+                    audio = denoiser.denoise(&audio, TARGET_SAMPLE_RATE);
+                }
+            }
+
             // Clean up level and rumble before the engine sees the clip — quiet or hot recordings
             // decode more reliably at a consistent, healthy level.
             let audio = normalize_for_asr(&audio, TARGET_SAMPLE_RATE);
@@ -808,6 +819,18 @@ fn speaker_spans(model_dir: &Path, audio: &[f32]) -> WispResult<Vec<SpeakerSpan>
         &model_dir.join("embedding.onnx"),
     )?;
     diarizer.diarize_clip(audio, TARGET_SAMPLE_RATE)
+}
+
+/// Builds the chosen denoiser by id, or `None` for "off"/unknown. RNNoise is the light built-in
+/// option; downloadable neural models (GTCRN, DeepFilterNet) slot in behind the same trait.
+fn build_denoiser(id: &str) -> Option<Box<dyn Denoiser>> {
+    match id {
+        "rnnoise" => Some(Box::new(RnnoiseDenoiser::new())),
+        other => {
+            eprintln!("wisp: unknown denoiser '{other}', leaving audio untouched");
+            None
+        }
+    }
 }
 
 /// Runs the neural VAD over the whole clip and returns its speech concatenated gap-free, with a

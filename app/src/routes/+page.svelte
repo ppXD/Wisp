@@ -306,6 +306,8 @@
   let filePrompt = $state("");
   // Skip non-speech (silence/music) before decoding, opt-in: stops hallucinated words in the gaps.
   let fileGate = $state(false);
+  // Denoiser backend id (null = off, "rnnoise" = light). Downloadable models slot in later.
+  let fileDenoiser = $state<string | null>(null);
   // Speaker diarization (who-said-what), opt-in. The models load and download on demand.
   let diarizeModels = $state<ModelInfo[]>([]);
   let diarizeOn = $state(false);
@@ -375,6 +377,7 @@
           prompt: filePrompt.trim(),
           diarizeModel: diarizeOn ? diarizeId : null,
           gateSpeech: fileGate,
+          denoiser: fileDenoiser,
         },
       });
     } catch (e) {
@@ -752,6 +755,22 @@
                 transcribing, so the model doesn't invent words in the gaps — best for recordings
                 with long pauses or background music.{/if}
             </p>
+            <div class="opt-row">
+              <span class="opt-label">Reduce noise</span>
+              <div class="seg">
+                <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>Off</button>
+                <button
+                  class:active={fileDenoiser === "rnnoise"}
+                  onclick={() => (fileDenoiser = "rnnoise")}>Light</button
+                >
+              </div>
+            </div>
+            {#if fileDenoiser}
+              <p class="opt-hint">
+                <strong>Light</strong> noise reduction (RNNoise) removes steady background noise —
+                fans, hum, hiss — before transcribing. Best left off for clean recordings.
+              </p>
+            {/if}
             <div class="opt-field">
               <input
                 id="file-prompt"
