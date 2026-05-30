@@ -32,8 +32,8 @@ const GTCRN_BASE: &str =
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
-        whisper_turbo_q5(),
         whisper_turbo_q8(),
+        whisper_turbo_q5(),
         whisper_large_v3_gpu(),
         sense_voice_int8(),
         sense_voice_fp32(),
@@ -64,9 +64,9 @@ fn whisper_turbo_q5() -> ModelDescriptor {
         }],
         languages: whisper_languages(),
         description:
-            "Whisper large-v3-turbo on the GPU (Metal) — real Cantonese (yue) + ~99 languages, \
-             near-large-v3 accuracy but far faster because it runs on the GPU instead of the CPU. \
-             Recommended. q5-quantized (~0.55 GB)."
+            "Whisper large-v3-turbo on the GPU (Metal) — real Cantonese (yue) + ~99 languages. A \
+             lighter, faster alternative to the q8 default, at slightly lower precision. \
+             q5-quantized (~0.55 GB)."
                 .to_owned(),
     }
 }
@@ -85,8 +85,9 @@ fn whisper_turbo_q8() -> ModelDescriptor {
         }],
         languages: whisper_languages(),
         description:
-            "Same large-v3-turbo on the GPU (Metal), at higher q8 precision — fast and very \
-             accurate. Larger download (~0.85 GB)."
+            "Whisper large-v3-turbo on the GPU (Metal) at q8 precision — real Cantonese (yue) + \
+             ~99 languages, very accurate yet fast because it runs on the GPU. The recommended \
+             default. ~0.85 GB."
                 .to_owned(),
     }
 }
@@ -145,8 +146,8 @@ fn sense_voice_int8() -> ModelDescriptor {
         ],
         languages: sense_voice_languages(),
         description:
-            "Small multilingual model (~234M params), int8-quantized. Fast and light on memory \
-             with great everyday accuracy — the recommended default."
+            "Small multilingual model (~234M params), int8-quantized. Fast and light on memory, \
+             especially strong for Chinese, Cantonese, Japanese, and Korean."
                 .to_owned(),
     }
 }
@@ -377,6 +378,17 @@ mod tests {
             assert!(!descriptor.description.is_empty());
             assert!(descriptor.total_size_bytes() > 0);
         }
+    }
+
+    #[test]
+    fn default_model_is_the_accuracy_first_turbo_q8() {
+        // New installs default to the first catalog entry. Pin it: turbo-q8 is the accuracy-first
+        // pick that's still real-time on the GPU (large-v3 is more accurate but too slow to default
+        // for live). A reorder should be a conscious, reviewed change.
+        assert_eq!(
+            builtin_catalog()[0].id,
+            ModelId("whisper-large-v3-turbo-q8".to_owned())
+        );
     }
 
     #[test]
