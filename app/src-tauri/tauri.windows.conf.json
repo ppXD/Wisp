@@ -3,10 +3,10 @@
   "bundle": {
     "resources": {
       "resources/silero_vad.onnx": "resources/silero_vad.onnx",
-      "target/release/onnxruntime.dll": "onnxruntime.dll",
-      "target/release/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
-      "target/release/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",
-      "target/release/cargs.dll": "cargs.dll"
+      "windows-runtime/onnxruntime.dll": "onnxruntime.dll",
+      "windows-runtime/onnxruntime_providers_shared.dll": "onnxruntime_providers_shared.dll",
+      "windows-runtime/sherpa-onnx-c-api.dll": "sherpa-onnx-c-api.dll",
+      "windows-runtime/cargs.dll": "cargs.dll"
     }
   }
 }
