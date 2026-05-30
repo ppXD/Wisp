@@ -19,6 +19,12 @@ const SAMPLE_RATE: u32 = 16_000;
 /// dropped before it closes.
 const BUFFER_SECONDS: f32 = 30.0;
 
+/// Trailing silence that closes an utterance, in seconds. 0.4 s sits at a natural clause boundary —
+/// snappier to finalize than the old 0.5 s without splitting mid-sentence (and partials already
+/// show provisional text while the speaker talks). Overridable via
+/// [`SileroSegmenter::MIN_SILENCE_SECS_ENV`].
+const DEFAULT_MIN_SILENCE_SECS: f32 = 0.4;
+
 /// Look-back retained to seed a partial at speech onset, so the first provisional decode isn't
 /// clipped by the VAD's onset latency (it confirms speech ~`min_speech_duration` in).
 const PREROLL_SAMPLES: usize = (SAMPLE_RATE as usize * 3) / 10; // 0.3 s
@@ -42,13 +48,18 @@ pub struct SileroSegmenter {
 }
 
 impl SileroSegmenter {
+    /// Env var overriding the trailing-silence-to-finalize duration, in seconds. Lower = snappier
+    /// finals but more aggressive splitting; higher = safer merges but laggier. Clamped to a sane
+    /// range; an unset or unparseable value uses [`DEFAULT_MIN_SILENCE_SECS`].
+    pub const MIN_SILENCE_SECS_ENV: &'static str = "WISP_VAD_MIN_SILENCE_SECS";
+
     /// Loads the Silero model at `model` (the bundled `silero_vad.onnx`).
     pub fn new(model: &Path) -> Result<Self> {
         let config = SileroVadConfig {
             model: model.to_string_lossy().into_owned(),
-            // End an utterance after 0.5 s of trailing silence; ignore speech blips < 0.25 s
-            // (noise) and force a split if someone talks past 20 s without a pause.
-            min_silence_duration: 0.5,
+            // End an utterance after a short trailing silence (tunable); ignore speech blips
+            // < 0.25 s (noise) and force a split if someone talks past 20 s without a pause.
+            min_silence_duration: min_silence_secs(),
             min_speech_duration: 0.25,
             max_speech_duration: 20.0,
             threshold: 0.5,
@@ -145,6 +156,17 @@ impl Segmenter for SileroSegmenter {
     }
 }
 
+/// Reads the finalize-silence override, clamped to a sane `[0.2, 2.0]` s; falls back to the default
+/// when unset or unparseable so a stray value can never break segmentation.
+fn min_silence_secs() -> f32 {
+    std::env::var(SileroSegmenter::MIN_SILENCE_SECS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<f32>().ok())
+        .filter(|v| v.is_finite())
+        .map(|v| v.clamp(0.2, 2.0))
+        .unwrap_or(DEFAULT_MIN_SILENCE_SECS)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -182,5 +204,46 @@ mod tests {
             );
         }
         assert!(seg.flush().is_empty());
+    }
+
+    /// Renaming this constant silently breaks anyone who pinned a finalize-silence override via env.
+    #[test]
+    fn min_silence_env_var_name_is_pinned() {
+        assert_eq!(
+            SileroSegmenter::MIN_SILENCE_SECS_ENV,
+            "WISP_VAD_MIN_SILENCE_SECS"
+        );
+    }
+
+    /// The whole override lifecycle in one test — the env var is process-global, so keeping it
+    /// serial here avoids racing sibling tests.
+    #[test]
+    fn min_silence_override_parses_clamps_and_defaults() {
+        let env = SileroSegmenter::MIN_SILENCE_SECS_ENV;
+
+        std::env::remove_var(env);
+        assert_eq!(
+            min_silence_secs(),
+            DEFAULT_MIN_SILENCE_SECS,
+            "unset → default"
+        );
+
+        std::env::set_var(env, "0.3");
+        assert_eq!(min_silence_secs(), 0.3, "a valid value is honoured");
+
+        std::env::set_var(env, "0.05");
+        assert_eq!(min_silence_secs(), 0.2, "below the floor clamps up");
+
+        std::env::set_var(env, "9.0");
+        assert_eq!(min_silence_secs(), 2.0, "above the ceiling clamps down");
+
+        std::env::set_var(env, "nonsense");
+        assert_eq!(
+            min_silence_secs(),
+            DEFAULT_MIN_SILENCE_SECS,
+            "an unparseable value falls back to the default"
+        );
+
+        std::env::remove_var(env);
     }
 }
