@@ -19,9 +19,26 @@ const SAMPLE_RATE: u32 = 16_000;
 /// dropped before it closes.
 const BUFFER_SECONDS: f32 = 30.0;
 
+/// Look-back retained to seed a partial at speech onset, so the first provisional decode isn't
+/// clipped by the VAD's onset latency (it confirms speech ~`min_speech_duration` in).
+const PREROLL_SAMPLES: usize = (SAMPLE_RATE as usize * 3) / 10; // 0.3 s
+
+/// Don't expose a partial until the open utterance holds at least this much audio — decoding a
+/// shorter sliver just invites the engine to hallucinate.
+const MIN_PARTIAL_SAMPLES: usize = (SAMPLE_RATE as usize * 2) / 5; // 0.4 s
+
 /// A [`Segmenter`] backed by the Silero neural VAD.
 pub struct SileroSegmenter {
     vad: SileroVad,
+    /// Audio of the currently-open utterance, mirrored from the fed stream while the VAD reports
+    /// speech — the source for provisional [`partial`](Segmenter::partial) decodes.
+    in_progress: Vec<f32>,
+    /// Capture-elapsed start of `in_progress`, for offsetting the partial's segment times.
+    in_progress_start: Duration,
+    /// Short look-back ring of recent samples, used to seed `in_progress` at onset.
+    preroll: Vec<f32>,
+    /// Total samples fed so far, for deriving `in_progress_start`.
+    samples_fed: u64,
 }
 
 impl SileroSegmenter {
@@ -45,7 +62,13 @@ impl SileroSegmenter {
         let vad = SileroVad::new(config, BUFFER_SECONDS)
             .map_err(|e| WispError::Engine(format!("silero vad init: {e}")))?;
 
-        Ok(Self { vad })
+        Ok(Self {
+            vad,
+            in_progress: Vec::new(),
+            in_progress_start: Duration::ZERO,
+            preroll: Vec::new(),
+            samples_fed: 0,
+        })
     }
 
     /// Drains every completed speech segment the detector currently holds into utterances.
@@ -73,12 +96,52 @@ impl Segmenter for SileroSegmenter {
         _frame_duration: Duration,
     ) -> Vec<Utterance> {
         self.vad.accept_waveform(mono.to_vec());
-        self.drain()
+
+        // Keep a short look-back of recent audio so a partial can include the onset the VAD only
+        // confirms a fraction of a second in.
+        self.preroll.extend_from_slice(mono);
+        let overflow = self.preroll.len().saturating_sub(PREROLL_SAMPLES);
+        if overflow > 0 {
+            self.preroll.drain(..overflow);
+        }
+        self.samples_fed += mono.len() as u64;
+
+        // Mirror the open utterance while the VAD reports speech; seed from the look-back at onset.
+        let in_speech = self.vad.is_speech();
+        if in_speech {
+            if self.in_progress.is_empty() {
+                let start_sample = self.samples_fed.saturating_sub(self.preroll.len() as u64);
+                self.in_progress_start =
+                    Duration::from_secs_f64(start_sample as f64 / SAMPLE_RATE as f64);
+                self.in_progress = self.preroll.clone();
+            } else {
+                self.in_progress.extend_from_slice(mono);
+            }
+        }
+
+        let finals = self.drain();
+        // The open utterance is void once a final is produced (superseded) or speech stops without
+        // one (a sub-threshold blip) — clear the mirror either way.
+        if !finals.is_empty() || !in_speech {
+            self.in_progress.clear();
+        }
+        finals
     }
 
     fn flush(&mut self) -> Vec<Utterance> {
         self.vad.flush();
+        self.in_progress.clear();
         self.drain()
+    }
+
+    fn partial(&self) -> Option<Utterance> {
+        if self.in_progress.len() < MIN_PARTIAL_SAMPLES {
+            return None;
+        }
+        Some(Utterance {
+            audio: self.in_progress.clone(),
+            start: self.in_progress_start,
+        })
     }
 }
 
@@ -113,6 +176,10 @@ mod tests {
                 Duration::from_millis(100),
             );
             assert!(out.is_empty(), "silence must not produce utterances");
+            assert!(
+                seg.partial().is_none(),
+                "silence must not expose an in-progress partial"
+            );
         }
         assert!(seg.flush().is_empty());
     }

@@ -39,6 +39,17 @@ pub trait Segmenter: Send {
     /// Emits any buffered utterance at end-of-stream — the last one may not have been followed by
     /// enough trailing silence to close on its own.
     fn flush(&mut self) -> Vec<Utterance>;
+
+    /// A snapshot of the audio accumulated so far for the currently-open utterance, for decoding a
+    /// *provisional* partial transcript before the utterance closes.
+    ///
+    /// Returns `None` when no utterance is in progress (silence) or when the segmenter can't expose
+    /// in-progress audio. The default is `None`, so a segmenter stays final-only unless it opts in —
+    /// a non-breaking extension. The returned audio is never authoritative: the matching final
+    /// utterance from [`push`](Self::push)/[`flush`](Self::flush) always supersedes it.
+    fn partial(&self) -> Option<Utterance> {
+        None
+    }
 }
 
 /// Energy-gate segmenter: accumulates speech frames into an utterance, splitting on trailing

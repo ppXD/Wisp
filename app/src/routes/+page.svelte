@@ -245,7 +245,17 @@
   async function ensureListener() {
     if (unlisten) return;
     unlisten = await listen<Segment>("transcript://segment", (event) => {
-      segments = [...segments, event.payload];
+      // Upsert by (source, id): a provisional partial creates a row, later partials of the same
+      // utterance update it in place, and the final replaces it (dropping the .partial styling).
+      const incoming = event.payload;
+      const i = segments.findIndex((s) => s.id === incoming.id && s.source === incoming.source);
+      if (i === -1) {
+        segments = [...segments, incoming];
+      } else {
+        const next = segments.slice();
+        next[i] = incoming;
+        segments = next;
+      }
     });
   }
 
