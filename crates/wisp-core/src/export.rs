@@ -92,10 +92,35 @@ fn format_vtt(segments: &[TranscriptSegment]) -> String {
             "{} --> {}\n{}\n\n",
             timestamp(segment.start, '.'),
             timestamp(segment.end, '.'),
-            labelled_text(segment),
+            vtt_cue_body(segment),
         ));
     }
     out
+}
+
+/// VTT cue body: when the segment carries word-level timings, emit them as WebVTT inline timestamps
+/// (`<00:00:00.500>word`) for karaoke-style highlighting; otherwise the plain labelled text. The
+/// speaker label, if any, still prefixes the cue.
+fn vtt_cue_body(segment: &TranscriptSegment) -> String {
+    if segment.words.is_empty() {
+        return labelled_text(segment);
+    }
+
+    let mut timed = String::new();
+    for (i, word) in segment.words.iter().enumerate() {
+        // The first word follows the cue's own start time, so drop its leading space.
+        let text = if i == 0 {
+            word.text.trim_start()
+        } else {
+            word.text.as_str()
+        };
+        timed.push_str(&format!("<{}>{text}", timestamp(word.start, '.')));
+    }
+
+    match segment.speaker {
+        Some(speaker) => format!("{}: {timed}", speaker_label(speaker)),
+        None => timed,
+    }
 }
 
 /// Segment text, prefixed with its speaker (`Speaker 1: …`) once diarization has labelled it; the
@@ -126,7 +151,7 @@ fn timestamp(d: Duration, sep: char) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::transcript::AudioSourceKind;
+    use crate::transcript::{AudioSourceKind, Word};
 
     fn seg(text: &str, start_ms: u64, end_ms: u64) -> TranscriptSegment {
         TranscriptSegment::new(
@@ -198,6 +223,40 @@ mod tests {
             "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSpeaker 1: hello\n\n\
              00:00:01.000 --> 00:00:02.000\nSpeaker 2: hi back\n\n"
         );
+    }
+
+    #[test]
+    fn vtt_emits_word_level_timestamps_when_present() {
+        let mut s = seg("Hello world", 0, 1_000);
+        s.words = vec![
+            Word {
+                text: " Hello".into(),
+                start: Duration::from_millis(0),
+                end: Duration::from_millis(400),
+            },
+            Word {
+                text: " world".into(),
+                start: Duration::from_millis(500),
+                end: Duration::from_millis(1_000),
+            },
+        ];
+        assert_eq!(
+            format_transcript(&[s], ExportFormat::Vtt),
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\n\
+             <00:00:00.000>Hello<00:00:00.500> world\n\n"
+        );
+    }
+
+    #[test]
+    fn word_timestamps_keep_the_speaker_prefix() {
+        let mut s = seg_with_speaker("Hi", 0, 500, 0);
+        s.words = vec![Word {
+            text: "Hi".into(),
+            start: Duration::from_millis(0),
+            end: Duration::from_millis(500),
+        }];
+        let vtt = format_transcript(&[s], ExportFormat::Vtt);
+        assert!(vtt.contains("Speaker 1: <00:00:00.000>Hi"));
     }
 
     #[test]

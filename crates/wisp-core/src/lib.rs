@@ -7,6 +7,7 @@
 //! The architecture lands incrementally via small PRs — see `CLAUDE.md` at the repo root.
 
 pub mod aec;
+pub mod align;
 pub mod audio;
 pub mod channel;
 pub mod config;
@@ -22,6 +23,7 @@ pub mod transcript;
 pub mod testing;
 
 pub use aec::EchoCanceller;
+pub use align::{merge_tokens_into_words, TokenTiming};
 pub use audio::{AudioFrame, AudioSource, AudioSourceInfo};
 pub use channel::{frame_channel, FrameReceiver, FrameSender};
 pub use config::Config;
@@ -32,7 +34,7 @@ pub use error::{Result, WispError};
 pub use export::{format_transcript, ExportFormat};
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 pub use transcript::{
-    AudioSourceKind, SegmentStatus, SpeakerId, TranscriptEvent, TranscriptSegment,
+    AudioSourceKind, SegmentStatus, SpeakerId, TranscriptEvent, TranscriptSegment, Word,
 };
 
 /// The `wisp-core` crate version, surfaced to the app and UI.
