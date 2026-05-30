@@ -19,13 +19,14 @@ use wisp_audio::{
 };
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
+use wisp_core::diarize::{assign_speakers, ClipDiarizer};
 use wisp_core::engine::{AsrEngine, ClipOptions};
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
-use wisp_engine_sherpa::{SenseVoiceEngine, SileroSegmenter, WhisperEngine};
-use wisp_models::{builtin_catalog, FsModelStore, HttpDownloader};
+use wisp_engine_sherpa::{SenseVoiceEngine, SherpaDiarizer, SileroSegmenter, WhisperEngine};
+use wisp_models::{builtin_catalog, diarization_models, FsModelStore, HttpDownloader};
 use wisp_pipeline::{
     EnergySegmenter, EnergyVad, Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
 };
@@ -276,6 +277,22 @@ fn spawn_session(
     Ok(Session::spawn_live(segmenter, transcriber, source, sink))
 }
 
+/// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.
+fn to_model_info(d: ModelDescriptor, store: &FsModelStore, active: Option<&ModelId>) -> ModelInfoDto {
+    let installed = store.local_path(&d.id).is_some();
+    let is_active = active == Some(&d.id);
+    let size_bytes = d.total_size_bytes();
+    ModelInfoDto {
+        id: d.id.0,
+        name: d.display_name,
+        size_bytes,
+        languages: d.languages,
+        description: d.description,
+        installed,
+        active: is_active,
+    }
+}
+
 #[tauri::command]
 fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> {
     let active = state
@@ -287,20 +304,22 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         .store
         .available()
         .into_iter()
-        .map(|d| {
-            let installed = state.store.local_path(&d.id).is_some();
-            let is_active = active.as_ref() == Some(&d.id);
-            let size_bytes = d.total_size_bytes();
-            ModelInfoDto {
-                id: d.id.0,
-                name: d.display_name,
-                size_bytes,
-                languages: d.languages,
-                description: d.description,
-                installed,
-                active: is_active,
-            }
-        })
+        .filter(|d| d.family != ModelFamily::Diarization)
+        .map(|d| to_model_info(d, &state.store, active.as_ref()))
+        .collect();
+    Ok(models)
+}
+
+/// The diarization (speaker-ID) models, with install status — sourced separately so they never
+/// appear in the ASR model picker.
+#[tauri::command]
+fn list_diarization_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> {
+    let models = state
+        .store
+        .available()
+        .into_iter()
+        .filter(|d| d.family == ModelFamily::Diarization)
+        .map(|d| to_model_info(d, &state.store, None))
         .collect();
     Ok(models)
 }
@@ -631,6 +650,7 @@ async fn transcribe_file(
     timestamps: bool,
     accurate: bool,
     prompt: String,
+    diarize_model: Option<String>,
 ) -> Result<(), String> {
     let active = state
         .active
@@ -653,6 +673,20 @@ async fn transcribe_file(
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
+
+    // Resolve the diarization model's directory up front (it must already be downloaded); `None`
+    // when speaker ID is off. Diarization needs segment timestamps to map speakers onto lines, so
+    // it implies timestamps even if the user didn't ask to display them.
+    let diarize_dir = match &diarize_model {
+        Some(model) => Some(
+            state
+                .store
+                .local_path(&ModelId(model.clone()))
+                .ok_or_else(|| format!("speaker model '{model}' is not downloaded yet"))?,
+        ),
+        None => None,
+    };
+    let need_timestamps = timestamps || diarize_dir.is_some();
 
     let task_app = app.clone();
     let segments =
@@ -681,16 +715,31 @@ async fn transcribe_file(
             let result = engine.transcribe_clip(
                 &audio,
                 TARGET_SAMPLE_RATE,
-                ClipOptions::new(timestamps, accurate, &prompt),
+                ClipOptions::new(need_timestamps, accurate, &prompt),
             )?;
 
-            let mut collected = Vec::with_capacity(result.segments.len());
-            for (i, mut segment) in result.segments.into_iter().enumerate() {
-                segment.id = i as u64;
-                segment.source = AudioSourceKind::File;
-                segment.status = SegmentStatus::Final;
-                let _ = task_app.emit(FILE_SEGMENT_EVENT, SegmentDto::from(&segment));
-                collected.push(segment);
+            let mut collected: Vec<TranscriptSegment> = result
+                .segments
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut segment)| {
+                    segment.id = i as u64;
+                    segment.source = AudioSourceKind::File;
+                    segment.status = SegmentStatus::Final;
+                    segment
+                })
+                .collect();
+
+            // Label who said what before emitting. Best-effort: if diarization fails, keep the
+            // transcript and leave speakers unlabelled rather than losing the whole result.
+            if let Some(model_dir) = &diarize_dir {
+                if let Err(e) = diarize_segments(model_dir, &audio, &mut collected) {
+                    eprintln!("speaker diarization skipped: {e}");
+                }
+            }
+
+            for segment in &collected {
+                let _ = task_app.emit(FILE_SEGMENT_EVENT, SegmentDto::from(segment));
             }
             Ok(collected)
         })
@@ -703,6 +752,21 @@ async fn transcribe_file(
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = segments;
     let _ = app.emit(FILE_DONE_EVENT, ());
+    Ok(())
+}
+
+/// Runs offline diarization over `audio` and labels each segment with its speaker by time overlap.
+fn diarize_segments(
+    model_dir: &Path,
+    audio: &[f32],
+    segments: &mut [TranscriptSegment],
+) -> WispResult<()> {
+    let mut diarizer = SherpaDiarizer::new(
+        &model_dir.join("segmentation.onnx"),
+        &model_dir.join("embedding.onnx"),
+    )?;
+    let spans = diarizer.diarize_clip(audio, TARGET_SAMPLE_RATE)?;
+    assign_speakers(segments, &spans);
     Ok(())
 }
 
@@ -730,13 +794,15 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
+            // The store manages both ASR models and the (separate) diarization models, so it can
+            // download either; only ASR models are ever the "active" transcription model.
+            let asr_catalog = builtin_catalog();
             let store = Arc::new(FsModelStore::new(
                 data_dir.join("models"),
-                builtin_catalog(),
+                [asr_catalog.clone(), diarization_models()].concat(),
                 Box::new(HttpDownloader),
             ));
 
-            let catalog = store.available();
             // Prefer the last chosen model (if still installed), then the first installed, then the
             // first in the catalog.
             let persisted = fs::read_to_string(&active_model_path)
@@ -745,12 +811,12 @@ pub fn run() {
                 .filter(|id| store.local_path(id).is_some());
             let active = persisted
                 .or_else(|| {
-                    catalog
+                    asr_catalog
                         .iter()
                         .find(|d| store.local_path(&d.id).is_some())
                         .map(|d| d.id.clone())
                 })
-                .or_else(|| catalog.first().map(|d| d.id.clone()));
+                .or_else(|| asr_catalog.first().map(|d| d.id.clone()));
 
             app.manage(AppState {
                 store,
@@ -768,6 +834,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             list_models,
+            list_diarization_models,
             download_model,
             select_model,
             list_input_devices,

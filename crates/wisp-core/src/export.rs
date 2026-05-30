@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::transcript::TranscriptSegment;
+use crate::transcript::{SpeakerId, TranscriptSegment};
 
 /// A transcript export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -52,8 +52,8 @@ pub fn format_transcript(segments: &[TranscriptSegment], format: ExportFormat) -
 fn format_txt(segments: &[TranscriptSegment]) -> String {
     let mut out: String = segments
         .iter()
-        .map(|s| s.text.trim())
-        .filter(|t| !t.is_empty())
+        .filter(|s| !s.text.trim().is_empty())
+        .map(labelled_text)
         .collect::<Vec<_>>()
         .join("\n");
     if !out.is_empty() {
@@ -71,9 +71,10 @@ fn format_srt(segments: &[TranscriptSegment]) -> String {
             continue;
         }
         out.push_str(&format!(
-            "{index}\n{} --> {}\n{text}\n\n",
+            "{index}\n{} --> {}\n{}\n\n",
             timestamp(segment.start, ','),
             timestamp(segment.end, ','),
+            labelled_text(segment),
         ));
         index += 1;
     }
@@ -88,12 +89,28 @@ fn format_vtt(segments: &[TranscriptSegment]) -> String {
             continue;
         }
         out.push_str(&format!(
-            "{} --> {}\n{text}\n\n",
+            "{} --> {}\n{}\n\n",
             timestamp(segment.start, '.'),
             timestamp(segment.end, '.'),
+            labelled_text(segment),
         ));
     }
     out
+}
+
+/// Segment text, prefixed with its speaker (`Speaker 1: …`) once diarization has labelled it; the
+/// raw text otherwise. Assumes the caller already skipped blank segments.
+fn labelled_text(segment: &TranscriptSegment) -> String {
+    let text = segment.text.trim();
+    match segment.speaker {
+        Some(speaker) => format!("{}: {text}", speaker_label(speaker)),
+        None => text.to_owned(),
+    }
+}
+
+/// Human label for a speaker, 1-based so `SpeakerId(0)` reads as `Speaker 1`.
+fn speaker_label(id: SpeakerId) -> String {
+    format!("Speaker {}", id.0 + 1)
 }
 
 /// `HH:MM:SS<sep>mmm` — `sep` is `,` for SRT and `.` for VTT.
@@ -157,6 +174,30 @@ mod tests {
         let segs = vec![seg("hi", 60_000, 61_000)];
         let vtt = format_transcript(&segs, ExportFormat::Vtt);
         assert_eq!(vtt, "WEBVTT\n\n00:01:00.000 --> 00:01:01.000\nhi\n\n");
+    }
+
+    fn seg_with_speaker(text: &str, start_ms: u64, end_ms: u64, speaker: u32) -> TranscriptSegment {
+        let mut s = seg(text, start_ms, end_ms);
+        s.speaker = Some(SpeakerId(speaker));
+        s
+    }
+
+    #[test]
+    fn prefixes_speaker_label_when_diarized() {
+        // SpeakerId is 0-based; the label is 1-based.
+        let segs = vec![
+            seg_with_speaker("hello", 0, 1_000, 0),
+            seg_with_speaker("hi back", 1_000, 2_000, 1),
+        ];
+        assert_eq!(
+            format_transcript(&segs, ExportFormat::Txt),
+            "Speaker 1: hello\nSpeaker 2: hi back\n"
+        );
+        assert_eq!(
+            format_transcript(&segs, ExportFormat::Vtt),
+            "WEBVTT\n\n00:00:00.000 --> 00:00:01.000\nSpeaker 1: hello\n\n\
+             00:00:01.000 --> 00:00:02.000\nSpeaker 2: hi back\n\n"
+        );
     }
 
     #[test]
