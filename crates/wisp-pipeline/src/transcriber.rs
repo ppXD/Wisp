@@ -3,7 +3,7 @@
 //! Owns the (slow) [`AsrEngine`] so it can run on its own thread, draining utterances produced by
 //! the [`Segmenter`](crate::segmenter::Segmenter) without ever stalling the capture path.
 
-use wisp_audio::TARGET_SAMPLE_RATE;
+use wisp_audio::{normalize_for_asr, TARGET_SAMPLE_RATE};
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::Result;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptSegment};
@@ -34,9 +34,8 @@ impl Transcriber {
     /// their times offset by the utterance's start. The engine is reset afterwards so the next
     /// utterance starts clean.
     pub fn transcribe(&mut self, utterance: &Utterance) -> Result<Vec<TranscriptSegment>> {
-        let result = self
-            .engine
-            .transcribe(&utterance.audio, TARGET_SAMPLE_RATE)?;
+        let audio = normalize_for_asr(&utterance.audio, TARGET_SAMPLE_RATE);
+        let result = self.engine.transcribe(&audio, TARGET_SAMPLE_RATE)?;
 
         let mut segments = Vec::new();
         for mut segment in result.segments {

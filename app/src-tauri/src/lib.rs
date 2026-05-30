@@ -14,8 +14,8 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
-    tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource, MicSource, Tee,
-    TARGET_SAMPLE_RATE,
+    normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
+    MicSource, Tee, TARGET_SAMPLE_RATE,
 };
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
@@ -672,6 +672,10 @@ async fn transcribe_file(
             while let Some(frame) = source.next_frame()? {
                 audio.extend_from_slice(&to_mono_16k(&frame));
             }
+
+            // Clean up level and rumble before the engine sees the clip — quiet or hot recordings
+            // decode more reliably at a consistent, healthy level.
+            let audio = normalize_for_asr(&audio, TARGET_SAMPLE_RATE);
 
             let mut engine = build_engine(&descriptor, &dir, &language)?;
             let result = engine.transcribe_clip(
