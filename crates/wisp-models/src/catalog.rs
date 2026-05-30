@@ -25,6 +25,10 @@ const PYANNOTE_SEG_BASE: &str =
 const SPEAKER_EMB_BASE: &str =
     "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main";
 
+/// GitHub release hosting the sherpa-onnx speech-enhancement (denoiser) models (no auth needed).
+const GTCRN_BASE: &str =
+    "https://github.com/k2-fsa/sherpa-onnx/releases/download/speech-enhancement-models";
+
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
@@ -316,6 +320,34 @@ fn diarization_accurate() -> ModelDescriptor {
     }
 }
 
+/// Speech-denoiser models Wisp offers (downloadable, on top of the built-in RNNoise). Kept separate
+/// from [`builtin_catalog`] because they are not ASR engines and never appear in the model picker;
+/// File mode downloads one only when the matching "Reduce noise" strength is chosen.
+pub fn denoise_models() -> Vec<ModelDescriptor> {
+    vec![denoise_gtcrn()]
+}
+
+fn denoise_gtcrn() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("denoise-gtcrn".to_owned()),
+        family: ModelFamily::Denoise,
+        quant: Quant::F32,
+        display_name: "Noise reduction · GTCRN · balanced".to_owned(),
+        files: vec![ModelFile {
+            name: "gtcrn_simple.onnx".to_owned(),
+            url: format!("{GTCRN_BASE}/gtcrn_simple.onnx"),
+            sha256: String::new(),
+            size_bytes: 535_638,
+        }],
+        languages: Vec::new(),
+        description:
+            "GTCRN neural denoiser — removes real-world background noise (traffic, café, room tone), \
+             not just steady hum. Tiny (~0.5 MB) and 16 kHz-native; the balanced choice between the \
+             light built-in RNNoise and the strongest models."
+                .to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -372,5 +404,26 @@ mod tests {
         assert!(builtin_catalog()
             .iter()
             .all(|d| d.family != ModelFamily::Diarization));
+    }
+
+    #[test]
+    fn denoise_models_are_single_onnx_files_outside_the_picker() {
+        let models = denoise_models();
+        assert!(!models.is_empty());
+
+        let ids: std::collections::HashSet<_> = models.iter().map(|d| &d.id).collect();
+        assert_eq!(ids.len(), models.len(), "denoise ids must be distinct");
+
+        for descriptor in &models {
+            assert_eq!(descriptor.family, ModelFamily::Denoise);
+            assert!(descriptor.files.iter().any(|f| f.name.ends_with(".onnx")));
+            assert!(descriptor.files.iter().all(|f| f.size_bytes > 0));
+            assert!(!descriptor.description.is_empty());
+        }
+
+        // Never shown in the ASR model picker.
+        assert!(builtin_catalog()
+            .iter()
+            .all(|d| d.family != ModelFamily::Denoise));
     }
 }

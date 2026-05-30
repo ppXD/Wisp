@@ -26,8 +26,12 @@ use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
-use wisp_engine_sherpa::{SenseVoiceEngine, SherpaDiarizer, SileroSegmenter, WhisperEngine};
-use wisp_models::{builtin_catalog, diarization_models, FsModelStore, HttpDownloader};
+use wisp_engine_sherpa::{
+    GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SileroSegmenter, WhisperEngine,
+};
+use wisp_models::{
+    builtin_catalog, denoise_models, diarization_models, FsModelStore, HttpDownloader,
+};
 use wisp_pipeline::{
     remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
     DEFAULT_SILENCE_HANGOVER,
@@ -343,6 +347,20 @@ fn list_diarization_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDt
         .available()
         .into_iter()
         .filter(|d| d.family == ModelFamily::Diarization)
+        .map(|d| to_model_info(d, &state.store, None))
+        .collect();
+    Ok(models)
+}
+
+/// The downloadable denoiser models (e.g. GTCRN), with install status — for the "Reduce noise"
+/// strength picker. The light built-in RNNoise needs no download and isn't listed here.
+#[tauri::command]
+fn list_denoise_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> {
+    let models = state
+        .store
+        .available()
+        .into_iter()
+        .filter(|d| d.family == ModelFamily::Denoise)
         .map(|d| to_model_info(d, &state.store, None))
         .collect();
     Ok(models)
@@ -709,6 +727,17 @@ async fn transcribe_file(
     };
     let need_timestamps = options.timestamps || diarize_dir.is_some();
 
+    // Resolve a model-based denoiser's directory up front (the built-in "rnnoise" needs none).
+    let denoise_dir = match options.denoiser.as_deref() {
+        Some(id) if id != "rnnoise" => Some(
+            state
+                .store
+                .local_path(&ModelId(id.to_owned()))
+                .ok_or_else(|| format!("denoise model '{id}' is not downloaded yet"))?,
+        ),
+        _ => None,
+    };
+
     let task_app = app.clone();
     let segments =
         tauri::async_runtime::spawn_blocking(move || -> WispResult<Vec<TranscriptSegment>> {
@@ -731,7 +760,7 @@ async fn transcribe_file(
             // Optionally suppress background noise first, so everything downstream — level
             // normalization, VAD gating, the engine, and diarization — works on the cleaner signal.
             if let Some(id) = options.denoiser.as_deref() {
-                if let Some(mut denoiser) = build_denoiser(id) {
+                if let Some(mut denoiser) = build_denoiser(id, denoise_dir.as_deref()) {
                     audio = denoiser.denoise(&audio, TARGET_SAMPLE_RATE);
                 }
             }
@@ -822,10 +851,17 @@ fn speaker_spans(model_dir: &Path, audio: &[f32]) -> WispResult<Vec<SpeakerSpan>
 }
 
 /// Builds the chosen denoiser by id, or `None` for "off"/unknown. RNNoise is the light built-in
-/// option; downloadable neural models (GTCRN, DeepFilterNet) slot in behind the same trait.
-fn build_denoiser(id: &str) -> Option<Box<dyn Denoiser>> {
+/// option (no `model_dir`); downloadable models like GTCRN load from their downloaded directory.
+fn build_denoiser(id: &str, model_dir: Option<&Path>) -> Option<Box<dyn Denoiser>> {
     match id {
         "rnnoise" => Some(Box::new(RnnoiseDenoiser::new())),
+        "denoise-gtcrn" => match GtcrnDenoiser::new(&model_dir?.join("gtcrn_simple.onnx")) {
+            Ok(denoiser) => Some(Box::new(denoiser)),
+            Err(e) => {
+                eprintln!("wisp: GTCRN denoiser load failed ({e}); leaving audio untouched");
+                None
+            }
+        },
         other => {
             eprintln!("wisp: unknown denoiser '{other}', leaving audio untouched");
             None
@@ -884,7 +920,7 @@ pub fn run() {
             let asr_catalog = builtin_catalog();
             let store = Arc::new(FsModelStore::new(
                 data_dir.join("models"),
-                [asr_catalog.clone(), diarization_models()].concat(),
+                [asr_catalog.clone(), diarization_models(), denoise_models()].concat(),
                 Box::new(HttpDownloader),
             ));
 
@@ -920,6 +956,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             list_models,
             list_diarization_models,
+            list_denoise_models,
             download_model,
             select_model,
             list_input_devices,
