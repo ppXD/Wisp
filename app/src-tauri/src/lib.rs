@@ -9,13 +9,13 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
-    MicSource, Tee, TARGET_SAMPLE_RATE,
+    MicSource, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
@@ -28,7 +28,8 @@ use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, Tra
 use wisp_engine_sherpa::{SenseVoiceEngine, SherpaDiarizer, SileroSegmenter, WhisperEngine};
 use wisp_models::{builtin_catalog, diarization_models, FsModelStore, HttpDownloader};
 use wisp_pipeline::{
-    EnergySegmenter, EnergyVad, Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
+    remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
+    DEFAULT_SILENCE_HANGOVER,
 };
 use wisp_screencapture::ScreenCaptureSource;
 
@@ -130,6 +131,22 @@ struct ModelInfoDto {
     description: String,
     installed: bool,
     active: bool,
+}
+
+/// Per-file transcription options sent from the UI as one object.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct FileTranscribeOptions {
+    /// Emit per-segment timestamps (for SRT/VTT export).
+    timestamps: bool,
+    /// Beam search (accurate) vs greedy (fast) decoding.
+    accurate: bool,
+    /// Context primer (names, jargon) biasing the decoder's spelling; empty for none.
+    prompt: String,
+    /// Speaker-ID model id to diarize with, or `None` to skip speaker labelling.
+    diarize_model: Option<String>,
+    /// Drop non-speech (silence/music) before decoding so the engine can't hallucinate in it.
+    gate_speech: bool,
 }
 
 /// Builds the ASR engine for a downloaded model. `language` is a code (`zh`/`yue`/`en`/…) or empty
@@ -651,10 +668,7 @@ async fn transcribe_file(
     app: AppHandle,
     state: State<'_, AppState>,
     path: String,
-    timestamps: bool,
-    accurate: bool,
-    prompt: String,
-    diarize_model: Option<String>,
+    options: FileTranscribeOptions,
 ) -> Result<(), String> {
     let active = state
         .active
@@ -681,7 +695,7 @@ async fn transcribe_file(
     // Resolve the diarization model's directory up front (it must already be downloaded); `None`
     // when speaker ID is off. Diarization needs segment timestamps to map speakers onto lines, so
     // it implies timestamps even if the user didn't ask to display them.
-    let diarize_dir = match &diarize_model {
+    let diarize_dir = match &options.diarize_model {
         Some(model) => Some(
             state
                 .store
@@ -690,7 +704,7 @@ async fn transcribe_file(
         ),
         None => None,
     };
-    let need_timestamps = timestamps || diarize_dir.is_some();
+    let need_timestamps = options.timestamps || diarize_dir.is_some();
 
     let task_app = app.clone();
     let segments =
@@ -715,11 +729,25 @@ async fn transcribe_file(
             // decode more reliably at a consistent, healthy level.
             let audio = normalize_for_asr(&audio, TARGET_SAMPLE_RATE);
 
+            // Optionally drop non-speech (silence/music) so the engine can't hallucinate in the
+            // gaps: transcribe the gap-free speech, then map timestamps back to the original
+            // timeline. If no speech is found, fall back to the ungated clip rather than emit
+            // nothing.
+            let gate = if options.gate_speech {
+                let gated = gate_clip(&task_app, &audio);
+                (!gated.audio.is_empty()).then_some(gated)
+            } else {
+                None
+            };
+            let asr_audio: &[f32] = gate
+                .as_ref()
+                .map_or(audio.as_slice(), |g| g.audio.as_slice());
+
             let mut engine = build_engine(&descriptor, &dir, &language)?;
             let result = engine.transcribe_clip(
-                &audio,
+                asr_audio,
                 TARGET_SAMPLE_RATE,
-                ClipOptions::new(need_timestamps, accurate, &prompt),
+                ClipOptions::new(need_timestamps, options.accurate, &options.prompt),
             )?;
 
             let mut collected: Vec<TranscriptSegment> = result
@@ -731,6 +759,14 @@ async fn transcribe_file(
                     segment
                 })
                 .collect();
+
+            // Map the gated (compressed) timestamps back onto the original clip before anything
+            // time-based — diarization and display — relies on them.
+            if need_timestamps {
+                if let Some(gated) = &gate {
+                    remap_to_original(&mut collected, gated);
+                }
+            }
 
             // Label who said what. Best-effort: if diarization fails, keep the transcript and leave
             // speakers unlabelled rather than losing the whole result. With word-level timings the
@@ -772,6 +808,23 @@ fn speaker_spans(model_dir: &Path, audio: &[f32]) -> WispResult<Vec<SpeakerSpan>
         &model_dir.join("embedding.onnx"),
     )?;
     diarizer.diarize_clip(audio, TARGET_SAMPLE_RATE)
+}
+
+/// Runs the neural VAD over the whole clip and returns its speech concatenated gap-free, with a
+/// timeline back to the original — so the engine never sees the silence/music it would hallucinate
+/// over while still decoding the speech as one context-carrying long-form pass.
+fn gate_clip(app: &AppHandle, audio: &[f32]) -> GatedClip {
+    let mut segmenter = build_segmenter(app, AudioSourceKind::File);
+    let frame = Duration::from_millis(FRAME_CHUNK_MS);
+    let frame_samples = (TARGET_SAMPLE_RATE as u64 * FRAME_CHUNK_MS / 1000) as usize;
+
+    let mut utterances = Vec::new();
+    for (i, chunk) in audio.chunks(frame_samples).enumerate() {
+        utterances.extend(segmenter.push(chunk, frame * i as u32, frame));
+    }
+    utterances.extend(segmenter.flush());
+
+    GatedClip::from_utterances(utterances)
 }
 
 /// Writes the most recent file transcription to `dest` in `format` (`txt`/`srt`/`vtt`).

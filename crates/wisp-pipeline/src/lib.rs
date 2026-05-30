@@ -7,12 +7,14 @@
 //! Every collaborator is a trait object, so the real engine, a richer VAD, or a different audio
 //! source drop in without touching this orchestration.
 
+pub mod gate;
 pub mod pipeline;
 pub mod segmenter;
 pub mod session;
 pub mod transcriber;
 pub mod vad;
 
+pub use gate::{remap_to_original, GatedClip};
 pub use pipeline::{Pipeline, DEFAULT_SILENCE_HANGOVER};
 pub use segmenter::{EnergySegmenter, Segmenter, Utterance};
 pub use session::{EventSink, Session};
