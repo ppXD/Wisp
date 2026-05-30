@@ -15,8 +15,10 @@ const WHISPER_LARGE_V3_BASE: &str =
 const WHISPER_MEDIUM_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main";
 
-/// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed).
-const WHISPER_CPP_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+/// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed). Also hosts the optional
+/// Core ML encoder archives (see [`crate::coreml`]).
+pub(crate) const WHISPER_CPP_BASE: &str =
+    "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
 /// Hugging Face repos hosting the sherpa-onnx diarization models (no auth needed): a pyannote
 /// speaker-segmentation model plus interchangeable speaker-embedding models.

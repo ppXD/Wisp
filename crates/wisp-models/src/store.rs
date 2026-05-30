@@ -7,6 +7,7 @@ use wisp_core::error::{Result, WispError};
 use wisp_core::model::{ModelDescriptor, ModelFile, ModelId, ModelStore};
 
 use crate::checksum::verify_file;
+use crate::coreml::CoremlAsset;
 use crate::download::FileDownloader;
 
 /// Marker file written into a model's directory once every file is downloaded and verified.
@@ -134,6 +135,78 @@ impl FsModelStore {
         on_progress(total, total);
         Ok(dir)
     }
+
+    /// Whether the Core ML encoder for `asset` is already unpacked next to the model.
+    pub fn coreml_installed(&self, id: &ModelId, asset: &CoremlAsset) -> bool {
+        self.model_dir(id).join(&asset.dir_name).is_dir()
+    }
+
+    /// Downloads and unpacks the optional Core ML encoder for `id` next to the model, so whisper.cpp
+    /// runs the encoder on the Neural Engine. The model itself must already be installed. Reports
+    /// `(downloaded, total)` like [`ensure_with_progress`](Self::ensure_with_progress); idempotent —
+    /// a no-op once the directory is present.
+    pub fn ensure_coreml_with_progress(
+        &self,
+        id: &ModelId,
+        asset: &CoremlAsset,
+        on_progress: &mut dyn FnMut(u64, u64),
+    ) -> Result<()> {
+        let total = asset.size_bytes;
+        let dir = self.model_dir(id);
+
+        if dir.join(&asset.dir_name).is_dir() {
+            on_progress(total, total);
+            return Ok(());
+        }
+        if !self.is_complete(id) {
+            return Err(WispError::Model(format!(
+                "install the model {} before its Core ML encoder",
+                id.as_str()
+            )));
+        }
+
+        let zip_part = dir.join(format!("{}.zip.part", asset.dir_name));
+        self.downloader
+            .download_with_progress(&asset.url, &zip_part, &mut |bytes| {
+                on_progress(bytes.min(total), total);
+            })?;
+
+        unzip_into(&zip_part, &dir)?;
+        let _ = fs::remove_file(&zip_part);
+
+        on_progress(total, total);
+        Ok(())
+    }
+}
+
+/// Extracts every entry of the zip at `zip_path` into `dest`, creating directories as needed and
+/// skipping any entry whose path would escape `dest` (zip-slip). Used to unpack a Core ML
+/// `.mlmodelc` directory next to its model.
+fn unzip_into(zip_path: &Path, dest: &Path) -> Result<()> {
+    let reader = fs::File::open(zip_path)?;
+    let mut archive = zip::ZipArchive::new(reader)
+        .map_err(|e| WispError::Model(format!("open Core ML archive: {e}")))?;
+
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| WispError::Model(format!("read Core ML archive entry: {e}")))?;
+        let Some(rel) = entry.enclosed_name() else {
+            continue; // unsafe path — skip rather than escape `dest`
+        };
+
+        let out = dest.join(rel);
+        if entry.is_dir() {
+            fs::create_dir_all(&out)?;
+        } else {
+            if let Some(parent) = out.parent() {
+                fs::create_dir_all(parent)?;
+            }
+            let mut writer = fs::File::create(&out)?;
+            std::io::copy(&mut entry, &mut writer)?;
+        }
+    }
+    Ok(())
 }
 
 impl ModelStore for FsModelStore {
@@ -411,5 +484,71 @@ mod tests {
         store.remove(&ModelId("m1".into())).unwrap();
         assert!(store.installed().unwrap().is_empty());
         assert!(!root.path().join("m1").exists());
+    }
+
+    fn make_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+        let mut zw = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+        let opts = SimpleFileOptions::default();
+        for (name, data) in entries {
+            zw.start_file(*name, opts).unwrap();
+            zw.write_all(data).unwrap();
+        }
+        zw.finish().unwrap().into_inner()
+    }
+
+    #[test]
+    fn ensure_coreml_downloads_unpacks_next_to_the_model_and_is_idempotent() {
+        let model_url = "https://example/m.bin";
+        let model_bytes = b"model".to_vec();
+        let desc = single_file_descriptor("m", model_url, "ggml-test-q8_0.bin", &model_bytes);
+
+        // A fake `.mlmodelc.zip` holding one nested file, as the real archives do.
+        let coreml_url = "https://example/ggml-test-encoder.mlmodelc.zip";
+        let zip_bytes = make_zip(&[("ggml-test-encoder.mlmodelc/coremldata.bin", b"weights")]);
+        let asset = CoremlAsset {
+            url: coreml_url.into(),
+            dir_name: "ggml-test-encoder.mlmodelc".into(),
+            size_bytes: zip_bytes.len() as u64,
+        };
+
+        let mut files = HashMap::new();
+        files.insert(model_url.to_string(), model_bytes);
+        files.insert(coreml_url.to_string(), zip_bytes);
+        let (downloader, calls) = FakeDownloader::new(files);
+
+        let root = tempfile::tempdir().unwrap();
+        let store = FsModelStore::new(root.path(), vec![desc], Box::new(downloader));
+        let id = ModelId("m".into());
+
+        // The encoder requires the model itself to be installed first.
+        assert!(store
+            .ensure_coreml_with_progress(&id, &asset, &mut |_, _| {})
+            .is_err());
+
+        store.ensure(&id).unwrap();
+        assert!(!store.coreml_installed(&id, &asset));
+
+        store
+            .ensure_coreml_with_progress(&id, &asset, &mut |_, _| {})
+            .unwrap();
+
+        let dir = store.local_path(&id).unwrap();
+        let nested = dir.join("ggml-test-encoder.mlmodelc/coremldata.bin");
+        assert!(nested.is_file(), "the .mlmodelc unpacks next to the model");
+        assert_eq!(fs::read(&nested).unwrap(), b"weights");
+        assert!(
+            !dir.join("ggml-test-encoder.mlmodelc.zip.part").exists(),
+            "the downloaded archive is cleaned up"
+        );
+        assert!(store.coreml_installed(&id, &asset));
+
+        // Idempotent: re-running with the directory present does not re-download.
+        let downloads = calls.load(Ordering::SeqCst);
+        store
+            .ensure_coreml_with_progress(&id, &asset, &mut |_, _| {})
+            .unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), downloads);
     }
 }

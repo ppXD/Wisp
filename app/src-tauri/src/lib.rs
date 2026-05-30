@@ -31,8 +31,8 @@ use wisp_engine_sherpa::{
     WhisperEngine,
 };
 use wisp_models::{
-    builtin_catalog, denoise_models, diarization_models, recommended_default_model, FsModelStore,
-    HttpDownloader,
+    builtin_catalog, coreml_asset, denoise_models, diarization_models, recommended_default_model,
+    FsModelStore, HttpDownloader,
 };
 use wisp_pipeline::{
     remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
@@ -149,6 +149,12 @@ struct ModelInfoDto {
     active: bool,
     /// Whether this is the model recommended for the user's Mac (by available memory).
     recommended: bool,
+    /// Whether this model has an optional Core ML (Neural Engine) encoder to download.
+    coreml_available: bool,
+    /// Whether that Core ML encoder is already downloaded next to the model.
+    coreml_installed: bool,
+    /// Download size of the Core ML encoder, for its progress bar.
+    coreml_size_bytes: u64,
 }
 
 /// Per-file transcription options sent from the UI as one object.
@@ -398,6 +404,13 @@ fn to_model_info(
     let is_active = active == Some(&d.id);
     let is_recommended = recommended == Some(&d.id);
     let size_bytes = d.total_size_bytes();
+
+    let coreml = coreml_asset(&d);
+    let coreml_installed = coreml
+        .as_ref()
+        .is_some_and(|a| store.coreml_installed(&d.id, a));
+    let coreml_size_bytes = coreml.as_ref().map(|a| a.size_bytes).unwrap_or(0);
+
     ModelInfoDto {
         id: d.id.0,
         name: d.display_name,
@@ -407,6 +420,9 @@ fn to_model_info(
         installed,
         active: is_active,
         recommended: is_recommended,
+        coreml_available: coreml.is_some(),
+        coreml_installed,
+        coreml_size_bytes,
     }
 }
 
@@ -488,6 +504,55 @@ async fn download_model(
             }
         };
         store.ensure_with_progress(&model_id, &mut on_progress)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+    .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Downloads the optional Core ML (Neural Engine) encoder for an installed whisper.cpp model and
+/// unpacks it next to the model. Progress is emitted under the id `coreml:<model-id>`.
+#[tauri::command]
+async fn download_coreml(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<(), String> {
+    let store = Arc::clone(&state.store);
+    let model_id = ModelId(id.clone());
+    let asset = state
+        .store
+        .available()
+        .into_iter()
+        .find(|d| d.id == model_id)
+        .and_then(|d| coreml_asset(&d))
+        .ok_or_else(|| format!("no Core ML encoder for {id}"))?;
+    let emitter = app.clone();
+    let progress_id = format!("coreml:{id}");
+
+    tauri::async_runtime::spawn_blocking(move || {
+        // Throttle progress events to ~8/s; always send the final 100%.
+        let mut last: Option<Instant> = None;
+        let mut on_progress = |downloaded: u64, total: u64| {
+            let now = Instant::now();
+            let throttle_ok = match last {
+                Some(t) => now.duration_since(t) >= Duration::from_millis(120),
+                None => true,
+            };
+            if downloaded >= total || throttle_ok {
+                last = Some(now);
+                let _ = emitter.emit(
+                    DOWNLOAD_PROGRESS_EVENT,
+                    DownloadProgressDto {
+                        id: progress_id.clone(),
+                        downloaded,
+                        total,
+                    },
+                );
+            }
+        };
+        store.ensure_coreml_with_progress(&model_id, &asset, &mut on_progress)
     })
     .await
     .map_err(|e| e.to_string())?
@@ -1145,6 +1210,7 @@ pub fn run() {
             list_diarization_models,
             list_denoise_models,
             download_model,
+            download_coreml,
             select_model,
             list_input_devices,
             system_audio_id,
