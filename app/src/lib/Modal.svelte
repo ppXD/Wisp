@@ -128,6 +128,9 @@
 
   .modal-body {
     overflow-y: auto;
-    padding: 4px 18px 18px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 18px;
   }
 </style>

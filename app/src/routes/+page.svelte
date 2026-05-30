@@ -727,8 +727,8 @@
         Advanced · audio, language, speakers
       </button>
       <Modal bind:open={liveAdvancedOpen} title="Advanced settings">
-          <div class="opt-group">
-            <span class="group-title">Audio</span>
+          <section class="modal-section">
+            <span class="section-title">Audio</span>
             <label class="source-row">
               <span class="source-name">Microphone <em>(you)</em></span>
               <select bind:value={micDevice} onchange={applyDevices}>
@@ -773,7 +773,7 @@
             </div>
             {#if liveDenoiseChosen && !liveDenoiseChosen.installed}
               <button
-                class="btn outline sm diarize-dl"
+                class="btn outline sm dl-button"
                 onclick={() => downloadDenoise(liveDenoiseChosen.id)}
                 disabled={downloading === liveDenoiseChosen.id}
               >
@@ -782,15 +782,15 @@
                   : `Download ${fmtSize(liveDenoiseChosen.sizeBytes)}`}
               </button>
             {/if}
-            <p class="hint">
+            <p class="opt-hint">
               Defaults to your mic + all system audio with <strong>echo cancellation</strong>; for
-              system audio only, set Microphone to Off. <strong>Light</strong> (built-in) is best for
-              live; <strong>Balanced</strong> is a stronger downloaded model.
+              system audio only, set Microphone to Off. <strong>Light</strong> is the best fit for
+              live.
             </p>
-          </div>
+          </section>
 
-          <div class="opt-group">
-            <span class="group-title">Transcription</span>
+          <section class="modal-section">
+            <span class="section-title">Transcription</span>
             <label class="source-row">
               <span class="source-name">Language</span>
               <select bind:value={language} onchange={applyLanguage}>
@@ -821,29 +821,29 @@
                 >
               </div>
             </div>
-            <input
-              class="prompt-input"
-              type="text"
-              bind:value={livePrompt}
-              onchange={applyLiveDecode}
-              placeholder="Hints — names, jargon, domain terms (optional)"
-            />
-            <p class="hint">
-              Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
-              <strong>Hints</strong> prime names &amp; jargon; <strong>Fast</strong> keeps the lowest
-              latency, <strong>Accurate</strong> trades a little speed for wording.
-            </p>
-          </div>
-
-          <div class="opt-group">
-            <span class="group-title">Speakers</span>
-            <div class="source-row">
-              <span class="source-name">Identify speakers</span>
-              <label class="toggle">
-                <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
-                <span>{liveDiarize ? "On" : "Off"}</span>
-              </label>
+            <div class="field">
+              <span class="field-label">Hints <em>(optional)</em></span>
+              <input
+                class="prompt-input"
+                type="text"
+                bind:value={livePrompt}
+                onchange={applyLiveDecode}
+                placeholder="names, jargon, acronyms…"
+              />
             </div>
+            <p class="opt-hint">
+              Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
+              <strong>Fast</strong> keeps the lowest latency; <strong>Hints</strong> prime names &amp;
+              jargon.
+            </p>
+          </section>
+
+          <section class="modal-section">
+            <span class="section-title">Speakers</span>
+            <label class="opt-toggle">
+              <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
+              <span>Identify speakers</span>
+            </label>
             {#if liveDiarize}
               <div class="source-row">
                 <span class="source-name">Model</span>
@@ -861,7 +861,7 @@
               </div>
               {#if diarizeChosen && !diarizeChosen.installed}
                 <button
-                  class="btn outline sm diarize-dl"
+                  class="btn outline sm dl-button"
                   onclick={() => downloadDiarize(diarizeId)}
                   disabled={downloading === diarizeId}
                 >
@@ -871,11 +871,11 @@
                 </button>
               {/if}
             {/if}
-            <p class="hint">
+            <p class="opt-hint">
               Labels each line by who's talking (Speaker 1, 2…). <strong>Accurate</strong> tells
-              similar-sounding voices apart better; downloads a small model the first time.
+              similar-sounding voices apart better.
             </p>
-          </div>
+          </section>
       </Modal>
     {/if}
   {:else if mode === "file"}
@@ -972,120 +972,106 @@
           Options · accuracy, hints, speakers
         </button>
         <Modal bind:open={fileOptionsOpen} title="Options">
-            <div class="opt-group">
-              <div class="opt-row">
-                <span class="opt-label">Mode</span>
-                <div class="seg">
-                  <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
-                  <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
-                </div>
-                <label class="toggle">
-                  <input type="checkbox" bind:checked={fileTimestamps} />
-                  <span>Timeline</span>
-                </label>
-                <label class="toggle">
-                  <input type="checkbox" bind:checked={fileGate} />
-                  <span>Skip non-speech</span>
-                </label>
+          <section class="modal-section">
+            <span class="section-title">Audio</span>
+            <div class="opt-row">
+              <span class="opt-label">Reduce noise</span>
+              <div class="seg">
+                <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>Off</button>
+                <button
+                  class:active={fileDenoiser === "rnnoise"}
+                  onclick={() => (fileDenoiser = "rnnoise")}>Light</button
+                >
+                <button
+                  class:active={fileDenoiser === denoiseModelId}
+                  onclick={() => (fileDenoiser = denoiseModelId)}>Balanced</button
+                >
               </div>
-              <p class="opt-hint">
-                {#if fileAccurate}
-                  <strong>Accurate</strong> — beam search weighs several candidate sentences and keeps
-                  the best overall. Most accurate, slower.
-                {:else}
-                  <strong>Fast</strong> — greedy decoding takes the most likely word at each step.
-                  Faster, a little less accurate.
-                {/if}
-                {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
-                {#if fileGate}<strong>Skip non-speech</strong> drops silence and music so the model can't
-                  invent words in the gaps.{/if}
-              </p>
             </div>
+            {#if denoiseChosen && !denoiseChosen.installed}
+              <button
+                class="btn outline sm dl-button"
+                onclick={() => downloadDenoise(denoiseModelId)}
+                disabled={downloading === denoiseModelId}
+              >
+                {downloading === denoiseModelId
+                  ? `Downloading… ${downloadPct}%`
+                  : `Download ${fmtSize(denoiseChosen.sizeBytes)}`}
+              </button>
+            {/if}
+            <label class="opt-toggle">
+              <input type="checkbox" bind:checked={fileGate} />
+              <span>Skip silence &amp; music</span>
+            </label>
+            <p class="opt-hint">
+              Cleans background noise, and drops long non-speech so the model can't invent words in
+              the gaps. Leave off for clean recordings.
+            </p>
+          </section>
 
-            <div class="opt-group">
-              <div class="opt-row">
-                <span class="opt-label">Reduce noise</span>
-                <div class="seg">
-                  <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>Off</button>
-                  <button
-                    class:active={fileDenoiser === "rnnoise"}
-                    onclick={() => (fileDenoiser = "rnnoise")}>Light</button
-                  >
-                  <button
-                    class:active={fileDenoiser === denoiseModelId}
-                    onclick={() => (fileDenoiser = denoiseModelId)}>Balanced</button
-                  >
-                </div>
-                {#if denoiseChosen && !denoiseChosen.installed}
-                  <button
-                    class="btn outline sm"
-                    onclick={() => downloadDenoise(denoiseModelId)}
-                    disabled={downloading === denoiseModelId}
-                  >
-                    {downloading === denoiseModelId
-                      ? `Downloading… ${downloadPct}%`
-                      : `Download ${fmtSize(denoiseChosen.sizeBytes)}`}
-                  </button>
-                {/if}
+          <section class="modal-section">
+            <span class="section-title">Transcription</span>
+            <div class="opt-row">
+              <span class="opt-label">Mode</span>
+              <div class="seg">
+                <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
+                <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
               </div>
-              {#if fileDenoiser === "rnnoise"}
-                <p class="opt-hint">
-                  <strong>Light</strong> (RNNoise) removes steady background noise — fans, hum, hiss.
-                </p>
-              {:else if fileDenoiser === denoiseModelId}
-                <p class="opt-hint">
-                  <strong>Balanced</strong> (GTCRN) also clears real-world noise like traffic or café
-                  chatter, not just steady hum. Tiny download (~0.5 MB).
-                </p>
-              {/if}
             </div>
-
-            <div class="opt-group">
+            <label class="opt-toggle">
+              <input type="checkbox" bind:checked={fileTimestamps} />
+              <span>Timeline <em>— per-line timestamps for SRT/VTT</em></span>
+            </label>
+            <div class="field">
+              <span class="field-label">Hints <em>(optional)</em></span>
               <input
                 id="file-prompt"
                 class="prompt-input"
                 type="text"
                 bind:value={filePrompt}
-                placeholder="Hints — names, jargon, domain terms (optional)"
+                placeholder="names, jargon, acronyms…"
               />
-              <p class="opt-hint">
-                <strong>Hints</strong> prime the decoder with your spellings (people, places,
-                acronyms) so it gets them right. Comma-separated.
-              </p>
             </div>
+            <p class="opt-hint">
+              <strong>Accurate</strong> weighs several candidate sentences (better wording, slower).
+              <strong>Hints</strong> prime spellings the model might otherwise miss.
+            </p>
+          </section>
 
-            <div class="opt-group">
-              <label class="toggle">
-                <input type="checkbox" bind:checked={diarizeOn} />
-                <span>Identify speakers</span>
-              </label>
-              {#if diarizeOn}
-                <div class="opt-row">
-                  <div class="seg">
-                    {#each diarizeModels as m (m.id)}
-                      <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
-                        {diarizeShortName(m)}
-                      </button>
-                    {/each}
-                  </div>
-                  {#if diarizeChosen && !diarizeChosen.installed}
-                    <button
-                      class="btn outline sm"
-                      onclick={() => downloadDiarize(diarizeId)}
-                      disabled={downloading === diarizeId}
-                    >
-                      {downloading === diarizeId
-                        ? `Downloading… ${downloadPct}%`
-                        : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+          <section class="modal-section">
+            <span class="section-title">Speakers</span>
+            <label class="opt-toggle">
+              <input type="checkbox" bind:checked={diarizeOn} />
+              <span>Identify speakers</span>
+            </label>
+            {#if diarizeOn}
+              <div class="opt-row">
+                <span class="opt-label">Model</span>
+                <div class="seg">
+                  {#each diarizeModels as m (m.id)}
+                    <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
+                      {diarizeShortName(m)}
                     </button>
-                  {/if}
+                  {/each}
                 </div>
+              </div>
+              {#if diarizeChosen && !diarizeChosen.installed}
+                <button
+                  class="btn outline sm dl-button"
+                  onclick={() => downloadDiarize(diarizeId)}
+                  disabled={downloading === diarizeId}
+                >
+                  {downloading === diarizeId
+                    ? `Downloading… ${downloadPct}%`
+                    : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+                </button>
               {/if}
-              <p class="opt-hint">
-                <strong>Identify speakers</strong> labels each line by who's talking (Speaker 1, 2…).
-                Downloads a small model the first time.
-              </p>
-            </div>
+            {/if}
+            <p class="opt-hint">
+              Labels each line by who's talking (Speaker 1, 2…). Runs locally after transcribing;
+              downloads a small model the first time.
+            </p>
+          </section>
         </Modal>
       {/if}
     </section>
@@ -1619,8 +1605,18 @@
     margin: 0 14px 14px;
   }
 
-  /* Small section header above each group of related controls (Audio / Transcription / Speakers). */
-  .group-title {
+  /* Each modal groups related controls into a titled card so the scopes read as distinct areas. */
+  .modal-section {
+    display: flex;
+    flex-direction: column;
+    gap: 11px;
+    padding: 14px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+  }
+
+  .section-title {
     font-size: 11px;
     font-weight: 600;
     letter-spacing: 0.05em;
@@ -1628,7 +1624,26 @@
     color: var(--muted);
   }
 
-  .diarize-dl {
+  /* A labelled free-text field (Hints) — label stacked above the input so its purpose is obvious. */
+  .field {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .field-label {
+    font-size: 13.5px;
+    color: var(--text);
+  }
+
+  .field-label em {
+    color: var(--muted);
+    font-style: normal;
+    font-size: 12.5px;
+  }
+
+  /* Download button under a model/noise picker — hugs the left edge instead of stretching wide. */
+  .dl-button {
     align-self: start;
   }
 
@@ -1640,13 +1655,13 @@
 
   .source-name {
     flex: 1;
-    font-size: 14px;
+    font-size: 13.5px;
   }
 
   .source-name em {
     color: var(--muted);
     font-style: normal;
-    font-size: 13px;
+    font-size: 12.5px;
   }
 
   .source-row select {
@@ -1664,13 +1679,6 @@
     padding: 7px 26px 7px 10px;
     max-width: 280px;
     cursor: pointer;
-  }
-
-  .hint {
-    color: var(--muted);
-    font-size: 12.5px;
-    line-height: 1.55;
-    margin: 2px 0 0;
   }
 
   /* The feed — the only scroller, fills the box. */
@@ -1794,43 +1802,26 @@
     margin-right: 2px;
   }
 
-  .toggle {
-    display: inline-flex;
+  .opt-toggle {
+    display: flex;
     align-items: center;
-    gap: 6px;
-    flex: none;
-    font-size: 13px;
-    color: var(--muted);
+    gap: 8px;
+    font-size: 13.5px;
+    color: var(--text);
     cursor: pointer;
-    white-space: nowrap;
   }
 
-  .toggle input {
+  .opt-toggle input {
     accent-color: var(--accent);
     cursor: pointer;
   }
 
-
-  /* Each option (mode, noise, hints, speakers) is its own block, separated by a hairline so they
-     read as distinct choices rather than one dense wall. */
-  .opt-group {
-    display: flex;
-    flex-direction: column;
-    gap: 9px;
-    padding: 14px 0;
+  .opt-toggle em {
+    color: var(--muted);
+    font-style: normal;
+    font-size: 12.5px;
   }
 
-  .opt-group:first-child {
-    padding-top: 2px;
-  }
-
-  .opt-group:last-child {
-    padding-bottom: 2px;
-  }
-
-  .opt-group + .opt-group {
-    border-top: 1px solid var(--border);
-  }
 
   .opt-row {
     display: flex;
@@ -1840,10 +1831,8 @@
   }
 
   .opt-label {
-    flex: none;
-    min-width: 92px;
-    font-size: 13px;
-    color: var(--muted);
+    flex: 1;
+    font-size: 13.5px;
   }
 
   .seg {
