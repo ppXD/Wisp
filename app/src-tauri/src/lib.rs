@@ -27,7 +27,8 @@ use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_sherpa::{
-    GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SileroSegmenter, WhisperEngine,
+    GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
+    WhisperEngine,
 };
 use wisp_models::{
     builtin_catalog, denoise_models, diarization_models, FsModelStore, HttpDownloader,
@@ -76,6 +77,8 @@ struct AppState {
     language: Mutex<String>,
     /// Whether to denoise the live capture before transcribing (built-in RNNoise).
     live_denoise: Mutex<bool>,
+    /// Speaker-ID model id for live diarization, or `None` to skip live speaker labels.
+    live_diarize_model: Mutex<Option<String>>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
     /// Segments from the most recent file transcription, kept for export.
@@ -271,6 +274,8 @@ fn silero_model_path(app: &AppHandle) -> Option<PathBuf> {
 struct LiveSettings {
     language: String,
     denoise: bool,
+    /// Downloaded diarization model directory for live speaker labels, or `None` to skip.
+    diarize_dir: Option<PathBuf>,
 }
 
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
@@ -290,7 +295,15 @@ fn spawn_session(
 ) -> WispResult<Session> {
     let engine = build_engine(descriptor, dir, &settings.language)?;
     let segmenter = build_segmenter(app, kind);
-    let transcriber = Transcriber::new(engine, kind);
+    let mut transcriber = Transcriber::new(engine, kind);
+    // Live speaker labels: a per-session diarizer (separate numbering per stream). Best-effort —
+    // if the model won't load, transcribe without labels rather than failing the session.
+    if let Some(diarize_dir) = &settings.diarize_dir {
+        match SherpaLiveDiarizer::new(&diarize_dir.join("embedding.onnx")) {
+            Ok(diarizer) => transcriber = transcriber.with_diarizer(Box::new(diarizer)),
+            Err(e) => eprintln!("wisp: live diarizer load failed ({e}); skipping speaker labels"),
+        }
+    }
     // Built-in RNNoise streams frame-by-frame, so it suits live capture (the downloadable models
     // are clip-based). A fresh, stateful instance per session.
     let denoiser: Option<Box<dyn Denoiser>> = settings
@@ -512,6 +525,16 @@ fn set_denoise(state: State<'_, AppState>, enabled: bool) -> Result<(), String> 
     Ok(())
 }
 
+/// Sets the live diarization model id (or clears it), applied to the next session that starts.
+#[tauri::command]
+fn set_live_diarize(state: State<'_, AppState>, model: Option<String>) -> Result<(), String> {
+    *state
+        .live_diarize_model
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = model;
+    Ok(())
+}
+
 #[tauri::command]
 fn set_devices(
     state: State<'_, AppState>,
@@ -564,7 +587,24 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<(), Strin
         .live_denoise
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
-    let settings = LiveSettings { language, denoise };
+    let diarize_dir = match &*state
+        .live_diarize_model
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+    {
+        Some(model) => Some(
+            state
+                .store
+                .local_path(&ModelId(model.clone()))
+                .ok_or_else(|| format!("speaker model '{model}' is not downloaded yet"))?,
+        ),
+        None => None,
+    };
+    let settings = LiveSettings {
+        language,
+        denoise,
+        diarize_dir,
+    };
 
     // Open the audio sources first (these can fail: device missing / no mic permission).
     let mic_device = state
@@ -994,6 +1034,7 @@ pub fn run() {
                 system_device: Mutex::new(Some(SYSTEM_CAPTURE_ID.to_owned())),
                 language: Mutex::new(String::new()),
                 live_denoise: Mutex::new(false),
+                live_diarize_model: Mutex::new(None),
                 tee: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
                 active_model_path,
@@ -1017,6 +1058,7 @@ pub fn run() {
             session_running,
             set_language,
             set_denoise,
+            set_live_diarize,
             set_devices,
             start_session,
             stop_session,

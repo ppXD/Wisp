@@ -4,6 +4,7 @@
 //! the [`Segmenter`](crate::segmenter::Segmenter) without ever stalling the capture path.
 
 use wisp_audio::{normalize_for_asr, TARGET_SAMPLE_RATE};
+use wisp_core::diarize::Diarizer;
 use wisp_core::engine::AsrEngine;
 use wisp_core::error::Result;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptSegment};
@@ -15,6 +16,7 @@ pub struct Transcriber {
     engine: Box<dyn AsrEngine>,
     source_kind: AudioSourceKind,
     next_id: u64,
+    diarizer: Option<Box<dyn Diarizer>>,
 }
 
 impl Transcriber {
@@ -24,7 +26,14 @@ impl Transcriber {
             engine,
             source_kind,
             next_id: 0,
+            diarizer: None,
         }
+    }
+
+    /// Attaches a live diarizer that labels each utterance's segments with their speaker.
+    pub fn with_diarizer(mut self, diarizer: Box<dyn Diarizer>) -> Self {
+        self.diarizer = Some(diarizer);
+        self
     }
 
     /// Transcribes one complete `utterance` into final segments.
@@ -49,6 +58,18 @@ impl Transcriber {
             segment.end += utterance.start;
             self.next_id += 1;
             segments.push(segment);
+        }
+
+        // Live diarization: label every segment of this utterance with its speaker. Best-effort —
+        // a failure leaves the speaker unset rather than dropping the segment.
+        if !segments.is_empty() {
+            if let Some(diarizer) = &mut self.diarizer {
+                if let Ok(speaker) = diarizer.identify(&utterance.audio, TARGET_SAMPLE_RATE) {
+                    for segment in &mut segments {
+                        segment.speaker = Some(speaker);
+                    }
+                }
+            }
         }
 
         self.engine.reset();
@@ -117,5 +138,25 @@ mod tests {
 
         let segments = transcriber.transcribe(&utterance(0)).unwrap();
         assert!(segments.is_empty());
+    }
+
+    #[test]
+    fn diarizer_labels_each_segment_with_its_speaker() {
+        use wisp_core::diarize::Diarizer;
+        use wisp_core::transcript::SpeakerId;
+
+        struct FixedSpeaker(u32);
+        impl Diarizer for FixedSpeaker {
+            fn identify(&mut self, _audio: &[f32], _sample_rate: u32) -> Result<SpeakerId> {
+                Ok(SpeakerId(self.0))
+            }
+        }
+
+        let engine = Box::new(MockAsrEngine::new(vec![canned("hi")]));
+        let mut transcriber = Transcriber::new(engine, AudioSourceKind::Microphone)
+            .with_diarizer(Box::new(FixedSpeaker(3)));
+
+        let segments = transcriber.transcribe(&utterance(0)).unwrap();
+        assert_eq!(segments[0].speaker, Some(SpeakerId(3)));
     }
 }

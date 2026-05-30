@@ -14,9 +14,11 @@
 
 mod denoise;
 mod diarize;
+mod live_diarize;
 mod silero;
 pub use denoise::GtcrnDenoiser;
 pub use diarize::SherpaDiarizer;
+pub use live_diarize::SherpaLiveDiarizer;
 pub use silero::SileroSegmenter;
 
 use std::path::Path;
