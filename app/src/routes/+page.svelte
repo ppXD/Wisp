@@ -40,6 +40,7 @@
   let micDevice = $state("");
   let systemDevice = $state("");
   let language = $state("");
+  let liveDenoise = $state(false);
   let systemAudioId = $state("");
   let micOffId = $state("");
   let mode = $state<"live" | "file" | "cloud">("live");
@@ -170,6 +171,14 @@
     }
   }
 
+  async function applyDenoise() {
+    try {
+      await invoke("set_denoise", { enabled: liveDenoise });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function sourceLabel(source: string): string {
     if (source === "Microphone") return "mic";
     if (source === "System") return "system";
@@ -247,6 +256,7 @@
     try {
       await applyDevices();
       await applyLanguage();
+      await applyDenoise();
       await ensureListener();
       await invoke("start_session");
       running = true;
@@ -696,10 +706,18 @@
               {#each devices as d (d)}<option value={d}>{d}</option>{/each}
             </select>
           </label>
+          <div class="source-row">
+            <span class="source-name">Reduce noise <em>(steady background)</em></span>
+            <label class="toggle">
+              <input type="checkbox" bind:checked={liveDenoise} onchange={applyDenoise} />
+              <span>{liveDenoise ? "On" : "Off"}</span>
+            </label>
+          </div>
           <p class="hint">
             By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>
             with <strong>echo cancellation</strong>. Want system audio only? Set Microphone to Off.
             Set a <strong>Language</strong> if auto-detect gets it wrong — recommended for Cantonese.
+            <strong>Reduce noise</strong> cleans steady background hiss/hum from the mic in real time.
           </p>
         </div>
       </details>

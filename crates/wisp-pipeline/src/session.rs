@@ -5,8 +5,9 @@ use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use wisp_audio::to_mono_16k;
+use wisp_audio::{to_mono_16k, TARGET_SAMPLE_RATE};
 use wisp_core::audio::AudioSource;
+use wisp_core::denoise::Denoiser;
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::TranscriptEvent;
 
@@ -60,11 +61,14 @@ impl Session {
     /// drains the queue, runs `transcriber`, and forwards segments to `sink`. On stop the capture
     /// thread flushes its buffered utterance and closes the queue; the transcription thread then
     /// finishes the backlog before the session joins.
+    /// `denoiser`, when present, cleans every captured frame before segmentation, so both the VAD
+    /// and the engine see noise-suppressed audio. It is stateful and runs on the capture thread.
     pub fn spawn_live(
         mut segmenter: Box<dyn Segmenter>,
         mut transcriber: Transcriber,
         mut source: Box<dyn AudioSource>,
         mut sink: EventSink,
+        denoiser: Option<Box<dyn Denoiser>>,
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_capture = Arc::clone(&stop);
@@ -92,6 +96,7 @@ impl Session {
             run_capture(
                 &mut *segmenter,
                 &mut *source,
+                denoiser,
                 &utterance_tx,
                 &stop_for_capture,
             )
@@ -140,6 +145,7 @@ impl Session {
 fn run_capture(
     segmenter: &mut dyn Segmenter,
     source: &mut dyn AudioSource,
+    mut denoiser: Option<Box<dyn Denoiser>>,
     utterance_tx: &Sender<Utterance>,
     stop: &AtomicBool,
 ) -> Result<()> {
@@ -147,6 +153,10 @@ fn run_capture(
         match source.next_frame()? {
             Some(frame) => {
                 let mono = to_mono_16k(&frame);
+                let mono = match &mut denoiser {
+                    Some(d) => d.denoise(&mono, TARGET_SAMPLE_RATE),
+                    None => mono,
+                };
                 for utterance in segmenter.push(&mono, frame.timestamp, frame.duration()) {
                     let _ = utterance_tx.send(utterance);
                 }
@@ -298,6 +308,7 @@ mod tests {
             transcriber(vec![canned("one"), canned("two")]),
             source,
             sink,
+            None,
         );
         session.join().unwrap();
 
@@ -338,7 +349,49 @@ mod tests {
 
         // The capture thread must observe stop, close the queue, and let both threads join.
         let session =
-            Session::spawn_live(segmenter(), transcriber(vec![]), Box::new(Endless), sink);
+            Session::spawn_live(segmenter(), transcriber(vec![]), Box::new(Endless), sink, None);
         session.stop().unwrap();
+    }
+
+    #[test]
+    fn spawn_live_denoises_each_captured_frame() {
+        use std::sync::atomic::AtomicUsize;
+
+        // Passes audio through unchanged while counting how many frames it cleaned.
+        struct CountingDenoiser(Arc<AtomicUsize>);
+        impl Denoiser for CountingDenoiser {
+            fn denoise(&mut self, audio: &[f32], _sample_rate: u32) -> Vec<f32> {
+                self.0.fetch_add(1, Ordering::Relaxed);
+                audio.to_vec()
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let frames = vec![
+            frame(0.5, 0),
+            frame(0.5, 100),
+            frame(0.0, 200),
+            frame(0.0, 300),
+        ];
+        let source: Box<dyn AudioSource> = Box::new(MockAudioSource::new(frames));
+        let (tx, _rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+
+        let session = Session::spawn_live(
+            segmenter(),
+            transcriber(vec![canned("x")]),
+            source,
+            sink,
+            Some(Box::new(CountingDenoiser(Arc::clone(&calls)))),
+        );
+        session.join().unwrap();
+
+        assert_eq!(
+            calls.load(Ordering::Relaxed),
+            4,
+            "the denoiser runs once per captured frame"
+        );
     }
 }
