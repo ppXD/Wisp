@@ -108,6 +108,16 @@ pub trait AsrEngine: Send {
         let _ = (prompt, beam);
     }
 
+    /// Supplies recent finalized transcript text to bias the next [`transcribe`](Self::transcribe)
+    /// toward consistent spellings, names, and terminology across a live session.
+    ///
+    /// This is *text* context (folded into the biasing prompt), not carried decoder state, so it
+    /// improves cross-utterance consistency without the hallucination/repetition drift that full
+    /// context-carrying causes. The default is a no-op, correct for engines that take no prompt.
+    fn set_context(&mut self, recent_text: &str) {
+        let _ = recent_text;
+    }
+
     /// Clears any accumulated streaming state (e.g. between utterances).
     ///
     /// The default is a no-op, which is correct for stateless engines.
@@ -183,6 +193,15 @@ mod tests {
         // Engines that don't support streaming knobs keep working after the call.
         let mut engine = OneSegEngine;
         engine.configure_streaming("Acme, Inc.", true);
+        let result = engine.transcribe(&[0.0; 16], 16_000).unwrap();
+        assert_eq!(result.segments.len(), 1);
+    }
+
+    #[test]
+    fn set_context_defaults_to_a_harmless_noop() {
+        // Engines that take no biasing prompt ignore rolling context and keep working.
+        let mut engine = OneSegEngine;
+        engine.set_context("we discussed Kubernetes and the Acme account");
         let result = engine.transcribe(&[0.0; 16], 16_000).unwrap();
         assert_eq!(result.segments.len(), 1);
     }
