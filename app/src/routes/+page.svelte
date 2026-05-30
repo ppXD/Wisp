@@ -702,93 +702,110 @@
 
     {#if !running}
       <details class="advanced-panel">
-        <summary>Advanced · language &amp; audio</summary>
+        <summary>Advanced · audio, language, speakers</summary>
         <div class="advanced-grid">
-          <label class="source-row">
-            <span class="source-name">Language</span>
-            <select bind:value={language} onchange={applyLanguage}>
-              <option value="">Auto-detect</option>
-              <option value="yue">Cantonese</option>
-              <option value="zh">Chinese (Mandarin)</option>
-              <option value="en">English</option>
-              <option value="ja">Japanese</option>
-              <option value="ko">Korean</option>
-            </select>
-          </label>
-          <label class="source-row">
-            <span class="source-name">Microphone <em>(you)</em></span>
-            <select bind:value={micDevice} onchange={applyDevices}>
-              <option value="">System default</option>
-              {#if micOffId}<option value={micOffId}>Off</option>{/if}
-              {#each devices as d (d)}<option value={d}>{d}</option>{/each}
-            </select>
-          </label>
-          <label class="source-row">
-            <span class="source-name">System audio <em>(everything playing)</em></span>
-            <select bind:value={systemDevice} onchange={applyDevices}>
-              <option value="">Off</option>
-              {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
-              {#each devices as d (d)}<option value={d}>{d}</option>{/each}
-            </select>
-          </label>
-          <div class="source-row">
-            <span class="source-name">Reduce noise <em>(steady background)</em></span>
-            <label class="toggle">
-              <input type="checkbox" bind:checked={liveDenoise} onchange={applyDenoise} />
-              <span>{liveDenoise ? "On" : "Off"}</span>
+          <div class="opt-group">
+            <span class="group-title">Audio</span>
+            <label class="source-row">
+              <span class="source-name">Microphone <em>(you)</em></span>
+              <select bind:value={micDevice} onchange={applyDevices}>
+                <option value="">System default</option>
+                {#if micOffId}<option value={micOffId}>Off</option>{/if}
+                {#each devices as d (d)}<option value={d}>{d}</option>{/each}
+              </select>
             </label>
-          </div>
-          <div class="source-row">
-            <span class="source-name">Identify speakers <em>(who's talking)</em></span>
-            <label class="toggle">
-              <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
-              <span>{liveDiarize ? "On" : "Off"}</span>
+            <label class="source-row">
+              <span class="source-name">System audio <em>(everything playing)</em></span>
+              <select bind:value={systemDevice} onchange={applyDevices}>
+                <option value="">Off</option>
+                {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
+                {#each devices as d (d)}<option value={d}>{d}</option>{/each}
+              </select>
             </label>
-          </div>
-          {#if liveDiarize && diarizeChosen && !diarizeChosen.installed}
-            <button
-              class="btn outline sm diarize-dl"
-              onclick={() => downloadDiarize(diarizeId)}
-              disabled={downloading === diarizeId}
-            >
-              {downloading === diarizeId
-                ? `Downloading… ${downloadPct}%`
-                : `Download speaker model ${fmtSize(diarizeChosen.sizeBytes)}`}
-            </button>
-          {/if}
-          <div class="source-row">
-            <span class="source-name">Mode <em>(accuracy vs speed)</em></span>
-            <div class="seg">
-              <button
-                class:active={liveAccurate}
-                onclick={() => {
-                  liveAccurate = true;
-                  applyLiveDecode();
-                }}>Accurate</button
-              >
-              <button
-                class:active={!liveAccurate}
-                onclick={() => {
-                  liveAccurate = false;
-                  applyLiveDecode();
-                }}>Fast</button
-              >
+            <div class="source-row">
+              <span class="source-name">Reduce noise</span>
+              <label class="toggle">
+                <input type="checkbox" bind:checked={liveDenoise} onchange={applyDenoise} />
+                <span>{liveDenoise ? "On" : "Off"}</span>
+              </label>
             </div>
+            <p class="hint">
+              Defaults to your mic + all system audio with <strong>echo cancellation</strong>. For
+              system audio only, set Microphone to Off.
+            </p>
           </div>
-          <input
-            class="prompt-input"
-            type="text"
-            bind:value={livePrompt}
-            onchange={applyLiveDecode}
-            placeholder="Hints — names, jargon, domain terms (optional)"
-          />
-          <p class="hint">
-            By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>
-            with <strong>echo cancellation</strong>. Want system audio only? Set Microphone to Off.
-            Set a <strong>Language</strong> if auto-detect gets it wrong — recommended for Cantonese.
-            <strong>Hints</strong> prime spellings (names, jargon); <strong>Fast</strong> keeps the
-            lowest latency, <strong>Accurate</strong> trades a little speed for better wording.
-          </p>
+
+          <div class="opt-group">
+            <span class="group-title">Transcription</span>
+            <label class="source-row">
+              <span class="source-name">Language</span>
+              <select bind:value={language} onchange={applyLanguage}>
+                <option value="">Auto-detect</option>
+                <option value="yue">Cantonese</option>
+                <option value="zh">Chinese (Mandarin)</option>
+                <option value="en">English</option>
+                <option value="ja">Japanese</option>
+                <option value="ko">Korean</option>
+              </select>
+            </label>
+            <div class="source-row">
+              <span class="source-name">Mode</span>
+              <div class="seg">
+                <button
+                  class:active={liveAccurate}
+                  onclick={() => {
+                    liveAccurate = true;
+                    applyLiveDecode();
+                  }}>Accurate</button
+                >
+                <button
+                  class:active={!liveAccurate}
+                  onclick={() => {
+                    liveAccurate = false;
+                    applyLiveDecode();
+                  }}>Fast</button
+                >
+              </div>
+            </div>
+            <input
+              class="prompt-input"
+              type="text"
+              bind:value={livePrompt}
+              onchange={applyLiveDecode}
+              placeholder="Hints — names, jargon, domain terms (optional)"
+            />
+            <p class="hint">
+              Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
+              <strong>Hints</strong> prime names &amp; jargon; <strong>Fast</strong> keeps the lowest
+              latency, <strong>Accurate</strong> trades a little speed for wording.
+            </p>
+          </div>
+
+          <div class="opt-group">
+            <span class="group-title">Speakers</span>
+            <div class="source-row">
+              <span class="source-name">Identify speakers</span>
+              <label class="toggle">
+                <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
+                <span>{liveDiarize ? "On" : "Off"}</span>
+              </label>
+            </div>
+            {#if liveDiarize && diarizeChosen && !diarizeChosen.installed}
+              <button
+                class="btn outline sm diarize-dl"
+                onclick={() => downloadDiarize(diarizeId)}
+                disabled={downloading === diarizeId}
+              >
+                {downloading === diarizeId
+                  ? `Downloading… ${downloadPct}%`
+                  : `Download speaker model ${fmtSize(diarizeChosen.sizeBytes)}`}
+              </button>
+            {/if}
+            <p class="hint">
+              Labels each line by who's talking (Speaker 1, 2…). Downloads a small model the first
+              time.
+            </p>
+          </div>
         </div>
       </details>
     {/if}
@@ -1532,11 +1549,21 @@
   .advanced-grid {
     display: flex;
     flex-direction: column;
-    gap: 10px;
+    /* The `.opt-group` blocks inside manage their own spacing + dividers. */
+    gap: 0;
     padding: 14px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
+  }
+
+  /* Small section header above each group of related controls (Audio / Transcription / Speakers). */
+  .group-title {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
   }
 
   .diarize-dl {
