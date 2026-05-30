@@ -297,6 +297,8 @@
   let fileSegments = $state<Segment[]>([]);
   let fileName = $state("");
   let fileTranscribing = $state(false);
+  // Decode progress 0–100; 0 means the engine hasn't reported yet (bar shows indeterminate).
+  let fileProgress = $state(0);
   // Accurate (beam search) vs Fast (greedy) decoding. Files default to Accurate.
   let fileAccurate = $state(true);
   // Timeline (timestamps) is opt-in: off = most accurate plain text; on = timed for SRT/VTT.
@@ -399,6 +401,7 @@
     }
     error = "";
     fileSegments = [];
+    fileProgress = 0;
     fileName = path.split(/[\\/]/).pop() ?? path;
     fileHasTimestamps = fileTimestamps;
     fileTranscribing = true;
@@ -468,6 +471,11 @@
     fileListeners.push(
       await listen<{ name: string; totalMs: number }>("file://meta", (e) => {
         fileName = e.payload.name;
+      }),
+    );
+    fileListeners.push(
+      await listen<number>("file://progress", (e) => {
+        fileProgress = e.payload;
       }),
     );
     fileListeners.push(
@@ -702,9 +710,21 @@
         <div class="box-head">
           <span class="active-model">{fileName || "File"}</span>
           <span class="status" class:live={fileTranscribing}>
-            <span class="status-dot"></span>{fileTranscribing ? "transcribing…" : "done"}
+            <span class="status-dot"></span>{fileTranscribing
+              ? fileProgress > 0
+                ? `transcribing… ${fileProgress}%`
+                : "transcribing…"
+              : "done"}
           </span>
         </div>
+        {#if fileTranscribing}
+          <div class="file-progress" class:indeterminate={fileProgress === 0}>
+            <div
+              class="file-progress-fill"
+              style:width={fileProgress > 0 ? `${fileProgress}%` : undefined}
+            ></div>
+          </div>
+        {/if}
         <ul class="feed">
           {#each fileSegments as seg (seg.id)}
             <li>
@@ -1266,6 +1286,36 @@
   .status.live .status-dot {
     background: var(--live);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
+  }
+
+  /* Thin determinate progress bar under the file header; falls back to an indeterminate sweep
+     until the engine reports its first percentage. */
+  .file-progress {
+    flex: none;
+    height: 3px;
+    background: var(--border);
+    overflow: hidden;
+  }
+
+  .file-progress-fill {
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width 0.25s ease;
+  }
+
+  .file-progress.indeterminate .file-progress-fill {
+    width: 32%;
+    animation: file-progress-sweep 1.1s ease-in-out infinite;
+  }
+
+  @keyframes file-progress-sweep {
+    0% {
+      margin-left: -32%;
+    }
+    100% {
+      margin-left: 100%;
+    }
   }
 
   .muted {

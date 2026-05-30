@@ -17,7 +17,7 @@ mod sys {
 }
 
 use std::ffi::{CStr, CString};
-use std::os::raw::c_int;
+use std::os::raw::{c_int, c_void};
 use std::path::Path;
 use std::time::Duration;
 
@@ -98,6 +98,25 @@ fn apply_thresholds(params: &mut sys::whisper_full_params, thresholds: DecodeThr
     params.entropy_thold = thresholds.entropy_thold;
     params.logprob_thold = thresholds.logprob_thold;
     params.no_speech_thold = thresholds.no_speech_thold;
+}
+
+/// C trampoline forwarding whisper.cpp's 0–100 progress to the Rust `&dyn Fn(u8)` passed as user
+/// data, so the caller can drive a progress bar.
+///
+/// # Safety
+/// `user_data` must be the pointer to the `&dyn Fn(u8)` set in `progress_callback_user_data`, and
+/// must stay valid for the whole `whisper_full` call.
+unsafe extern "C" fn progress_trampoline(
+    _ctx: *mut sys::whisper_context,
+    _state: *mut sys::whisper_state,
+    progress: c_int,
+    user_data: *mut c_void,
+) {
+    if user_data.is_null() {
+        return;
+    }
+    let callback: &dyn Fn(u8) = *(user_data as *const &dyn Fn(u8));
+    callback(progress.clamp(0, 100) as u8);
 }
 
 /// An [`AsrEngine`] backed by whisper.cpp on the Metal backend.
@@ -222,7 +241,9 @@ impl AsrEngine for WhisperCppEngine {
         // Context primer (names, jargon) biasing the decoder toward correct spellings. Held in this
         // scope so its pointer stays valid for the whole `whisper_full` call; empty = no biasing.
         let prompt = CString::new(options.prompt).unwrap_or_default();
-        // SAFETY: live context; valid slice; `self.language` and `prompt` outlive the call.
+        // The progress sink, held here so the pointer we hand whisper.cpp stays valid through the call.
+        let progress = options.progress;
+        // SAFETY: live context; valid slice; `self.language`, `prompt`, and `progress` outlive the call.
         let segments = unsafe {
             let mut params = sys::whisper_full_default_params(strategy);
             params.n_threads = self.n_threads;
@@ -241,6 +262,10 @@ impl AsrEngine for WhisperCppEngine {
             params.print_timestamps = false;
             params.single_segment = false;
             apply_thresholds(&mut params, self.thresholds);
+            if let Some(callback) = &progress {
+                params.progress_callback = Some(progress_trampoline);
+                params.progress_callback_user_data = callback as *const &dyn Fn(u8) as *mut c_void;
+            }
 
             let rc = sys::whisper_full(self.ctx, params, audio.as_ptr(), audio.len() as c_int);
             if rc != 0 {
