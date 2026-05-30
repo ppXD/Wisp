@@ -42,6 +42,8 @@
   let language = $state("");
   let liveDenoise = $state(false);
   let liveDiarize = $state(false);
+  let liveAccurate = $state(false);
+  let livePrompt = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
   let mode = $state<"live" | "file" | "cloud">("live");
@@ -188,6 +190,14 @@
     }
   }
 
+  async function applyLiveDecode() {
+    try {
+      await invoke("set_live_decode", { prompt: livePrompt.trim(), accurate: liveAccurate });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function sourceLabel(source: string): string {
     if (source === "Microphone") return "mic";
     if (source === "System") return "system";
@@ -271,6 +281,7 @@
       await applyLanguage();
       await applyDenoise();
       await applyLiveDiarize();
+      await applyLiveDecode();
       await ensureListener();
       await invoke("start_session");
       running = true;
@@ -745,11 +756,38 @@
                 : `Download speaker model ${fmtSize(diarizeChosen.sizeBytes)}`}
             </button>
           {/if}
+          <div class="source-row">
+            <span class="source-name">Mode <em>(accuracy vs speed)</em></span>
+            <div class="seg">
+              <button
+                class:active={liveAccurate}
+                onclick={() => {
+                  liveAccurate = true;
+                  applyLiveDecode();
+                }}>Accurate</button
+              >
+              <button
+                class:active={!liveAccurate}
+                onclick={() => {
+                  liveAccurate = false;
+                  applyLiveDecode();
+                }}>Fast</button
+              >
+            </div>
+          </div>
+          <input
+            class="prompt-input"
+            type="text"
+            bind:value={livePrompt}
+            onchange={applyLiveDecode}
+            placeholder="Hints — names, jargon, domain terms (optional)"
+          />
           <p class="hint">
             By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>
             with <strong>echo cancellation</strong>. Want system audio only? Set Microphone to Off.
             Set a <strong>Language</strong> if auto-detect gets it wrong — recommended for Cantonese.
-            <strong>Reduce noise</strong> cleans steady background hiss/hum from the mic in real time.
+            <strong>Hints</strong> prime spellings (names, jargon); <strong>Fast</strong> keeps the
+            lowest latency, <strong>Accurate</strong> trades a little speed for better wording.
           </p>
         </div>
       </details>

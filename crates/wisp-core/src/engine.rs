@@ -100,6 +100,14 @@ pub trait AsrEngine: Send {
         self.transcribe(audio, sample_rate)
     }
 
+    /// Configures the streaming [`transcribe`](Self::transcribe) path: a biasing `prompt` (names,
+    /// jargon) and whether to use beam search (more accurate, slower) instead of greedy decoding.
+    ///
+    /// The default is a no-op, correct for engines that don't expose these knobs.
+    fn configure_streaming(&mut self, prompt: &str, beam: bool) {
+        let _ = (prompt, beam);
+    }
+
     /// Clears any accumulated streaming state (e.g. between utterances).
     ///
     /// The default is a no-op, which is correct for stateless engines.
@@ -168,5 +176,14 @@ mod tests {
             .unwrap();
         assert_eq!(result.segments.len(), 1);
         assert_eq!(result.segments[0].text, "hi");
+    }
+
+    #[test]
+    fn configure_streaming_defaults_to_a_harmless_noop() {
+        // Engines that don't support streaming knobs keep working after the call.
+        let mut engine = OneSegEngine;
+        engine.configure_streaming("Acme, Inc.", true);
+        let result = engine.transcribe(&[0.0; 16], 16_000).unwrap();
+        assert_eq!(result.segments.len(), 1);
     }
 }
