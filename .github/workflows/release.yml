@@ -1,8 +1,8 @@
-# Builds the Apple-Silicon (arm64) macOS app. Intel is intentionally unsupported: the screencapture
-# stack (apple-metal) needs the macOS 15 SDK, which no GitHub Intel runner can provide, and the
-# WebRTC AEC won't cross-compile from an Apple-Silicon host — so a working x86_64 slice isn't
-# buildable. Apple Silicon is the only supported target. Manual (workflow_dispatch) or on a v* tag.
-name: Release (Apple Silicon)
+# Builds runnable installers: the Apple-Silicon (arm64) macOS app and the Windows x64 app. Intel
+# macOS is intentionally unsupported (the screencapture/apple-metal stack needs the macOS 15 SDK no
+# Intel runner provides, and WebRTC AEC won't cross-compile from Apple Silicon). The Windows build
+# is mic + sherpa-onnx (system audio / AEC / Metal are macOS-only and degrade). Manual or on a v* tag.
+name: Release
 
 on:
   workflow_dispatch:
@@ -51,3 +51,29 @@ jobs:
         with:
           name: wisp-apple-silicon
           path: Wisp-arm64.app.zip
+
+  windows:
+    name: build (windows x64)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend deps
+        working-directory: app
+        run: npm ci
+      - name: Build the app installers
+        working-directory: app
+        run: npm run tauri build
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: wisp-windows-x64
+          path: |
+            app/src-tauri/target/release/bundle/msi/*.msi
+            app/src-tauri/target/release/bundle/nsis/*.exe
