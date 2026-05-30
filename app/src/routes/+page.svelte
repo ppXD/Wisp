@@ -697,74 +697,6 @@
         <div class="box-head">
           {@render modelPicker()}
         </div>
-        <div class="file-opts">
-          <div class="opt-row">
-            <span class="opt-label">Mode</span>
-            <div class="seg">
-              <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
-              <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
-            </div>
-            <label class="toggle">
-              <input type="checkbox" bind:checked={fileTimestamps} />
-              <span>Timeline</span>
-            </label>
-          </div>
-          <p class="opt-hint">
-            {#if fileAccurate}
-              <strong>Accurate</strong> — beam search weighs several candidate sentences and keeps the
-              best overall. Most accurate, slower.
-            {:else}
-              <strong>Fast</strong> — greedy decoding takes the most likely word at each step. Faster,
-              a little less accurate.
-            {/if}
-            {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
-          </p>
-          <div class="opt-field">
-            <input
-              id="file-prompt"
-              class="prompt-input"
-              type="text"
-              bind:value={filePrompt}
-              placeholder="Hints — names, jargon, domain terms (optional)"
-            />
-            <p class="opt-hint">
-              <strong>Hints</strong> prime the decoder with your spellings (people, places, acronyms)
-              so it transcribes them correctly. Comma-separated, no need for full sentences.
-            </p>
-          </div>
-          <div class="opt-field">
-            <label class="toggle">
-              <input type="checkbox" bind:checked={diarizeOn} />
-              <span>Identify speakers</span>
-            </label>
-            {#if diarizeOn}
-              <div class="opt-row diarize-row">
-                <div class="seg">
-                  {#each diarizeModels as m (m.id)}
-                    <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
-                      {diarizeShortName(m)}
-                    </button>
-                  {/each}
-                </div>
-                {#if diarizeChosen && !diarizeChosen.installed}
-                  <button
-                    class="btn outline sm"
-                    onclick={() => downloadDiarize(diarizeId)}
-                    disabled={downloading === diarizeId}
-                  >
-                    {downloading === diarizeId
-                      ? `Downloading… ${downloadPct}%`
-                      : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
-                  </button>
-                {/if}
-              </div>
-            {/if}
-            <p class="opt-hint">
-              <strong>Identify speakers</strong> labels each line by who's talking (Speaker 1, 2…).
-              Runs locally after transcription; downloads a small model the first time.
-            </p>
-          </div>
-        </div>
         <button
           class="dropzone"
           class:over={dragOver}
@@ -782,6 +714,80 @@
             {/if}
           </p>
         </button>
+        <!-- Sensible defaults (Accurate, plain text) work for most files; power options stay
+             tucked away so a first-time user isn't faced with a wall of controls. -->
+        <details class="advanced-panel file-options">
+          <summary>Options · accuracy, hints, speakers</summary>
+          <div class="file-opts">
+            <div class="opt-row">
+              <span class="opt-label">Mode</span>
+              <div class="seg">
+                <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
+                <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+              </div>
+              <label class="toggle">
+                <input type="checkbox" bind:checked={fileTimestamps} />
+                <span>Timeline</span>
+              </label>
+            </div>
+            <p class="opt-hint">
+              {#if fileAccurate}
+                <strong>Accurate</strong> — beam search weighs several candidate sentences and keeps
+                the best overall. Most accurate, slower.
+              {:else}
+                <strong>Fast</strong> — greedy decoding takes the most likely word at each step.
+                Faster, a little less accurate.
+              {/if}
+              {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
+            </p>
+            <div class="opt-field">
+              <input
+                id="file-prompt"
+                class="prompt-input"
+                type="text"
+                bind:value={filePrompt}
+                placeholder="Hints — names, jargon, domain terms (optional)"
+              />
+              <p class="opt-hint">
+                <strong>Hints</strong> prime the decoder with your spellings (people, places,
+                acronyms) so it transcribes them correctly. Comma-separated, no need for full
+                sentences.
+              </p>
+            </div>
+            <div class="opt-field">
+              <label class="toggle">
+                <input type="checkbox" bind:checked={diarizeOn} />
+                <span>Identify speakers</span>
+              </label>
+              {#if diarizeOn}
+                <div class="opt-row diarize-row">
+                  <div class="seg">
+                    {#each diarizeModels as m (m.id)}
+                      <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
+                        {diarizeShortName(m)}
+                      </button>
+                    {/each}
+                  </div>
+                  {#if diarizeChosen && !diarizeChosen.installed}
+                    <button
+                      class="btn outline sm"
+                      onclick={() => downloadDiarize(diarizeId)}
+                      disabled={downloading === diarizeId}
+                    >
+                      {downloading === diarizeId
+                        ? `Downloading… ${downloadPct}%`
+                        : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+                    </button>
+                  {/if}
+                </div>
+              {/if}
+              <p class="opt-hint">
+                <strong>Identify speakers</strong> labels each line by who's talking (Speaker 1, 2…).
+                Runs locally after transcription; downloads a small model the first time.
+              </p>
+            </div>
+          </div>
+        </details>
       {/if}
     </section>
   {:else}
@@ -1487,6 +1493,16 @@
     flex: none;
     padding: 11px 14px 12px;
     border-bottom: 1px solid var(--border);
+  }
+
+  /* When the options live inside the collapsible disclosure, drop the section chrome. */
+  .file-options {
+    margin: 0 14px 14px;
+  }
+
+  .file-options .file-opts {
+    padding: 0;
+    border-bottom: none;
   }
 
   .opt-row {
