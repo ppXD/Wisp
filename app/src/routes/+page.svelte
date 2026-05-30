@@ -304,6 +304,8 @@
   let fileHasTimestamps = $state(false);
   // Optional context primer (names, jargon, domain terms) that biases the decoder's spelling.
   let filePrompt = $state("");
+  // Skip non-speech (silence/music) before decoding, opt-in: stops hallucinated words in the gaps.
+  let fileGate = $state(false);
   // Speaker diarization (who-said-what), opt-in. The models load and download on demand.
   let diarizeModels = $state<ModelInfo[]>([]);
   let diarizeOn = $state(false);
@@ -367,10 +369,13 @@
     try {
       await invoke("transcribe_file", {
         path,
-        timestamps: fileTimestamps,
-        accurate: fileAccurate,
-        prompt: filePrompt.trim(),
-        diarizeModel: diarizeOn ? diarizeId : null,
+        options: {
+          timestamps: fileTimestamps,
+          accurate: fileAccurate,
+          prompt: filePrompt.trim(),
+          diarizeModel: diarizeOn ? diarizeId : null,
+          gateSpeech: fileGate,
+        },
       });
     } catch (e) {
       error = String(e);
@@ -729,6 +734,10 @@
                 <input type="checkbox" bind:checked={fileTimestamps} />
                 <span>Timeline</span>
               </label>
+              <label class="toggle">
+                <input type="checkbox" bind:checked={fileGate} />
+                <span>Skip non-speech</span>
+              </label>
             </div>
             <p class="opt-hint">
               {#if fileAccurate}
@@ -739,6 +748,9 @@
                 Faster, a little less accurate.
               {/if}
               {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
+              {#if fileGate}<strong>Skip non-speech</strong> removes silence and music before
+                transcribing, so the model doesn't invent words in the gaps — best for recordings
+                with long pauses or background music.{/if}
             </p>
             <div class="opt-field">
               <input
