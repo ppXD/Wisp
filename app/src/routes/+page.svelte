@@ -35,6 +35,8 @@
 
   let running = $state(false);
   let error = $state("");
+  // Non-fatal notice from a started session (e.g. system audio unavailable → mic-only).
+  let liveNotice = $state("");
   let segments = $state<Segment[]>([]);
   let models = $state<ModelInfo[]>([]);
   let downloading = $state<string | null>(null);
@@ -318,6 +320,7 @@
 
   async function start() {
     error = "";
+    liveNotice = "";
     if (liveDiarize && !diarizeChosen?.installed) {
       error = "Download the speaker model first.";
       return;
@@ -333,7 +336,8 @@
       await applyLiveDiarize();
       await applyLiveDecode();
       await ensureListener();
-      await invoke("start_session");
+      const notice = await invoke<string | null>("start_session");
+      liveNotice = notice ?? "";
       running = true;
       // Capture started, so the permissions it needed are granted — clear any stale prompts
       // (macOS can report a stale status to a running process after a Settings change).
@@ -354,6 +358,7 @@
       error = String(e);
     }
     running = false;
+    liveNotice = "";
   }
 
   function clear() {
@@ -675,6 +680,13 @@
           <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "no model"}
         </span>
       </div>
+
+      {#if liveNotice}
+        <div class="live-notice" role="status">
+          <span>{liveNotice}</span>
+          <button class="live-notice-x" aria-label="Dismiss" onclick={() => (liveNotice = "")}>×</button>
+        </div>
+      {/if}
 
       {#if !running && (needsScreenRecording || needsMicPermission || error || (chosenModel && !chosenModel.installed) || (chosenModel && chosenModel.installed && chosenModel.coremlAvailable))}
         <div class="box-aux">
@@ -1262,6 +1274,35 @@
     gap: 9px;
     padding: 12px 14px;
     border-bottom: 1px solid var(--border);
+  }
+
+  /* Non-fatal info banner (e.g. system audio unavailable → mic-only) shown above the feed. */
+  .live-notice {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 9px 14px;
+    font-size: 13px;
+    color: var(--text);
+    background: color-mix(in srgb, var(--accent) 9%, transparent);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .live-notice-x {
+    flex: none;
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    font-size: 17px;
+    line-height: 1;
+    cursor: pointer;
+    padding: 0 2px;
+  }
+
+  .live-notice-x:hover {
+    color: var(--text);
   }
 
   .box-foot {
