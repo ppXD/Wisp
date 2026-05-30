@@ -12,7 +12,9 @@
 //!
 //! [`SileroSegmenter`] adapts sherpa-onnx's Silero neural VAD to the pipeline's segmentation trait.
 
+mod diarize;
 mod silero;
+pub use diarize::SherpaDiarizer;
 pub use silero::SileroSegmenter;
 
 use std::path::Path;

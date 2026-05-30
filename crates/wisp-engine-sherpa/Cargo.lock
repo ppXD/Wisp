@@ -1249,6 +1249,7 @@ dependencies = [
 name = "wisp-engine-sherpa"
 version = "0.0.0"
 dependencies = [
+ "hound",
  "sherpa-rs",
  "wisp-core",
  "wisp-pipeline",

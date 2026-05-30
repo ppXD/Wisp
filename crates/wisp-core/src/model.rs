@@ -18,6 +18,8 @@ pub enum ModelFamily {
     Parakeet,
     /// sherpa-onnx SenseVoice (single-file multilingual model).
     SenseVoice,
+    /// Speaker diarization (segmentation + embedding) — labels who speaks when, not an ASR engine.
+    Diarization,
 }
 
 /// Quantization level of a model's weights.

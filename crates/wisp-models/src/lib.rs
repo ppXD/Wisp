@@ -12,7 +12,7 @@ pub mod checksum;
 pub mod download;
 pub mod store;
 
-pub use catalog::builtin_catalog;
+pub use catalog::{builtin_catalog, diarization_models};
 pub use download::FileDownloader;
 #[cfg(feature = "http")]
 pub use download::HttpDownloader;
