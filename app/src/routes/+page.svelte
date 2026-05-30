@@ -762,72 +762,75 @@
         <details class="advanced-panel file-options">
           <summary>Options · accuracy, hints, speakers</summary>
           <div class="file-opts">
-            <div class="opt-row">
-              <span class="opt-label">Mode</span>
-              <div class="seg">
-                <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
-                <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+            <div class="opt-group">
+              <div class="opt-row">
+                <span class="opt-label">Mode</span>
+                <div class="seg">
+                  <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
+                  <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+                </div>
+                <label class="toggle">
+                  <input type="checkbox" bind:checked={fileTimestamps} />
+                  <span>Timeline</span>
+                </label>
+                <label class="toggle">
+                  <input type="checkbox" bind:checked={fileGate} />
+                  <span>Skip non-speech</span>
+                </label>
               </div>
-              <label class="toggle">
-                <input type="checkbox" bind:checked={fileTimestamps} />
-                <span>Timeline</span>
-              </label>
-              <label class="toggle">
-                <input type="checkbox" bind:checked={fileGate} />
-                <span>Skip non-speech</span>
-              </label>
+              <p class="opt-hint">
+                {#if fileAccurate}
+                  <strong>Accurate</strong> — beam search weighs several candidate sentences and keeps
+                  the best overall. Most accurate, slower.
+                {:else}
+                  <strong>Fast</strong> — greedy decoding takes the most likely word at each step.
+                  Faster, a little less accurate.
+                {/if}
+                {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
+                {#if fileGate}<strong>Skip non-speech</strong> drops silence and music so the model can't
+                  invent words in the gaps.{/if}
+              </p>
             </div>
-            <p class="opt-hint">
-              {#if fileAccurate}
-                <strong>Accurate</strong> — beam search weighs several candidate sentences and keeps
-                the best overall. Most accurate, slower.
-              {:else}
-                <strong>Fast</strong> — greedy decoding takes the most likely word at each step.
-                Faster, a little less accurate.
-              {/if}
-              {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
-              {#if fileGate}<strong>Skip non-speech</strong> removes silence and music before
-                transcribing, so the model doesn't invent words in the gaps — best for recordings
-                with long pauses or background music.{/if}
-            </p>
-            <div class="opt-row">
-              <span class="opt-label">Reduce noise</span>
-              <div class="seg">
-                <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>Off</button>
-                <button
-                  class:active={fileDenoiser === "rnnoise"}
-                  onclick={() => (fileDenoiser = "rnnoise")}>Light</button
-                >
-                <button
-                  class:active={fileDenoiser === denoiseModelId}
-                  onclick={() => (fileDenoiser = denoiseModelId)}>Balanced</button
-                >
+
+            <div class="opt-group">
+              <div class="opt-row">
+                <span class="opt-label">Reduce noise</span>
+                <div class="seg">
+                  <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>Off</button>
+                  <button
+                    class:active={fileDenoiser === "rnnoise"}
+                    onclick={() => (fileDenoiser = "rnnoise")}>Light</button
+                  >
+                  <button
+                    class:active={fileDenoiser === denoiseModelId}
+                    onclick={() => (fileDenoiser = denoiseModelId)}>Balanced</button
+                  >
+                </div>
+                {#if denoiseChosen && !denoiseChosen.installed}
+                  <button
+                    class="btn outline sm"
+                    onclick={() => downloadDenoise(denoiseModelId)}
+                    disabled={downloading === denoiseModelId}
+                  >
+                    {downloading === denoiseModelId
+                      ? `Downloading… ${downloadPct}%`
+                      : `Download ${fmtSize(denoiseChosen.sizeBytes)}`}
+                  </button>
+                {/if}
               </div>
-              {#if denoiseChosen && !denoiseChosen.installed}
-                <button
-                  class="btn outline sm"
-                  onclick={() => downloadDenoise(denoiseModelId)}
-                  disabled={downloading === denoiseModelId}
-                >
-                  {downloading === denoiseModelId
-                    ? `Downloading… ${downloadPct}%`
-                    : `Download ${fmtSize(denoiseChosen.sizeBytes)}`}
-                </button>
+              {#if fileDenoiser === "rnnoise"}
+                <p class="opt-hint">
+                  <strong>Light</strong> (RNNoise) removes steady background noise — fans, hum, hiss.
+                </p>
+              {:else if fileDenoiser === denoiseModelId}
+                <p class="opt-hint">
+                  <strong>Balanced</strong> (GTCRN) also clears real-world noise like traffic or café
+                  chatter, not just steady hum. Tiny download (~0.5 MB).
+                </p>
               {/if}
             </div>
-            {#if fileDenoiser === "rnnoise"}
-              <p class="opt-hint">
-                <strong>Light</strong> (RNNoise) removes steady background noise — fans, hum, hiss —
-                before transcribing. Best left off for clean recordings.
-              </p>
-            {:else if fileDenoiser === denoiseModelId}
-              <p class="opt-hint">
-                <strong>Balanced</strong> (GTCRN) is a neural denoiser that also handles real-world
-                noise like traffic or café chatter, not just steady hum. Tiny download (~0.5 MB),
-                runs on the CPU.
-              </p>
-            {/if}
-            <div class="opt-field">
+
+            <div class="opt-group">
               <input
                 id="file-prompt"
                 class="prompt-input"
@@ -837,17 +840,17 @@
               />
               <p class="opt-hint">
                 <strong>Hints</strong> prime the decoder with your spellings (people, places,
-                acronyms) so it transcribes them correctly. Comma-separated, no need for full
-                sentences.
+                acronyms) so it gets them right. Comma-separated.
               </p>
             </div>
-            <div class="opt-field">
+
+            <div class="opt-group">
               <label class="toggle">
                 <input type="checkbox" bind:checked={diarizeOn} />
                 <span>Identify speakers</span>
               </label>
               {#if diarizeOn}
-                <div class="opt-row diarize-row">
+                <div class="opt-row">
                   <div class="seg">
                     {#each diarizeModels as m (m.id)}
                       <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
@@ -870,7 +873,7 @@
               {/if}
               <p class="opt-hint">
                 <strong>Identify speakers</strong> labels each line by who's talking (Speaker 1, 2…).
-                Runs locally after transcription; downloads a small model the first time.
+                Downloads a small model the first time.
               </p>
             </div>
           </div>
@@ -1592,14 +1595,37 @@
     border-bottom: none;
   }
 
+  /* Each option (mode, noise, hints, speakers) is its own block, separated by a hairline so they
+     read as distinct choices rather than one dense wall. */
+  .opt-group {
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    padding: 14px 0;
+  }
+
+  .opt-group:first-child {
+    padding-top: 2px;
+  }
+
+  .opt-group:last-child {
+    padding-bottom: 2px;
+  }
+
+  .opt-group + .opt-group {
+    border-top: 1px solid var(--border);
+  }
+
   .opt-row {
     display: flex;
     align-items: center;
-    gap: 16px;
+    gap: 14px;
     flex-wrap: wrap;
   }
 
   .opt-label {
+    flex: none;
+    min-width: 92px;
     font-size: 13px;
     color: var(--muted);
   }
@@ -1637,7 +1663,7 @@
   }
 
   .opt-hint {
-    margin: 9px 0 0;
+    margin: 0;
     font-size: 12.5px;
     color: var(--muted);
     line-height: 1.5;
@@ -1646,10 +1672,6 @@
   .opt-hint strong {
     color: var(--text);
     font-weight: 600;
-  }
-
-  .opt-field {
-    margin-top: 11px;
   }
 
   .prompt-input {
@@ -1674,13 +1696,6 @@
     border-color: var(--accent);
   }
 
-  .opt-field .opt-hint {
-    margin-top: 7px;
-  }
-
-  .diarize-row {
-    margin-top: 9px;
-  }
 
   /* Speaker name prefix on a transcript line, tinted per speaker via the `--spk` variable. */
   .speaker {
