@@ -28,6 +28,9 @@
     installed: boolean;
     active: boolean;
     recommended: boolean;
+    coremlAvailable: boolean;
+    coremlInstalled: boolean;
+    coremlSizeBytes: number;
   };
 
   let running = $state(false);
@@ -37,6 +40,9 @@
   let downloading = $state<string | null>(null);
   let downloadProgress = $state<{ downloaded: number; total: number } | null>(null);
   let downloadFailed = $state<string | null>(null);
+  // Core ML (Neural Engine) encoder download, tracked separately from the model download.
+  let downloadingCoreml = $state<string | null>(null);
+  let coremlProgress = $state<{ downloaded: number; total: number } | null>(null);
   let progressUnlisten: UnlistenFn | undefined;
   let devices = $state<string[]>([]);
   let micDevice = $state("");
@@ -234,6 +240,28 @@
       : 0,
   );
 
+  async function downloadCoreml(id: string) {
+    error = "";
+    downloadingCoreml = id;
+    const m = models.find((x) => x.id === id);
+    coremlProgress = { downloaded: 0, total: m?.coremlSizeBytes ?? 0 };
+    try {
+      await invoke("download_coreml", { id });
+      await refreshModels();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      downloadingCoreml = null;
+      coremlProgress = null;
+    }
+  }
+
+  const coremlPct = $derived(
+    coremlProgress && coremlProgress.total > 0
+      ? Math.min(100, Math.round((coremlProgress.downloaded / coremlProgress.total) * 100))
+      : 0,
+  );
+
   async function selectModel(id: string) {
     try {
       await invoke("select_model", { id });
@@ -265,8 +293,11 @@
     progressUnlisten = await listen<{ id: string; downloaded: number; total: number }>(
       "download://progress",
       (event) => {
-        if (event.payload.id === downloading) {
-          downloadProgress = { downloaded: event.payload.downloaded, total: event.payload.total };
+        const { id, downloaded, total } = event.payload;
+        if (id === downloading) {
+          downloadProgress = { downloaded, total };
+        } else if (downloadingCoreml && id === `coreml:${downloadingCoreml}`) {
+          coremlProgress = { downloaded, total };
         }
       },
     );
@@ -645,7 +676,7 @@
         </span>
       </div>
 
-      {#if !running && (needsScreenRecording || needsMicPermission || error || (chosenModel && !chosenModel.installed))}
+      {#if !running && (needsScreenRecording || needsMicPermission || error || (chosenModel && !chosenModel.installed) || (chosenModel && chosenModel.installed && chosenModel.coremlAvailable))}
         <div class="box-aux">
           {#if chosenModel && !chosenModel.installed}
             {#if downloading === chosenModel.id && downloadProgress}
@@ -658,6 +689,28 @@
             {:else}
               <button class="btn outline" onclick={() => download(chosenModel.id)} disabled={downloading !== null}>
                 {downloadFailed === chosenModel.id ? "Retry download" : "Download"} · {fmtSize(chosenModel.sizeBytes)}
+              </button>
+            {/if}
+          {/if}
+
+          <!-- Optional Apple Neural Engine encoder for installed whisper.cpp models. -->
+          {#if chosenModel && chosenModel.installed && chosenModel.coremlAvailable}
+            {#if chosenModel.coremlInstalled}
+              <span class="coreml-on">⚡ Neural Engine acceleration on</span>
+            {:else if downloadingCoreml === chosenModel.id && coremlProgress}
+              <div class="dl-bar">
+                <div class="dl-track"><div class="dl-fill" style="width:{coremlPct}%"></div></div>
+                <span class="dl-label">
+                  Neural Engine · {coremlPct}% · {fmtSize(coremlProgress.downloaded)} / {fmtSize(coremlProgress.total)}
+                </span>
+              </div>
+            {:else}
+              <button
+                class="btn outline"
+                onclick={() => downloadCoreml(chosenModel.id)}
+                disabled={downloadingCoreml !== null}
+              >
+                ⚡ Neural Engine boost · {fmtSize(chosenModel.coremlSizeBytes)}
               </button>
             {/if}
           {/if}
@@ -1546,6 +1599,12 @@
     font-size: 12px;
     color: var(--muted);
     font-variant-numeric: tabular-nums;
+  }
+
+  .coreml-on {
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 500;
   }
 
   .notice {
