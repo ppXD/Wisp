@@ -11,6 +11,7 @@ pub mod echo;
 pub mod media;
 #[cfg(feature = "mic")]
 pub mod mic;
+pub mod preprocess;
 pub mod stream;
 pub mod wav;
 
@@ -22,5 +23,6 @@ pub use echo::EchoCancellingSource;
 pub use media::MediaSource;
 #[cfg(feature = "mic")]
 pub use mic::{list_input_devices, MicSource};
+pub use preprocess::normalize_for_asr;
 pub use stream::{tee, ChannelSource, Tee};
 pub use wav::WavSource;
