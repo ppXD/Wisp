@@ -27,7 +27,9 @@ impl TranscriptionResult {
 }
 
 /// How a whole-clip transcription should trade accuracy against speed.
-#[derive(Debug, Clone, Copy)]
+///
+/// Not `Debug`: it can carry a progress callback (`&dyn Fn`), which has no `Debug` impl.
+#[derive(Clone, Copy)]
 #[non_exhaustive]
 pub struct ClipOptions<'a> {
     /// Emit per-segment timestamps (for subtitle export). Off lets the decoder focus on text.
@@ -38,16 +40,26 @@ pub struct ClipOptions<'a> {
     /// Optional context primer (names, jargon, domain terms) that biases the decoder toward the
     /// correct spellings. Empty = none.
     pub prompt: &'a str,
+    /// Optional sink called with decoding progress as a percentage (0–100), so a caller can show a
+    /// progress bar. Engines that can't report progress simply never call it.
+    pub progress: Option<&'a dyn Fn(u8)>,
 }
 
 impl<'a> ClipOptions<'a> {
-    /// Options with the given timestamp, beam-search, and biasing-prompt choices.
+    /// Options with the given timestamp, beam-search, and biasing-prompt choices and no progress.
     pub fn new(timestamps: bool, beam: bool, prompt: &'a str) -> Self {
         Self {
             timestamps,
             beam,
             prompt,
+            progress: None,
         }
+    }
+
+    /// Attaches a progress sink, called with `0..=100` as decoding advances.
+    pub fn with_progress(mut self, progress: &'a dyn Fn(u8)) -> Self {
+        self.progress = Some(progress);
+        self
     }
 }
 
@@ -57,6 +69,7 @@ impl Default for ClipOptions<'_> {
             timestamps: false,
             beam: true,
             prompt: "",
+            progress: None,
         }
     }
 }
@@ -132,6 +145,19 @@ mod tests {
         assert!(opts.timestamps);
         assert!(!opts.beam);
         assert_eq!(opts.prompt, "Acme, Inc.; kubectl");
+    }
+
+    #[test]
+    fn clip_options_carry_a_progress_sink() {
+        use std::cell::Cell;
+
+        assert!(ClipOptions::default().progress.is_none());
+
+        let seen = Cell::new(0u8);
+        let sink = |p: u8| seen.set(p);
+        let opts = ClipOptions::new(false, true, "").with_progress(&sink);
+        (opts.progress.expect("sink set"))(42);
+        assert_eq!(seen.get(), 42, "the attached sink receives progress");
     }
 
     #[test]

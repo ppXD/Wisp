@@ -46,9 +46,10 @@ const SEGMENT_EVENT: &str = "transcript://segment";
 /// Event channel the UI listens on for model-download progress.
 const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
 
-/// Event channels for file transcription: total duration up front, each segment as it's produced,
-/// and a completion signal.
+/// Event channels for file transcription: total duration up front, decode progress (0–100), each
+/// segment as it's produced, and a completion signal.
 const FILE_META_EVENT: &str = "file://meta";
+const FILE_PROGRESS_EVENT: &str = "file://progress";
 const FILE_SEGMENT_EVENT: &str = "file://segment";
 const FILE_DONE_EVENT: &str = "file://done";
 
@@ -784,10 +785,21 @@ async fn transcribe_file(
                 .map_or(audio.as_slice(), |g| g.audio.as_slice());
 
             let mut engine = build_engine(&descriptor, &dir, &language)?;
+
+            // Forward the engine's 0–100 decode progress to the UI, de-duplicated so we emit only on
+            // change. Engines without a native long-form path simply never report.
+            let last_pct = std::cell::Cell::new(u8::MAX);
+            let progress = |pct: u8| {
+                if pct != last_pct.get() {
+                    last_pct.set(pct);
+                    let _ = task_app.emit(FILE_PROGRESS_EVENT, pct);
+                }
+            };
             let result = engine.transcribe_clip(
                 asr_audio,
                 TARGET_SAMPLE_RATE,
-                ClipOptions::new(need_timestamps, options.accurate, &options.prompt),
+                ClipOptions::new(need_timestamps, options.accurate, &options.prompt)
+                    .with_progress(&progress),
             )?;
 
             let mut collected: Vec<TranscriptSegment> = result
