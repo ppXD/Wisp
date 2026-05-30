@@ -21,9 +21,10 @@ use std::os::raw::c_int;
 use std::path::Path;
 use std::time::Duration;
 
+use wisp_core::align::{merge_tokens_into_words, TokenTiming};
 use wisp_core::engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
-use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
+use wisp_core::transcript::{AudioSourceKind, TranscriptSegment, Word};
 
 /// Rate whisper.cpp expects (and the rest of the pipeline runs at).
 const SAMPLE_RATE: u32 = 16_000;
@@ -154,6 +155,7 @@ impl AsrEngine for WhisperCppEngine {
             params.translate = false;
             params.no_context = false; // carry context across windows
             params.no_timestamps = !options.timestamps;
+            params.token_timestamps = options.timestamps; // per-token times → word-level alignment
             params.suppress_nst = true; // suppress non-speech tokens (fewer hallucinations)
             if !options.prompt.is_empty() {
                 params.initial_prompt = prompt.as_ptr();
@@ -189,12 +191,12 @@ impl AsrEngine for WhisperCppEngine {
                 } else {
                     (Duration::ZERO, Duration::ZERO)
                 };
-                segments.push(TranscriptSegment::new(
-                    0,
-                    text.as_str(),
-                    start..end,
-                    AudioSourceKind::File,
-                ));
+                let mut segment =
+                    TranscriptSegment::new(0, text.as_str(), start..end, AudioSourceKind::File);
+                if options.timestamps {
+                    segment.words = segment_words(self.ctx, i);
+                }
+                segments.push(segment);
             }
             segments
         };
@@ -212,6 +214,29 @@ impl Drop for WhisperCppEngine {
         // SAFETY: `self.ctx` was created by `whisper_init_*` and is freed exactly once here.
         unsafe { sys::whisper_free(self.ctx) };
     }
+}
+
+/// Extracts whisper.cpp's per-token timings for segment `i` and merges them into words.
+///
+/// # Safety
+/// `ctx` must be a live context whose last `whisper_full` ran with `token_timestamps` enabled, and
+/// `i` a valid segment index.
+unsafe fn segment_words(ctx: *mut sys::whisper_context, i: c_int) -> Vec<Word> {
+    let n_tokens = sys::whisper_full_n_tokens(ctx, i);
+    let mut tokens = Vec::with_capacity(n_tokens.max(0) as usize);
+    for j in 0..n_tokens {
+        let ptr = sys::whisper_full_get_token_text(ctx, i, j);
+        if ptr.is_null() {
+            continue;
+        }
+        let text = CStr::from_ptr(ptr).to_string_lossy().into_owned();
+        // Token times, like segment times, are centiseconds (10 ms units).
+        let data = sys::whisper_full_get_token_data(ctx, i, j);
+        let start = Duration::from_millis(data.t0.max(0) as u64 * 10);
+        let end = Duration::from_millis(data.t1.max(0) as u64 * 10);
+        tokens.push(TokenTiming::new(text, start, end));
+    }
+    merge_tokens_into_words(&tokens)
 }
 
 /// Wraps recognized `text` (spanning `audio` at 16 kHz) as a single-segment result; empty → empty.
