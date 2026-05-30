@@ -1,10 +1,10 @@
 //! Background session lifecycle around a [`Pipeline`].
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use wisp_audio::{to_mono_16k, TARGET_SAMPLE_RATE};
 use wisp_core::audio::AudioSource;
@@ -29,9 +29,13 @@ enum Job {
     Final(u64, Utterance),
 }
 
-/// How much captured audio to accumulate between provisional partial decodes — small enough to feel
-/// responsive, large enough not to swamp the engine (stale partials are dropped if it falls behind).
-const PARTIAL_INTERVAL: Duration = Duration::from_millis(600);
+/// Bounds on how much captured audio to accumulate between provisional partial decodes. The actual
+/// interval *adapts to the engine's measured decode time*: a fast Mac gets snappier partials near
+/// the floor, a slow one backs off toward the ceiling so it never builds a backlog (stale partials
+/// are dropped regardless). [`PARTIAL_DEFAULT`] is used until the first decode is timed.
+const PARTIAL_FLOOR: Duration = Duration::from_millis(300);
+const PARTIAL_CEIL: Duration = Duration::from_millis(1_500);
+const PARTIAL_DEFAULT: Duration = Duration::from_millis(500);
 
 /// An utterance paired with the id its segment will carry — the unit a transcribe pass consumes.
 type Decode = (u64, Utterance);
@@ -92,6 +96,11 @@ impl Session {
         let stop_for_capture = Arc::clone(&stop);
         let (job_tx, job_rx) = mpsc::channel::<Job>();
 
+        // Most-recent partial-decode time (ms), shared so the capture thread can pace partials to
+        // what this machine actually decodes — snappier on a fast Mac, backing off on a slow one.
+        let decode_ms = Arc::new(AtomicU64::new(PARTIAL_DEFAULT.as_millis() as u64));
+        let decode_ms_for_capture = Arc::clone(&decode_ms);
+
         // Transcription thread: drains jobs and forwards segments. Ends when the capture thread
         // drops its sender (stop or source exhausted). A transcription error on one job is logged
         // and skipped rather than killing the session. Each burst is coalesced first so the engine
@@ -112,11 +121,14 @@ impl Session {
                     }
                 }
                 if let Some((id, utterance)) = partial {
+                    let started = Instant::now();
                     match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Partial) {
                         Ok(Some(segment)) => sink(TranscriptEvent::Segment(segment)),
                         Ok(None) => {}
                         Err(e) => eprintln!("wisp: partial transcription error: {e}"),
                     }
+                    // Feed the measured decode cost back to the capture thread's pacing.
+                    decode_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 }
             }
             Ok(())
@@ -129,6 +141,7 @@ impl Session {
                 &mut *source,
                 denoiser,
                 &job_tx,
+                &decode_ms_for_capture,
                 &stop_for_capture,
             )
             // `job_tx` drops here, signalling the transcription thread to finish.
@@ -174,15 +187,17 @@ impl Session {
 /// Capture loop for [`Session::spawn_live`]: pull frames, segment them, and queue closed utterances
 /// as `Final` jobs until `stop` is set or the source ends; then flush any buffered utterance.
 ///
-/// Between finals, every [`PARTIAL_INTERVAL`] of captured audio it also queues a `Partial` job of
-/// the still-open utterance (when the segmenter exposes one), so the UI can show provisional text
-/// before the speaker pauses. The capture thread owns utterance ids: a `Partial` and the `Final`
-/// that closes the same utterance share one id, so the UI updates a single row in place.
+/// Between finals, on an interval that adapts to the engine's measured decode speed (bounded by
+/// [`PARTIAL_FLOOR`]/[`PARTIAL_CEIL`] via `decode_ms`), it also queues a `Partial` job of the
+/// still-open utterance (when the segmenter exposes one), so the UI can show provisional text before
+/// the speaker pauses. The capture thread owns utterance ids: a `Partial` and the `Final` that
+/// closes the same utterance share one id, so the UI updates a single row in place.
 fn run_capture(
     segmenter: &mut dyn Segmenter,
     source: &mut dyn AudioSource,
     mut denoiser: Option<Box<dyn Denoiser>>,
     job_tx: &Sender<Job>,
+    decode_ms: &AtomicU64,
     stop: &AtomicBool,
 ) -> Result<()> {
     let mut next_id: u64 = 0;
@@ -205,7 +220,7 @@ fn run_capture(
                 }
 
                 since_partial += frame.duration();
-                if since_partial >= PARTIAL_INTERVAL {
+                if since_partial >= partial_target(decode_ms) {
                     since_partial = Duration::ZERO;
                     if let Some(utterance) = segmenter.partial() {
                         let id = *open_id.get_or_insert_with(|| alloc_id(&mut next_id));
@@ -221,6 +236,17 @@ fn run_capture(
         let _ = job_tx.send(Job::Final(id, utterance));
     }
     Ok(())
+}
+
+/// The current partial cadence: the engine's last measured partial-decode time, clamped to the sane
+/// [`PARTIAL_FLOOR`]..=[`PARTIAL_CEIL`] bounds — so fast Macs emit partials more often and slow ones
+/// back off, but neither runs away.
+fn partial_target(decode_ms: &AtomicU64) -> Duration {
+    let ms = decode_ms.load(Ordering::Relaxed).clamp(
+        PARTIAL_FLOOR.as_millis() as u64,
+        PARTIAL_CEIL.as_millis() as u64,
+    );
+    Duration::from_millis(ms)
 }
 
 /// Returns the current id and advances the counter.
@@ -563,7 +589,9 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let stop = AtomicBool::new(false);
-        run_capture(&mut seg, &mut source, None, &tx, &stop).unwrap();
+        // No transcribe thread here, so the decode time stays at the default (500 ms cadence).
+        let decode_ms = AtomicU64::new(PARTIAL_DEFAULT.as_millis() as u64);
+        run_capture(&mut seg, &mut source, None, &tx, &decode_ms, &stop).unwrap();
         drop(tx);
 
         let jobs: Vec<Job> = rx.try_iter().collect();
@@ -586,5 +614,18 @@ mod tests {
             }
             other => panic!("expected a final second, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn partial_target_clamps_decode_time_to_bounds() {
+        // A fast machine (decode under the floor) is held at the floor — no partial spam.
+        assert_eq!(partial_target(&AtomicU64::new(50)), PARTIAL_FLOOR);
+        // A typical decode passes through unchanged.
+        assert_eq!(
+            partial_target(&AtomicU64::new(420)),
+            Duration::from_millis(420)
+        );
+        // A slow machine (decode over the ceiling) is capped so it still tries periodically.
+        assert_eq!(partial_target(&AtomicU64::new(9_000)), PARTIAL_CEIL);
     }
 }
