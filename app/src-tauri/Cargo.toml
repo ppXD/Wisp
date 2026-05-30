@@ -8,6 +8,12 @@ edition = "2021"
 # Standalone workspace so this Tauri app is not built by the root library workspace/CI.
 [workspace]
 
+# As its own workspace this crate does not inherit the root release profile, so set it here:
+# strip the symbol table and thin-LTO the shipped binary to keep the packaged .app lean.
+[profile.release]
+strip = true
+lto = "thin"
+
 [lib]
 # The `_lib` suffix avoids a name clash with the binary on Windows.
 name = "app_lib"
