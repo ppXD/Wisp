@@ -32,7 +32,7 @@ use wisp_engine_sherpa::{
 };
 use wisp_models::{
     builtin_catalog, coreml_asset, denoise_models, diarization_models, recommended_default_model,
-    FsModelStore, HttpDownloader,
+    Accelerator, FsModelStore, HttpDownloader, MachineProfile,
 };
 use wisp_pipeline::{
     remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
@@ -392,6 +392,24 @@ fn machine_ram_bytes() -> u64 {
     16 * 1024 * 1024 * 1024
 }
 
+/// The best ASR accelerator on this host. macOS uses the Apple GPU via Metal (whisper.cpp); other
+/// platforms run ONNX on the CPU today, so they report `Cpu` until a Windows/Linux GPU engine is
+/// wired (then this grows to CUDA/Vulkan/DirectML and the recommender follows automatically).
+#[cfg(target_os = "macos")]
+fn host_accelerator() -> Accelerator {
+    Accelerator::Metal
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_accelerator() -> Accelerator {
+    Accelerator::Cpu
+}
+
+/// Auto-detects what this machine can run, for picking the default model.
+fn detect_machine() -> MachineProfile {
+    MachineProfile::new(host_accelerator(), machine_ram_bytes())
+}
+
 /// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.
 /// `recommended` is the machine-appropriate default; `None` for non-ASR lists that don't recommend.
 fn to_model_info(
@@ -433,7 +451,7 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
-    let recommended = recommended_default_model(machine_ram_bytes());
+    let recommended = recommended_default_model(&detect_machine(), &builtin_catalog());
     let models = state
         .store
         .available()
@@ -1199,7 +1217,7 @@ pub fn run() {
                         .find(|d| store.local_path(&d.id).is_some())
                         .map(|d| d.id.clone())
                 })
-                .or_else(|| Some(recommended_default_model(machine_ram_bytes())));
+                .or_else(|| Some(recommended_default_model(&detect_machine(), &asr_catalog)));
 
             app.manage(AppState {
                 store,
