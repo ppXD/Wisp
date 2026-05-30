@@ -348,8 +348,13 @@ mod tests {
         });
 
         // The capture thread must observe stop, close the queue, and let both threads join.
-        let session =
-            Session::spawn_live(segmenter(), transcriber(vec![]), Box::new(Endless), sink, None);
+        let session = Session::spawn_live(
+            segmenter(),
+            transcriber(vec![]),
+            Box::new(Endless),
+            sink,
+            None,
+        );
         session.stop().unwrap();
     }
 

@@ -313,7 +313,11 @@ fn spawn_session(
     // Decoupled live session: capture+segmentation runs real-time; the (slow) engine runs on its
     // own thread draining complete utterances, so it never stalls capture or drops mid-sentence.
     Ok(Session::spawn_live(
-        segmenter, transcriber, source, sink, denoiser,
+        segmenter,
+        transcriber,
+        source,
+        sink,
+        denoiser,
     ))
 }
 
