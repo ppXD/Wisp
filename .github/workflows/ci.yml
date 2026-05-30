@@ -47,3 +47,25 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: test
         run: cargo test --all --all-features
+
+  # Proves the Tauri shell + its cross-platform deps (sherpa-onnx, cpal) build on Windows, where the
+  # macOS-only bits (ScreenCaptureKit, WebRTC AEC, Metal whisper.cpp) are absent and degrade.
+  windows-app:
+    name: app builds (windows)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the frontend (tauri-build needs the dist)
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+      - name: Build the app
+        run: cargo build --manifest-path app/src-tauri/Cargo.toml
