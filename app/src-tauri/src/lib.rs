@@ -326,9 +326,16 @@ fn spawn_session(
     let emitter = app.clone();
     let sink: wisp_pipeline::EventSink = Box::new(move |event| {
         if let TranscriptEvent::Segment(segment) = event {
-            let emit = match &dedup {
-                Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
-                None => true,
+            // Provisional partials bypass the cross-stream echo filter — only a committed final
+            // updates its dedup state (a partial priming it would make the final look like an echo,
+            // and partials of the same utterance would flap in and out of the feed).
+            let emit = if matches!(segment.status, SegmentStatus::Final) {
+                match &dedup {
+                    Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
+                    None => true,
+                }
+            } else {
+                true
             };
             if emit {
                 let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
