@@ -92,6 +92,7 @@ dependencies = [
  "wisp-core",
  "wisp-engine-sherpa",
  "wisp-engine-whisper-cpp",
+ "wisp-loopback",
  "wisp-models",
  "wisp-pipeline",
  "wisp-screencapture",
@@ -6048,6 +6049,14 @@ version = "0.0.0"
 dependencies = [
  "bindgen 0.70.1",
  "cmake",
+ "wisp-core",
+]
+
+[[package]]
+name = "wisp-loopback"
+version = "0.0.0"
+dependencies = [
+ "windows 0.61.3",
  "wisp-core",
 ]
 

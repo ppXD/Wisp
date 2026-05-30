@@ -1,0 +1,19 @@
+[package]
+name = "wisp-loopback"
+version = "0.0.0"
+description = "Windows system-audio capture for Wisp via WASAPI loopback (no virtual device)"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_System_Com",
+    # IMMDevice::Activate is gated on these two (its param is a Com::StructuredStorage::PROPVARIANT).
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Variant",
+] }
