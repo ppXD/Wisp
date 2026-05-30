@@ -19,7 +19,7 @@ use wisp_audio::{
 };
 use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
-use wisp_core::diarize::{assign_speakers, ClipDiarizer};
+use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
 use wisp_core::engine::{AsrEngine, ClipOptions};
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
@@ -278,7 +278,11 @@ fn spawn_session(
 }
 
 /// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.
-fn to_model_info(d: ModelDescriptor, store: &FsModelStore, active: Option<&ModelId>) -> ModelInfoDto {
+fn to_model_info(
+    d: ModelDescriptor,
+    store: &FsModelStore,
+    active: Option<&ModelId>,
+) -> ModelInfoDto {
     let installed = store.local_path(&d.id).is_some();
     let is_active = active == Some(&d.id);
     let size_bytes = d.total_size_bytes();
@@ -721,21 +725,27 @@ async fn transcribe_file(
             let mut collected: Vec<TranscriptSegment> = result
                 .segments
                 .into_iter()
-                .enumerate()
-                .map(|(i, mut segment)| {
-                    segment.id = i as u64;
+                .map(|mut segment| {
                     segment.source = AudioSourceKind::File;
                     segment.status = SegmentStatus::Final;
                     segment
                 })
                 .collect();
 
-            // Label who said what before emitting. Best-effort: if diarization fails, keep the
-            // transcript and leave speakers unlabelled rather than losing the whole result.
+            // Label who said what. Best-effort: if diarization fails, keep the transcript and leave
+            // speakers unlabelled rather than losing the whole result. With word-level timings the
+            // attribution splits any segment that spans a speaker change at the exact handover.
             if let Some(model_dir) = &diarize_dir {
-                if let Err(e) = diarize_segments(model_dir, &audio, &mut collected) {
-                    eprintln!("speaker diarization skipped: {e}");
+                match speaker_spans(model_dir, &audio) {
+                    Ok(spans) => collected = attribute_speakers_by_word(collected, &spans),
+                    Err(e) => eprintln!("speaker diarization skipped: {e}"),
                 }
+            }
+
+            // Assign stable ids last: a speaker split turns one segment into several, and the UI
+            // keys each line by id.
+            for (i, segment) in collected.iter_mut().enumerate() {
+                segment.id = i as u64;
             }
 
             for segment in &collected {
@@ -755,25 +765,24 @@ async fn transcribe_file(
     Ok(())
 }
 
-/// Runs offline diarization over `audio` and labels each segment with its speaker by time overlap.
-fn diarize_segments(
-    model_dir: &Path,
-    audio: &[f32],
-    segments: &mut [TranscriptSegment],
-) -> WispResult<()> {
+/// Runs offline diarization over `audio`, returning the speaker spans it found.
+fn speaker_spans(model_dir: &Path, audio: &[f32]) -> WispResult<Vec<SpeakerSpan>> {
     let mut diarizer = SherpaDiarizer::new(
         &model_dir.join("segmentation.onnx"),
         &model_dir.join("embedding.onnx"),
     )?;
-    let spans = diarizer.diarize_clip(audio, TARGET_SAMPLE_RATE)?;
-    assign_speakers(segments, &spans);
-    Ok(())
+    diarizer.diarize_clip(audio, TARGET_SAMPLE_RATE)
 }
 
 /// Writes the most recent file transcription to `dest` in `format` (`txt`/`srt`/`vtt`).
 #[tauri::command]
-fn export_transcript(state: State<'_, AppState>, format: String, dest: String) -> Result<(), String> {
-    let format = ExportFormat::from_name(&format).ok_or_else(|| format!("unknown format: {format}"))?;
+fn export_transcript(
+    state: State<'_, AppState>,
+    format: String,
+    dest: String,
+) -> Result<(), String> {
+    let format =
+        ExportFormat::from_name(&format).ok_or_else(|| format!("unknown format: {format}"))?;
     let segments = state
         .file_segments
         .lock()
