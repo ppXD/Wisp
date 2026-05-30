@@ -37,6 +37,69 @@ fn decode_threads() -> i32 {
         .unwrap_or(4)
 }
 
+/// Whisper's decoding-robustness thresholds.
+///
+/// whisper.cpp retries a 30 s window at a higher temperature when a decode looks unreliable — its
+/// average token log-prob falls below `logprob_thold`, or its token entropy exceeds `entropy_thold`
+/// (a proxy for a repetition loop) — stepping temperature up by `temperature_inc` each attempt. A
+/// window whose no-speech probability exceeds `no_speech_thold` is treated as silence. We pin these
+/// to whisper.cpp's proven defaults explicitly, so an upstream default change can't silently shift
+/// our output, and allow per-deployment tuning through environment variables.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct DecodeThresholds {
+    temperature_inc: f32,
+    entropy_thold: f32,
+    logprob_thold: f32,
+    no_speech_thold: f32,
+}
+
+impl Default for DecodeThresholds {
+    fn default() -> Self {
+        Self {
+            temperature_inc: 0.2,
+            entropy_thold: 2.4,
+            logprob_thold: -1.0,
+            no_speech_thold: 0.6,
+        }
+    }
+}
+
+/// Resolves thresholds from a key→value lookup, using the default for any unset or unparsable value.
+fn resolve_thresholds(lookup: impl Fn(&str) -> Option<String>) -> DecodeThresholds {
+    let d = DecodeThresholds::default();
+    DecodeThresholds {
+        temperature_inc: parse_f32_or(
+            lookup(WhisperCppEngine::TEMPERATURE_INC_ENV),
+            d.temperature_inc,
+        ),
+        entropy_thold: parse_f32_or(lookup(WhisperCppEngine::ENTROPY_THOLD_ENV), d.entropy_thold),
+        logprob_thold: parse_f32_or(lookup(WhisperCppEngine::LOGPROB_THOLD_ENV), d.logprob_thold),
+        no_speech_thold: parse_f32_or(
+            lookup(WhisperCppEngine::NO_SPEECH_THOLD_ENV),
+            d.no_speech_thold,
+        ),
+    }
+}
+
+/// Parses a trimmed `f32` from `raw`, falling back to `default` for `None` or an invalid value.
+fn parse_f32_or(raw: Option<String>, default: f32) -> f32 {
+    raw.and_then(|v| v.trim().parse::<f32>().ok())
+        .unwrap_or(default)
+}
+
+/// Reads decoding thresholds from the process environment.
+fn thresholds_from_env() -> DecodeThresholds {
+    resolve_thresholds(|key| std::env::var(key).ok())
+}
+
+/// Applies decoding thresholds onto whisper.cpp params — one place, used by both decode paths.
+fn apply_thresholds(params: &mut sys::whisper_full_params, thresholds: DecodeThresholds) {
+    params.temperature_inc = thresholds.temperature_inc;
+    params.entropy_thold = thresholds.entropy_thold;
+    params.logprob_thold = thresholds.logprob_thold;
+    params.no_speech_thold = thresholds.no_speech_thold;
+}
+
 /// An [`AsrEngine`] backed by whisper.cpp on the Metal backend.
 ///
 /// The `whisper_context` is not thread-safe for concurrent use, but the pipeline drives one engine
@@ -45,11 +108,21 @@ pub struct WhisperCppEngine {
     ctx: *mut sys::whisper_context,
     language: CString,
     n_threads: i32,
+    thresholds: DecodeThresholds,
 }
 
 unsafe impl Send for WhisperCppEngine {}
 
 impl WhisperCppEngine {
+    /// Env var overriding the temperature-fallback step (whisper.cpp `temperature_inc`).
+    pub const TEMPERATURE_INC_ENV: &'static str = "WISP_WHISPER_TEMPERATURE_INC";
+    /// Env var overriding the entropy (repetition-loop) fallback threshold.
+    pub const ENTROPY_THOLD_ENV: &'static str = "WISP_WHISPER_ENTROPY_THOLD";
+    /// Env var overriding the average-log-prob fallback threshold.
+    pub const LOGPROB_THOLD_ENV: &'static str = "WISP_WHISPER_LOGPROB_THOLD";
+    /// Env var overriding the no-speech (silence) suppression threshold.
+    pub const NO_SPEECH_THOLD_ENV: &'static str = "WISP_WHISPER_NO_SPEECH_THOLD";
+
     /// Loads a GGUF/GGML whisper model from `model`. `language` is a Whisper code (e.g. `"yue"`);
     /// an empty string means auto-detect.
     pub fn new(model: &Path, language: &str) -> Result<Self> {
@@ -80,6 +153,7 @@ impl WhisperCppEngine {
             ctx,
             language,
             n_threads: decode_threads(),
+            thresholds: thresholds_from_env(),
         })
     }
 }
@@ -109,6 +183,7 @@ impl AsrEngine for WhisperCppEngine {
             params.print_special = false;
             params.print_timestamps = false;
             params.single_segment = false;
+            apply_thresholds(&mut params, self.thresholds);
 
             let rc = sys::whisper_full(self.ctx, params, audio.as_ptr(), audio.len() as c_int);
             if rc != 0 {
@@ -165,6 +240,7 @@ impl AsrEngine for WhisperCppEngine {
             params.print_special = false;
             params.print_timestamps = false;
             params.single_segment = false;
+            apply_thresholds(&mut params, self.thresholds);
 
             let rc = sys::whisper_full(self.ctx, params, audio.as_ptr(), audio.len() as c_int);
             if rc != 0 {
@@ -291,6 +367,86 @@ mod tests {
         assert!(
             !text.trim().is_empty(),
             "expected a non-empty transcription, got {text:?}"
+        );
+    }
+
+    #[test]
+    fn threshold_env_var_names_are_pinned() {
+        // Renaming these breaks any operator who tuned decoding via a private env override. Pin the
+        // exact literals so a rename is a visible, deliberate change.
+        assert_eq!(
+            WhisperCppEngine::TEMPERATURE_INC_ENV,
+            "WISP_WHISPER_TEMPERATURE_INC"
+        );
+        assert_eq!(
+            WhisperCppEngine::ENTROPY_THOLD_ENV,
+            "WISP_WHISPER_ENTROPY_THOLD"
+        );
+        assert_eq!(
+            WhisperCppEngine::LOGPROB_THOLD_ENV,
+            "WISP_WHISPER_LOGPROB_THOLD"
+        );
+        assert_eq!(
+            WhisperCppEngine::NO_SPEECH_THOLD_ENV,
+            "WISP_WHISPER_NO_SPEECH_THOLD"
+        );
+    }
+
+    #[test]
+    fn thresholds_default_when_unset() {
+        // Nothing in the environment → whisper.cpp's pinned defaults.
+        assert_eq!(resolve_thresholds(|_| None), DecodeThresholds::default());
+    }
+
+    #[test]
+    fn thresholds_parse_every_override() {
+        let resolved = resolve_thresholds(|key| {
+            Some(
+                match key {
+                    WhisperCppEngine::TEMPERATURE_INC_ENV => "0.4",
+                    WhisperCppEngine::ENTROPY_THOLD_ENV => "3.0",
+                    WhisperCppEngine::LOGPROB_THOLD_ENV => "-0.5",
+                    WhisperCppEngine::NO_SPEECH_THOLD_ENV => "0.8",
+                    _ => return None,
+                }
+                .to_owned(),
+            )
+        });
+        assert_eq!(
+            resolved,
+            DecodeThresholds {
+                temperature_inc: 0.4,
+                entropy_thold: 3.0,
+                logprob_thold: -0.5,
+                no_speech_thold: 0.8,
+            }
+        );
+    }
+
+    #[test]
+    fn thresholds_ignore_invalid_values() {
+        let resolved = resolve_thresholds(|key| {
+            (key == WhisperCppEngine::NO_SPEECH_THOLD_ENV).then(|| "not-a-number".to_owned())
+        });
+        assert_eq!(
+            resolved,
+            DecodeThresholds::default(),
+            "an unparsable override falls back to the default"
+        );
+    }
+
+    #[test]
+    fn thresholds_allow_a_single_trimmed_override() {
+        let resolved = resolve_thresholds(|key| {
+            (key == WhisperCppEngine::NO_SPEECH_THOLD_ENV).then(|| "  0.75  ".to_owned())
+        });
+        // Only the one field changes; whitespace is trimmed before parsing.
+        assert_eq!(
+            resolved,
+            DecodeThresholds {
+                no_speech_thold: 0.75,
+                ..DecodeThresholds::default()
+            }
         );
     }
 }
