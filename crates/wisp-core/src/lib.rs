@@ -26,7 +26,7 @@ pub use audio::{AudioFrame, AudioSource, AudioSourceInfo};
 pub use channel::{frame_channel, FrameReceiver, FrameSender};
 pub use config::Config;
 pub use dedup::CrossStreamEchoFilter;
-pub use diarize::Diarizer;
+pub use diarize::{assign_speakers, ClipDiarizer, Diarizer, SpeakerSpan};
 pub use engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult};
 pub use error::{Result, WispError};
 pub use export::{format_transcript, ExportFormat};
