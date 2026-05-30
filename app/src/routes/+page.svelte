@@ -41,6 +41,7 @@
   let systemDevice = $state("");
   let language = $state("");
   let liveDenoise = $state(false);
+  let liveDiarize = $state(false);
   let systemAudioId = $state("");
   let micOffId = $state("");
   let mode = $state<"live" | "file" | "cloud">("live");
@@ -179,6 +180,14 @@
     }
   }
 
+  async function applyLiveDiarize() {
+    try {
+      await invoke("set_live_diarize", { model: liveDiarize ? diarizeId : null });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
   function sourceLabel(source: string): string {
     if (source === "Microphone") return "mic";
     if (source === "System") return "system";
@@ -253,10 +262,15 @@
 
   async function start() {
     error = "";
+    if (liveDiarize && !diarizeChosen?.installed) {
+      error = "Download the speaker model first.";
+      return;
+    }
     try {
       await applyDevices();
       await applyLanguage();
       await applyDenoise();
+      await applyLiveDiarize();
       await ensureListener();
       await invoke("start_session");
       running = true;
@@ -713,6 +727,24 @@
               <span>{liveDenoise ? "On" : "Off"}</span>
             </label>
           </div>
+          <div class="source-row">
+            <span class="source-name">Identify speakers <em>(who's talking)</em></span>
+            <label class="toggle">
+              <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
+              <span>{liveDiarize ? "On" : "Off"}</span>
+            </label>
+          </div>
+          {#if liveDiarize && diarizeChosen && !diarizeChosen.installed}
+            <button
+              class="btn outline sm diarize-dl"
+              onclick={() => downloadDiarize(diarizeId)}
+              disabled={downloading === diarizeId}
+            >
+              {downloading === diarizeId
+                ? `Downloading… ${downloadPct}%`
+                : `Download speaker model ${fmtSize(diarizeChosen.sizeBytes)}`}
+            </button>
+          {/if}
           <p class="hint">
             By default Wisp captures your <strong>microphone</strong> + <strong>all system audio</strong>
             with <strong>echo cancellation</strong>. Want system audio only? Set Microphone to Off.
@@ -1467,6 +1499,10 @@
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
+  }
+
+  .diarize-dl {
+    align-self: start;
   }
 
   .source-row {
