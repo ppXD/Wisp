@@ -630,6 +630,7 @@ async fn transcribe_file(
     path: String,
     timestamps: bool,
     accurate: bool,
+    prompt: String,
 ) -> Result<(), String> {
     let active = state
         .active
@@ -673,8 +674,11 @@ async fn transcribe_file(
             }
 
             let mut engine = build_engine(&descriptor, &dir, &language)?;
-            let result =
-                engine.transcribe_clip(&audio, TARGET_SAMPLE_RATE, ClipOptions::new(timestamps, accurate))?;
+            let result = engine.transcribe_clip(
+                &audio,
+                TARGET_SAMPLE_RATE,
+                ClipOptions::new(timestamps, accurate, &prompt),
+            )?;
 
             let mut collected = Vec::with_capacity(result.segments.len());
             for (i, mut segment) in result.segments.into_iter().enumerate() {

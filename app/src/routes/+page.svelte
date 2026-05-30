@@ -302,6 +302,8 @@
   // Timeline (timestamps) is opt-in: off = most accurate plain text; on = timed for SRT/VTT.
   let fileTimestamps = $state(false);
   let fileHasTimestamps = $state(false);
+  // Optional context primer (names, jargon, domain terms) that biases the decoder's spelling.
+  let filePrompt = $state("");
   let dragOver = $state(false);
   let fileListeners: UnlistenFn[] = [];
   let dropUnlisten: UnlistenFn | undefined;
@@ -322,6 +324,7 @@
         path,
         timestamps: fileTimestamps,
         accurate: fileAccurate,
+        prompt: filePrompt.trim(),
       });
     } catch (e) {
       error = String(e);
@@ -665,6 +668,19 @@
             {/if}
             {#if fileTimestamps}<strong>Timeline</strong> adds per-line timestamps for SRT/VTT.{/if}
           </p>
+          <div class="opt-field">
+            <input
+              id="file-prompt"
+              class="prompt-input"
+              type="text"
+              bind:value={filePrompt}
+              placeholder="Hints — names, jargon, domain terms (optional)"
+            />
+            <p class="opt-hint">
+              <strong>Hints</strong> prime the decoder with your spellings (people, places, acronyms)
+              so it transcribes them correctly. Comma-separated, no need for full sentences.
+            </p>
+          </div>
         </div>
         <button
           class="dropzone"
@@ -1444,6 +1460,36 @@
   .opt-hint strong {
     color: var(--text);
     font-weight: 600;
+  }
+
+  .opt-field {
+    margin-top: 11px;
+  }
+
+  .prompt-input {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 8px 11px;
+    transition: border-color 0.15s;
+  }
+
+  .prompt-input::placeholder {
+    color: var(--muted);
+  }
+
+  .prompt-input:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .opt-field .opt-hint {
+    margin-top: 7px;
   }
 
   .dropzone-title {
