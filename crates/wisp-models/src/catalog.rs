@@ -18,6 +18,13 @@ const WHISPER_MEDIUM_BASE: &str =
 /// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed).
 const WHISPER_CPP_BASE: &str = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
+/// Hugging Face repos hosting the sherpa-onnx diarization models (no auth needed): a pyannote
+/// speaker-segmentation model plus interchangeable speaker-embedding models.
+const PYANNOTE_SEG_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main";
+const SPEAKER_EMB_BASE: &str =
+    "https://huggingface.co/csukuangfj/speaker-embedding-models/resolve/main";
+
 /// All models Wisp offers in the picker.
 pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
@@ -241,6 +248,74 @@ fn whisper_medium() -> ModelDescriptor {
     }
 }
 
+/// Speaker-diarization models Wisp offers (segmentation + embedding). Kept separate from
+/// [`builtin_catalog`] because they are not ASR engines and never appear in the model picker; the
+/// File mode downloads one only when "Identify speakers" is turned on.
+pub fn diarization_models() -> Vec<ModelDescriptor> {
+    vec![diarization_standard(), diarization_accurate()]
+}
+
+/// The shared pyannote speaker-segmentation model (finds *when* speech happens and overlaps).
+/// Stored under a fixed name so the engine can load it regardless of the embedding choice.
+fn pyannote_segmentation() -> ModelFile {
+    ModelFile {
+        name: "segmentation.onnx".to_owned(),
+        url: format!("{PYANNOTE_SEG_BASE}/model.onnx"),
+        sha256: String::new(),
+        size_bytes: 5_992_913,
+    }
+}
+
+fn diarization_standard() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("diarize-campplus".to_owned()),
+        family: ModelFamily::Diarization,
+        quant: Quant::F32,
+        display_name: "Speaker ID · CAM++ · standard (fast)".to_owned(),
+        files: vec![
+            pyannote_segmentation(),
+            ModelFile {
+                name: "embedding.onnx".to_owned(),
+                url: format!(
+                    "{SPEAKER_EMB_BASE}/3dspeaker_speech_campplus_sv_zh-cn_16k-common.onnx"
+                ),
+                sha256: String::new(),
+                size_bytes: 28_281_138,
+            },
+        ],
+        languages: Vec::new(),
+        description:
+            "Identifies who speaks when, using CAM++ voice embeddings with pyannote segmentation. \
+             Fast and light (~33 MB) with great everyday accuracy — the recommended default."
+                .to_owned(),
+    }
+}
+
+fn diarization_accurate() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("diarize-eres2net-large".to_owned()),
+        family: ModelFamily::Diarization,
+        quant: Quant::F32,
+        display_name: "Speaker ID · ERes2Net-large · most accurate".to_owned(),
+        files: vec![
+            pyannote_segmentation(),
+            ModelFile {
+                name: "embedding.onnx".to_owned(),
+                url: format!(
+                    "{SPEAKER_EMB_BASE}/3dspeaker_speech_eres2net_large_sv_zh-cn_3dspeaker_16k.onnx"
+                ),
+                sha256: String::new(),
+                size_bytes: 116_058_710,
+            },
+        ],
+        languages: Vec::new(),
+        description:
+            "Highest speaker-separation accuracy, using the larger ERes2Net voice embeddings. \
+             Bigger download (~122 MB) and a little slower; best when speakers sound alike."
+                .to_owned(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -270,5 +345,32 @@ mod tests {
             assert!(!descriptor.description.is_empty());
             assert!(descriptor.total_size_bytes() > 0);
         }
+    }
+
+    #[test]
+    fn diarization_models_are_segmentation_plus_embedding_pairs() {
+        let models = diarization_models();
+        assert_eq!(models.len(), 2);
+
+        let ids: std::collections::HashSet<_> = models.iter().map(|d| &d.id).collect();
+        assert_eq!(ids.len(), models.len(), "diarization ids must be distinct");
+
+        for descriptor in &models {
+            assert_eq!(descriptor.family, ModelFamily::Diarization);
+            assert!(descriptor
+                .files
+                .iter()
+                .any(|f| f.name == "segmentation.onnx"));
+            assert!(descriptor.files.iter().any(|f| f.name == "embedding.onnx"));
+            assert!(descriptor.files.iter().all(|f| f.size_bytes > 0));
+            assert!(!descriptor.description.is_empty());
+        }
+    }
+
+    #[test]
+    fn diarization_models_are_absent_from_the_picker_catalog() {
+        assert!(builtin_catalog()
+            .iter()
+            .all(|d| d.family != ModelFamily::Diarization));
     }
 }
