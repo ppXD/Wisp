@@ -1,0 +1,86 @@
+# Builds a universal (arm64 + x86_64) macOS app. Each architecture is built natively on its own
+# runner — Apple Silicon on macos-14, Intel on macos-13 — so the WebRTC AEC dependency compiles
+# without cross-compiling and the bundled dylibs land where the bundle expects. The two builds are
+# then `lipo`-d into one universal binary. Manual (workflow_dispatch) or on a `v*` tag.
+name: Release (universal macOS)
+
+on:
+  workflow_dispatch:
+  push:
+    tags: ["v*"]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: build (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13 # Intel
+            arch: x86_64
+          - runner: macos-14 # Apple Silicon
+            arch: arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # whisper.cpp is vendored as a submodule
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: app/src-tauri
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install frontend deps
+        working-directory: app
+        run: npm ci
+      - name: Build the app (native ${{ matrix.arch }})
+        working-directory: app
+        run: npm run tauri build -- --bundles app
+      - name: Zip the .app
+        working-directory: app/src-tauri/target/release/bundle/macos
+        run: ditto -c -k --sequesterRsrc --keepParent Wisp.app "$GITHUB_WORKSPACE/Wisp-${{ matrix.arch }}.app.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wisp-${{ matrix.arch }}
+          path: Wisp-${{ matrix.arch }}.app.zip
+
+  universal:
+    name: lipo universal
+    needs: build
+    runs-on: macos-14
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+      - name: Assemble the universal app
+        run: |
+          set -euo pipefail
+          ditto -x -k dist/wisp-arm64/Wisp-arm64.app.zip arm64
+          ditto -x -k dist/wisp-x86_64/Wisp-x86_64.app.zip x86_64
+
+          # The bundled dylibs are already universal; only the main binary differs per arch, so take
+          # the arm64 bundle whole and replace just its binary with a lipo'd universal one.
+          cp -R arm64/Wisp.app Wisp.app
+          lipo -create \
+            arm64/Wisp.app/Contents/MacOS/app \
+            x86_64/Wisp.app/Contents/MacOS/app \
+            -output Wisp.app/Contents/MacOS/app
+
+          # Re-sign (ad-hoc) since the binary changed; --deep also re-signs the nested dylibs.
+          codesign --force --deep --sign - Wisp.app
+
+          echo "Universal binary architectures:"
+          lipo -info Wisp.app/Contents/MacOS/app
+          lipo -info Wisp.app/Contents/MacOS/app | grep -q 'x86_64 arm64' \
+            || (echo "::error::binary is not universal" && exit 1)
+      - name: Zip the universal app
+        run: ditto -c -k --sequesterRsrc --keepParent Wisp.app Wisp-universal.app.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wisp-universal-macos
+          path: Wisp-universal.app.zip
