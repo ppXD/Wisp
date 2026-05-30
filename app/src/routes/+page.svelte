@@ -40,7 +40,7 @@
   let micDevice = $state("");
   let systemDevice = $state("");
   let language = $state("");
-  let liveDenoise = $state(false);
+  let liveDenoiser = $state<string | null>(null);
   let liveDiarize = $state(false);
   let liveAccurate = $state(false);
   let livePrompt = $state("");
@@ -176,7 +176,7 @@
 
   async function applyDenoise() {
     try {
-      await invoke("set_denoise", { enabled: liveDenoise });
+      await invoke("set_denoise", { denoiser: liveDenoiser });
     } catch (e) {
       error = String(e);
     }
@@ -276,6 +276,10 @@
       error = "Download the speaker model first.";
       return;
     }
+    if (liveDenoiseChosen && !liveDenoiseChosen.installed) {
+      error = "Download the noise-reduction model first.";
+      return;
+    }
     try {
       await applyDevices();
       await applyLanguage();
@@ -349,6 +353,7 @@
   let denoiseModels = $state<ModelInfo[]>([]);
   const denoiseModelId = $derived(denoiseModels[0]?.id ?? "denoise-gtcrn");
   const denoiseChosen = $derived(denoiseModels.find((m) => m.id === fileDenoiser));
+  const liveDenoiseChosen = $derived(denoiseModels.find((m) => m.id === liveDenoiser));
   // Speaker diarization (who-said-what), opt-in. The models load and download on demand.
   let diarizeModels = $state<ModelInfo[]>([]);
   let diarizeOn = $state(false);
@@ -724,14 +729,45 @@
             </label>
             <div class="source-row">
               <span class="source-name">Reduce noise</span>
-              <label class="toggle">
-                <input type="checkbox" bind:checked={liveDenoise} onchange={applyDenoise} />
-                <span>{liveDenoise ? "On" : "Off"}</span>
-              </label>
+              <div class="seg">
+                <button
+                  class:active={liveDenoiser === null}
+                  onclick={() => {
+                    liveDenoiser = null;
+                    applyDenoise();
+                  }}>Off</button
+                >
+                <button
+                  class:active={liveDenoiser === "rnnoise"}
+                  onclick={() => {
+                    liveDenoiser = "rnnoise";
+                    applyDenoise();
+                  }}>Light</button
+                >
+                <button
+                  class:active={liveDenoiser === "denoise-gtcrn"}
+                  onclick={() => {
+                    liveDenoiser = "denoise-gtcrn";
+                    applyDenoise();
+                  }}>Balanced</button
+                >
+              </div>
             </div>
+            {#if liveDenoiseChosen && !liveDenoiseChosen.installed}
+              <button
+                class="btn outline sm diarize-dl"
+                onclick={() => downloadDenoise(liveDenoiseChosen.id)}
+                disabled={downloading === liveDenoiseChosen.id}
+              >
+                {downloading === liveDenoiseChosen.id
+                  ? `Downloading… ${downloadPct}%`
+                  : `Download ${fmtSize(liveDenoiseChosen.sizeBytes)}`}
+              </button>
+            {/if}
             <p class="hint">
-              Defaults to your mic + all system audio with <strong>echo cancellation</strong>. For
-              system audio only, set Microphone to Off.
+              Defaults to your mic + all system audio with <strong>echo cancellation</strong>; for
+              system audio only, set Microphone to Off. <strong>Light</strong> (built-in) is best for
+              live; <strong>Balanced</strong> is a stronger downloaded model.
             </p>
           </div>
 
