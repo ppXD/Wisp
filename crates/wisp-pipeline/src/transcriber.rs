@@ -24,9 +24,19 @@ pub struct Transcriber {
     source_kind: AudioSourceKind,
     next_id: u64,
     diarizer: Option<Box<dyn Diarizer>>,
+    /// Recent finalized text, fed back to the engine as a biasing prompt so names/terms stay
+    /// consistent across a live session (see [`transcribe_utterance`](Self::transcribe_utterance)).
+    context: String,
+    /// Whether to maintain rolling context at all (toggled by [`ROLLING_CONTEXT_ENV`]).
+    context_enabled: bool,
 }
 
 impl Transcriber {
+    /// Env var toggling cross-utterance rolling context — `off`/`0`/`false`/`no` disables it.
+    /// Defaults on: feeding recent finals back as a prompt keeps proper nouns and terminology
+    /// consistent. Disable it if a session's domain confuses the bias.
+    pub const ROLLING_CONTEXT_ENV: &'static str = "WISP_LIVE_CONTEXT";
+
     /// Creates a transcriber that tags segments as coming from `source_kind`.
     pub fn new(engine: Box<dyn AsrEngine>, source_kind: AudioSourceKind) -> Self {
         Self {
@@ -34,12 +44,21 @@ impl Transcriber {
             source_kind,
             next_id: 0,
             diarizer: None,
+            context: String::new(),
+            context_enabled: rolling_context_enabled(),
         }
     }
 
     /// Attaches a live diarizer that labels each utterance's segments with their speaker.
     pub fn with_diarizer(mut self, diarizer: Box<dyn Diarizer>) -> Self {
         self.diarizer = Some(diarizer);
+        self
+    }
+
+    /// Overrides the [`ROLLING_CONTEXT_ENV`](Self::ROLLING_CONTEXT_ENV)-derived default, mainly for
+    /// tests that need a deterministic setting regardless of the environment.
+    pub fn with_rolling_context(mut self, enabled: bool) -> Self {
+        self.context_enabled = enabled;
         self
     }
 
@@ -117,10 +136,44 @@ impl Transcriber {
                     segment.speaker = Some(speaker);
                 }
             }
+
+            // Bias the next utterance (its partials and final) toward this line's names and terms.
+            if self.context_enabled {
+                self.push_context(&segment.text);
+                self.engine.set_context(&self.context);
+            }
         }
 
         Ok(Some(segment))
     }
+
+    /// Appends a finalized line to the rolling context, trimmed to the last [`CONTEXT_CHARS`] chars
+    /// on a char boundary so the bias stays a bounded prompt and can't snowball.
+    fn push_context(&mut self, text: &str) {
+        if !self.context.is_empty() {
+            self.context.push(' ');
+        }
+        self.context.push_str(text);
+
+        let overflow = self.context.chars().count().saturating_sub(CONTEXT_CHARS);
+        if overflow > 0 {
+            self.context = self.context.chars().skip(overflow).collect();
+        }
+    }
+}
+
+/// Most chars of recent finalized text to keep as rolling context. Bounded so it stays a light,
+/// prompt-sized hint (whisper caps an initial prompt around here) that biases without snowballing.
+const CONTEXT_CHARS: usize = 224;
+
+/// Whether rolling context is on, per [`Transcriber::ROLLING_CONTEXT_ENV`]; defaults on.
+fn rolling_context_enabled() -> bool {
+    !matches!(
+        std::env::var(Transcriber::ROLLING_CONTEXT_ENV)
+            .ok()
+            .as_deref(),
+        Some("off" | "0" | "false" | "no")
+    )
 }
 
 /// Collapses an engine's (possibly multi-sentence) segments into one updatable line, or `None` if
@@ -155,8 +208,51 @@ fn merge_segments(segments: Vec<TranscriptSegment>) -> Option<TranscriptSegment>
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wisp_core::engine::TranscriptionResult;
+    use std::sync::{Arc, Mutex};
+    use wisp_core::engine::{EngineInfo, TranscriptionResult};
     use wisp_core::testing::MockAsrEngine;
+
+    /// An engine that returns canned text per `transcribe` call and records every `set_context`
+    /// string, so a test can assert what rolling context the transcriber fed back.
+    struct RecordingEngine {
+        texts: Vec<String>,
+        idx: usize,
+        contexts: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl AsrEngine for RecordingEngine {
+        fn info(&self) -> EngineInfo {
+            EngineInfo {
+                name: "recording".to_owned(),
+                streaming: false,
+            }
+        }
+        fn transcribe(&mut self, _audio: &[f32], _sample_rate: u32) -> Result<TranscriptionResult> {
+            let text = self.texts.get(self.idx).cloned().unwrap_or_default();
+            self.idx += 1;
+            Ok(TranscriptionResult {
+                segments: vec![TranscriptSegment::new(
+                    0,
+                    text,
+                    Duration::ZERO..Duration::from_millis(10),
+                    AudioSourceKind::File,
+                )],
+            })
+        }
+        fn set_context(&mut self, recent_text: &str) {
+            self.contexts.lock().unwrap().push(recent_text.to_owned());
+        }
+    }
+
+    fn recording(texts: &[&str]) -> (Box<RecordingEngine>, Arc<Mutex<Vec<String>>>) {
+        let contexts = Arc::new(Mutex::new(Vec::new()));
+        let engine = Box::new(RecordingEngine {
+            texts: texts.iter().map(|s| (*s).to_owned()).collect(),
+            idx: 0,
+            contexts: Arc::clone(&contexts),
+        });
+        (engine, contexts)
+    }
 
     fn utterance(start_ms: u64) -> Utterance {
         Utterance {
@@ -328,5 +424,83 @@ mod tests {
         let mut transcriber = Transcriber::new(engine, AudioSourceKind::Microphone);
 
         assert!(transcriber.transcribe(&utterance(0)).unwrap().is_empty());
+    }
+
+    #[test]
+    fn rolling_context_accumulates_finals_and_skips_partials() {
+        let (engine, contexts) = recording(&["hello Acme", "ignored partial", "second line"]);
+        let mut t =
+            Transcriber::new(engine, AudioSourceKind::Microphone).with_rolling_context(true);
+
+        t.transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
+            .unwrap();
+        t.transcribe_utterance(1, &utterance(0), SegmentStatus::Partial)
+            .unwrap();
+        t.transcribe_utterance(2, &utterance(0), SegmentStatus::Final)
+            .unwrap();
+
+        // set_context fires only on finals, accumulating recent text; the partial never contributes.
+        assert_eq!(
+            *contexts.lock().unwrap(),
+            vec!["hello Acme".to_owned(), "hello Acme second line".to_owned()]
+        );
+    }
+
+    #[test]
+    fn rolling_context_is_capped_to_a_bounded_window() {
+        let long = "x".repeat(CONTEXT_CHARS + 50);
+        let (engine, contexts) = recording(&[&long]);
+        let mut t =
+            Transcriber::new(engine, AudioSourceKind::Microphone).with_rolling_context(true);
+
+        t.transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
+            .unwrap();
+
+        let seen = contexts.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(
+            seen[0].chars().count(),
+            CONTEXT_CHARS,
+            "context is trimmed to the cap so it can't snowball"
+        );
+    }
+
+    #[test]
+    fn rolling_context_disabled_never_reaches_the_engine() {
+        let (engine, contexts) = recording(&["hello", "world"]);
+        let mut t =
+            Transcriber::new(engine, AudioSourceKind::Microphone).with_rolling_context(false);
+
+        t.transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
+            .unwrap();
+        t.transcribe_utterance(1, &utterance(0), SegmentStatus::Final)
+            .unwrap();
+
+        assert!(contexts.lock().unwrap().is_empty());
+    }
+
+    /// Renaming this constant silently breaks anyone who pinned the rolling-context toggle via env.
+    #[test]
+    fn rolling_context_env_var_name_is_pinned() {
+        assert_eq!(Transcriber::ROLLING_CONTEXT_ENV, "WISP_LIVE_CONTEXT");
+    }
+
+    /// The env var is process-global, so exercise its whole lifecycle in one serial test.
+    #[test]
+    fn rolling_context_enabled_defaults_on_and_parses_off_values() {
+        let env = Transcriber::ROLLING_CONTEXT_ENV;
+
+        std::env::remove_var(env);
+        assert!(rolling_context_enabled(), "unset → on");
+
+        for off in ["off", "0", "false", "no"] {
+            std::env::set_var(env, off);
+            assert!(!rolling_context_enabled(), "{off} disables");
+        }
+
+        std::env::set_var(env, "on");
+        assert!(rolling_context_enabled(), "any other value → on");
+
+        std::env::remove_var(env);
     }
 }

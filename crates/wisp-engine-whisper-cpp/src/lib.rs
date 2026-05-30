@@ -128,8 +128,12 @@ pub struct WhisperCppEngine {
     language: CString,
     n_threads: i32,
     thresholds: DecodeThresholds,
-    /// Streaming-path (live) biasing prompt and beam-search choice, set via `configure_streaming`.
-    stream_prompt: CString,
+    /// Static streaming-path (live) biasing hints (names, jargon), set via `configure_streaming`.
+    stream_hints: String,
+    /// Recent finalized transcript, fed via `set_context`, so live decoding stays consistent on
+    /// names/terms across utterances. Folded into the initial prompt alongside `stream_hints`.
+    rolling_context: String,
+    /// Beam-search choice for the streaming path, set via `configure_streaming`.
     stream_beam: bool,
 }
 
@@ -176,9 +180,20 @@ impl WhisperCppEngine {
             language,
             n_threads: decode_threads(),
             thresholds: thresholds_from_env(),
-            stream_prompt: CString::default(),
+            stream_hints: String::new(),
+            rolling_context: String::new(),
             stream_beam: false,
         })
+    }
+}
+
+/// Joins the static hints and the rolling recent-text context into one biasing prompt (either may
+/// be empty). whisper.cpp uses it as `initial_prompt` — text bias only, never carried decoder state.
+fn combined_prompt(hints: &str, context: &str) -> String {
+    match (hints.trim(), context.trim()) {
+        ("", c) => c.to_owned(),
+        (h, "") => h.to_owned(),
+        (h, c) => format!("{h} {c}"),
     }
 }
 
@@ -196,22 +211,27 @@ impl AsrEngine for WhisperCppEngine {
         } else {
             sys::whisper_sampling_strategy::WHISPER_SAMPLING_GREEDY
         };
+        // Static hints + rolling recent-text context, biasing the decode toward consistent
+        // names/terms. Built before the unsafe block so it outlives the `whisper_full` call.
+        let prompt_c = CString::new(combined_prompt(&self.stream_hints, &self.rolling_context))
+            .unwrap_or_default();
+
         // SAFETY: `self.ctx` is a live context; `audio` is a valid slice; `self.language` and
-        // `self.stream_prompt` outlive the call so their pointers stay valid through `whisper_full`.
+        // `prompt_c` outlive the call so their pointers stay valid through `whisper_full`.
         let text = unsafe {
             let mut params = sys::whisper_full_default_params(strategy);
             params.n_threads = self.n_threads;
             params.language = self.language.as_ptr();
             params.translate = false;
-            params.no_context = true; // each utterance is independent — avoids drift/hallucination
+            params.no_context = true; // no carried decoder state — context is text-only, via the prompt
             params.no_timestamps = true;
             params.print_progress = false;
             params.print_realtime = false;
             params.print_special = false;
             params.print_timestamps = false;
             params.single_segment = false;
-            if !self.stream_prompt.as_bytes().is_empty() {
-                params.initial_prompt = self.stream_prompt.as_ptr();
+            if !prompt_c.as_bytes().is_empty() {
+                params.initial_prompt = prompt_c.as_ptr();
             }
             apply_thresholds(&mut params, self.thresholds);
 
@@ -317,12 +337,17 @@ impl AsrEngine for WhisperCppEngine {
     }
 
     fn configure_streaming(&mut self, prompt: &str, beam: bool) {
-        self.stream_prompt = CString::new(prompt).unwrap_or_default();
+        self.stream_hints = prompt.to_owned();
         self.stream_beam = beam;
     }
 
+    fn set_context(&mut self, recent_text: &str) {
+        self.rolling_context = recent_text.to_owned();
+    }
+
     fn reset(&mut self) {
-        // `no_context = true` makes each `transcribe` independent — there is no carried state.
+        // `no_context = true` makes each `transcribe` independent — there is no carried decoder
+        // state. Rolling context is a separate text prompt, intentionally preserved across resets.
     }
 }
 
@@ -409,6 +434,22 @@ mod tests {
             !text.trim().is_empty(),
             "expected a non-empty transcription, got {text:?}"
         );
+    }
+
+    #[test]
+    fn combined_prompt_joins_hints_and_context_handling_empties() {
+        assert_eq!(combined_prompt("", ""), "");
+        assert_eq!(combined_prompt("Acme, kubectl", ""), "Acme, kubectl");
+        assert_eq!(
+            combined_prompt("", "we discussed the migration"),
+            "we discussed the migration"
+        );
+        assert_eq!(
+            combined_prompt("Acme, kubectl", "we discussed the migration"),
+            "Acme, kubectl we discussed the migration"
+        );
+        // Surrounding whitespace on either part is trimmed before joining.
+        assert_eq!(combined_prompt("  hints  ", "  ctx  "), "hints ctx");
     }
 
     #[test]
