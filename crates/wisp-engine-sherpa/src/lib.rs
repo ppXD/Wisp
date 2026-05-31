@@ -30,12 +30,15 @@ use wisp_core::engine::{AsrEngine, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 
-/// CPU threads for Whisper's (heavier, autoregressive) decoder — sherpa-rs otherwise defaults to 1,
-/// which makes it sluggish and far from real-time.
-fn whisper_threads() -> i32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get().min(8) as i32)
-        .unwrap_or(4)
+/// CPU worker threads for the sherpa engines — both SenseVoice and Whisper run on the CPU, and
+/// sherpa-rs otherwise defaults to 1 thread, which is far from real-time. Scales to the machine's
+/// physical cores via the shared policy (overridable with `WISP_ASR_THREADS`).
+fn asr_threads() -> i32 {
+    let n = wisp_core::perf::asr_threads(
+        std::env::var(wisp_core::perf::ASR_THREADS_ENV).ok(),
+        num_cpus::get_physical(),
+    );
+    i32::try_from(n).unwrap_or(i32::MAX)
 }
 
 /// Whisper emits non-speech annotations like `[BLANK_AUDIO]` or `(speaking in foreign language)` on
@@ -88,6 +91,9 @@ impl SenseVoiceEngine {
             tokens: tokens.to_string_lossy().into_owned(),
             language: language.to_owned(),
             use_itn: true,
+            // Without this sherpa-rs runs SenseVoice single-threaded — the biggest cross-platform
+            // speed loss, since SenseVoice is the default engine off macOS.
+            num_threads: Some(asr_threads()),
             ..Default::default()
         };
 
@@ -133,7 +139,7 @@ impl WhisperEngine {
             decoder: decoder.to_string_lossy().into_owned(),
             tokens: tokens.to_string_lossy().into_owned(),
             language: language.to_owned(),
-            num_threads: Some(whisper_threads()),
+            num_threads: Some(asr_threads()),
             ..Default::default()
         };
 

@@ -29,12 +29,15 @@ use wisp_core::transcript::{AudioSourceKind, TranscriptSegment, Word};
 /// Rate whisper.cpp expects (and the rest of the pipeline runs at).
 const SAMPLE_RATE: u32 = 16_000;
 
-/// Decoder threads — whisper.cpp's encoder runs on the GPU, but the rest still benefits from a few
-/// CPU threads.
+/// Decoder threads — whisper.cpp's encoder runs on the GPU, but the rest still benefits from CPU
+/// threads. Scales to the machine's physical cores via the shared policy (overridable with
+/// `WISP_ASR_THREADS`).
 fn decode_threads() -> i32 {
-    std::thread::available_parallelism()
-        .map(|n| n.get().min(8) as i32)
-        .unwrap_or(4)
+    let n = wisp_core::perf::asr_threads(
+        std::env::var(wisp_core::perf::ASR_THREADS_ENV).ok(),
+        num_cpus::get_physical(),
+    );
+    i32::try_from(n).unwrap_or(i32::MAX)
 }
 
 /// Whisper's decoding-robustness thresholds.
