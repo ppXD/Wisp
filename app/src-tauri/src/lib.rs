@@ -829,20 +829,25 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
-    let denoiser = state
+    // Live denoising runs frame-by-frame in real time, but the downloadable model denoisers (GTCRN)
+    // are offline/whole-clip — run per frame they emit garbled near-silence the engine then
+    // hallucinates over. So live only ever uses the streaming built-in RNNoise: coerce any model
+    // denoiser to it. (Those models stay available for File mode, which feeds them a whole clip.)
+    let denoiser = match state
         .live_denoiser
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
-        .clone();
-    let denoise_dir = match denoiser.as_deref() {
-        Some(id) if id != "rnnoise" => Some(
-            state
-                .store
-                .local_path(&ModelId(id.to_owned()))
-                .ok_or_else(|| format!("denoise model '{id}' is not downloaded yet"))?,
-        ),
-        _ => None,
+        .as_deref()
+    {
+        None => None,
+        Some("rnnoise") => Some("rnnoise".to_owned()),
+        Some(other) => {
+            eprintln!("wisp: '{other}' is an offline denoiser unsuitable for live — using RNNoise");
+            Some("rnnoise".to_owned())
+        }
     };
+    // The live denoiser is always the built-in RNNoise, which needs no downloaded model directory.
+    let denoise_dir: Option<PathBuf> = None;
     let diarize_dir = match &*state
         .live_diarize_model
         .lock()
