@@ -53,9 +53,101 @@ pub fn resample_linear(input: &[f32], from_rate: u32, to_rate: u32) -> Vec<f32> 
 }
 
 /// Convert an [`AudioFrame`] of any rate/channel count to [`TARGET_SAMPLE_RATE`] mono f32.
+///
+/// Stateless and dependency-free, fine for whole-clip (file) conversion. For a *live* stream prefer
+/// [`Resampler16k`], which anti-aliases and joins frames seamlessly.
 pub fn to_mono_16k(frame: &AudioFrame) -> Vec<f32> {
     let mono = downmix_to_mono(&frame.samples, frame.channels);
     resample_linear(&mono, frame.sample_rate, TARGET_SAMPLE_RATE)
+}
+
+/// A streaming, anti-aliased sample-rate converter to [`TARGET_SAMPLE_RATE`] mono.
+///
+/// Plain linear resampling ([`to_mono_16k`]) folds any content above the 8 kHz output Nyquist back
+/// into the speech band as aliasing noise, which the ASR engine then has to fight. This applies a
+/// stateful windowed-sinc low-pass *before* downsampling, so nothing above ~7.2 kHz aliases and
+/// successive frames of one stream join seamlessly. Hold one per stream and feed it frames in order;
+/// it lazily designs its filter once the source rate is known and rebuilds it if the rate changes.
+#[derive(Default)]
+pub struct Resampler16k {
+    from_rate: u32,
+    coeffs: Vec<f32>,
+    history: Vec<f32>,
+}
+
+impl Resampler16k {
+    /// A fresh converter; the anti-alias filter is built on the first downsampling frame.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Downmixes `frame` to mono and converts it to 16 kHz, anti-aliasing when downsampling.
+    pub fn process(&mut self, frame: &AudioFrame) -> Vec<f32> {
+        let mono = downmix_to_mono(&frame.samples, frame.channels);
+
+        // Up-sampling / same-rate can't alias, so skip the filter (and its latency) entirely.
+        if frame.sample_rate <= TARGET_SAMPLE_RATE {
+            return resample_linear(&mono, frame.sample_rate, TARGET_SAMPLE_RATE);
+        }
+
+        if self.from_rate != frame.sample_rate {
+            self.from_rate = frame.sample_rate;
+            self.coeffs = design_lowpass(frame.sample_rate, TARGET_SAMPLE_RATE);
+            self.history = vec![0.0; self.coeffs.len().saturating_sub(1)];
+        }
+
+        let filtered = self.low_pass(&mono);
+        resample_linear(&filtered, frame.sample_rate, TARGET_SAMPLE_RATE)
+    }
+
+    /// Stateful FIR convolution: convolve `[saved history ++ input]`, then keep the new tail as the
+    /// next call's history so the stream stays continuous across frame boundaries.
+    fn low_pass(&mut self, input: &[f32]) -> Vec<f32> {
+        let taps = self.coeffs.len();
+        if taps == 0 || input.is_empty() {
+            return input.to_vec();
+        }
+        let mut buf = std::mem::take(&mut self.history);
+        buf.extend_from_slice(input);
+
+        let out: Vec<f32> = (0..input.len())
+            .map(|i| self.coeffs.iter().zip(&buf[i..]).map(|(c, x)| c * x).sum())
+            .collect();
+
+        self.history = buf[buf.len() - (taps - 1)..].to_vec();
+        out
+    }
+}
+
+/// A unity-DC-gain windowed-sinc low-pass FIR, cutoff just under `to_rate`/2, sampled at `from_rate`.
+fn design_lowpass(from_rate: u32, to_rate: u32) -> Vec<f32> {
+    use std::f32::consts::PI;
+    const TAPS: usize = 63; // odd → symmetric, constant (integer) group delay
+
+    // Cut off at 0.45·to_rate, a touch below the 0.5·to_rate output Nyquist for a transition band.
+    let fc = 0.45 * to_rate as f32 / from_rate as f32; // cycles per input sample
+    let mid = (TAPS - 1) as f32 / 2.0;
+
+    let mut h: Vec<f32> = (0..TAPS)
+        .map(|i| {
+            let x = i as f32 - mid;
+            let sinc = if x == 0.0 {
+                2.0 * fc
+            } else {
+                (2.0 * PI * fc * x).sin() / (PI * x)
+            };
+            let hann = 0.5 - 0.5 * (2.0 * PI * i as f32 / (TAPS - 1) as f32).cos();
+            sinc * hann
+        })
+        .collect();
+
+    let sum: f32 = h.iter().sum();
+    if sum != 0.0 {
+        for c in &mut h {
+            *c /= sum;
+        }
+    }
+    h
 }
 
 /// Split decoded interleaved `samples` into `chunk_ms`-long [`AudioFrame`]s, each stamped with its
@@ -141,5 +233,40 @@ mod tests {
         let out = to_mono_16k(&frame);
         assert_eq!(out.len(), 50);
         assert!(out.iter().all(|v| (v - 0.25).abs() < 1e-6));
+    }
+
+    #[test]
+    fn resampler16k_passes_low_frequencies() {
+        use std::f32::consts::PI;
+        // A 1 kHz tone at 48 kHz is well inside the 8 kHz passband — it must survive conversion.
+        let tone: Vec<f32> = (0..4_800)
+            .map(|i| (2.0 * PI * 1_000.0 * i as f32 / 48_000.0).sin())
+            .collect();
+        let frame = AudioFrame::new(tone, 48_000, 1, Duration::ZERO);
+        let out = Resampler16k::new().process(&frame);
+        let rms = (out.iter().map(|v| v * v).sum::<f32>() / out.len() as f32).sqrt();
+        assert!(rms > 0.5, "a 1 kHz tone must pass through (rms {rms})");
+    }
+
+    #[test]
+    fn resampler16k_suppresses_aliasing_that_linear_lets_through() {
+        use std::f32::consts::PI;
+        // A 12 kHz tone at 48 kHz is above the 8 kHz output Nyquist: naively downsampled to 16 kHz it
+        // aliases down to 4 kHz. Linear resampling passes that alias through; the anti-aliased
+        // resampler removes the tone first, so far less energy survives.
+        let tone: Vec<f32> = (0..9_600)
+            .map(|i| (2.0 * PI * 12_000.0 * i as f32 / 48_000.0).sin())
+            .collect();
+
+        let linear = resample_linear(&tone, 48_000, 16_000);
+        let frame = AudioFrame::new(tone, 48_000, 1, Duration::ZERO);
+        let antialiased = Resampler16k::new().process(&frame);
+
+        let rms = |s: &[f32]| (s.iter().map(|v| v * v).sum::<f32>() / s.len() as f32).sqrt();
+        let (rms_lin, rms_aa) = (rms(&linear), rms(&antialiased));
+        assert!(
+            rms_aa < rms_lin * 0.25,
+            "anti-aliasing should cut the alias well below linear (linear {rms_lin}, aa {rms_aa})"
+        );
     }
 }

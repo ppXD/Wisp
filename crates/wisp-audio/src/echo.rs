@@ -9,7 +9,7 @@ use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
 use wisp_core::channel::FrameReceiver;
 use wisp_core::error::Result;
 
-use crate::dsp::{to_mono_16k, TARGET_SAMPLE_RATE};
+use crate::dsp::{Resampler16k, TARGET_SAMPLE_RATE};
 
 /// An [`AudioSource`] that echo-cancels a microphone against a far-end reference stream.
 ///
@@ -22,6 +22,10 @@ pub struct EchoCancellingSource {
     reference: FrameReceiver,
     canceller: Box<dyn EchoCanceller>,
     info: AudioSourceInfo,
+    /// Anti-aliased resamplers to 16 kHz. The mic capture and the far-end reference are independent
+    /// streams, so each keeps its own filter state.
+    capture_resampler: Resampler16k,
+    ref_resampler: Resampler16k,
 }
 
 impl EchoCancellingSource {
@@ -37,13 +41,16 @@ impl EchoCancellingSource {
             reference,
             canceller,
             info,
+            capture_resampler: Resampler16k::new(),
+            ref_resampler: Resampler16k::new(),
         }
     }
 
     /// Feeds all reference audio captured so far to the canceller's far-end.
     fn drain_reference(&mut self) {
         while let Some(frame) = self.reference.try_recv() {
-            self.canceller.push_reference(&to_mono_16k(&frame));
+            let resampled = self.ref_resampler.process(&frame);
+            self.canceller.push_reference(&resampled);
         }
     }
 }
@@ -61,7 +68,8 @@ impl AudioSource for EchoCancellingSource {
 
             self.drain_reference();
 
-            let cleaned = self.canceller.process_capture(&to_mono_16k(&frame));
+            let resampled = self.capture_resampler.process(&frame);
+            let cleaned = self.canceller.process_capture(&resampled);
             if cleaned.is_empty() {
                 continue; // canceller buffered a sub-frame; pull more mic audio
             }
