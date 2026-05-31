@@ -25,6 +25,22 @@ pub enum ModelFamily {
     Denoise,
 }
 
+impl ModelFamily {
+    /// Whether this family is a transcription (ASR) engine, as opposed to a support model — speaker
+    /// diarization or denoising — which have their own pickers and must never appear in the ASR
+    /// model list. The match is exhaustive on purpose: a new family won't compile until it is
+    /// classified here.
+    pub fn is_asr(self) -> bool {
+        match self {
+            ModelFamily::Whisper
+            | ModelFamily::WhisperCpp
+            | ModelFamily::StreamingTransducer
+            | ModelFamily::SenseVoice => true,
+            ModelFamily::Diarization | ModelFamily::Denoise => false,
+        }
+    }
+}
+
 /// Quantization level of a model's weights.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -146,5 +162,20 @@ mod tests {
     #[test]
     fn model_id_as_str() {
         assert_eq!(ModelId("whisper".into()).as_str(), "whisper");
+    }
+
+    #[test]
+    fn is_asr_marks_transcription_families_only() {
+        for f in [
+            ModelFamily::Whisper,
+            ModelFamily::WhisperCpp,
+            ModelFamily::StreamingTransducer,
+            ModelFamily::SenseVoice,
+        ] {
+            assert!(f.is_asr(), "{f:?} is a transcription family");
+        }
+        for f in [ModelFamily::Diarization, ModelFamily::Denoise] {
+            assert!(!f.is_asr(), "{f:?} is a support model, not ASR");
+        }
     }
 }
