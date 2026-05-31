@@ -218,6 +218,10 @@ impl AsrEngine for WhisperCppEngine {
         }
     }
 
+    fn reports_clip_progress(&self) -> bool {
+        true // transcribe_clip drives whisper.cpp's native progress_callback
+    }
+
     fn transcribe(&mut self, audio: &[f32], _sample_rate: u32) -> Result<TranscriptionResult> {
         let strategy = if self.stream_beam {
             sys::whisper_sampling_strategy::WHISPER_SAMPLING_BEAM_SEARCH

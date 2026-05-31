@@ -13,6 +13,7 @@ pub mod segmenter;
 pub mod session;
 pub mod transcriber;
 pub mod vad;
+pub mod window;
 
 pub use gate::{remap_to_original, GatedClip};
 pub use pipeline::{Pipeline, DEFAULT_SILENCE_HANGOVER};
@@ -20,3 +21,4 @@ pub use segmenter::{EnergySegmenter, Segmenter, Utterance};
 pub use session::{EventSink, Session};
 pub use transcriber::Transcriber;
 pub use vad::{EnergyVad, Vad};
+pub use window::window_bounds;
