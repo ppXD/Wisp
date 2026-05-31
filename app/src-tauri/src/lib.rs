@@ -56,6 +56,10 @@ const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
 /// Event channels for file transcription: total duration up front, decode progress (0–100), each
 /// segment as it's produced, and a completion signal.
 const FILE_META_EVENT: &str = "file://meta";
+/// The current pipeline phase (`"decoding"`, `"reducing noise"`, `"transcribing"`), so the UI can
+/// say what's happening even during phases that report no percentage (decode, denoise, and engines
+/// without a native progress callback).
+const FILE_STAGE_EVENT: &str = "file://stage";
 const FILE_PROGRESS_EVENT: &str = "file://progress";
 const FILE_SEGMENT_EVENT: &str = "file://segment";
 const FILE_DONE_EVENT: &str = "file://done";
@@ -1120,6 +1124,8 @@ async fn transcribe_file(
                 },
             );
 
+            let _ = task_app.emit(FILE_STAGE_EVENT, "decoding");
+
             // Decode the whole clip to 16 kHz mono — no VAD chunking, so the engine sees the full
             // audio with cross-window context (much more accurate than per-utterance chunks).
             let mut audio = Vec::new();
@@ -1131,6 +1137,7 @@ async fn transcribe_file(
             // normalization, VAD gating, the engine, and diarization — works on the cleaner signal.
             if let Some(id) = options.denoiser.as_deref() {
                 if let Some(mut denoiser) = build_denoiser(id, denoise_dir.as_deref()) {
+                    let _ = task_app.emit(FILE_STAGE_EVENT, "reducing noise");
                     audio = denoiser.denoise(&audio, TARGET_SAMPLE_RATE);
                 }
             }
@@ -1153,6 +1160,7 @@ async fn transcribe_file(
                 .as_ref()
                 .map_or(audio.as_slice(), |g| g.audio.as_slice());
 
+            let _ = task_app.emit(FILE_STAGE_EVENT, "transcribing");
             let mut engine = build_engine(&descriptor, &dir, &language)?;
 
             // Forward the engine's 0–100 decode progress to the UI, de-duplicated so we emit only on
