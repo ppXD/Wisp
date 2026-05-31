@@ -325,10 +325,6 @@
       error = "Download the speaker model first.";
       return;
     }
-    if (liveDenoiseChosen && !liveDenoiseChosen.installed) {
-      error = "Download the noise-reduction model first.";
-      return;
-    }
     try {
       await applyDevices();
       await applyLanguage();
@@ -404,7 +400,6 @@
   let denoiseModels = $state<ModelInfo[]>([]);
   const denoiseModelId = $derived(denoiseModels[0]?.id ?? "denoise-gtcrn");
   const denoiseChosen = $derived(denoiseModels.find((m) => m.id === fileDenoiser));
-  const liveDenoiseChosen = $derived(denoiseModels.find((m) => m.id === liveDenoiser));
   // Speaker diarization (who-said-what), opt-in. The models load and download on demand.
   let diarizeModels = $state<ModelInfo[]>([]);
   let diarizeOn = $state(false);
@@ -840,26 +835,8 @@
                     applyDenoise();
                   }}>Light</button
                 >
-                <button
-                  class:active={liveDenoiser === "denoise-gtcrn"}
-                  onclick={() => {
-                    liveDenoiser = "denoise-gtcrn";
-                    applyDenoise();
-                  }}>Balanced</button
-                >
               </div>
             </div>
-            {#if liveDenoiseChosen && !liveDenoiseChosen.installed}
-              <button
-                class="btn outline sm dl-button"
-                onclick={() => downloadDenoise(liveDenoiseChosen.id)}
-                disabled={downloading === liveDenoiseChosen.id}
-              >
-                {downloading === liveDenoiseChosen.id
-                  ? `Downloading… ${downloadPct}%`
-                  : `Download ${fmtSize(liveDenoiseChosen.sizeBytes)}`}
-              </button>
-            {/if}
             <p class="opt-hint">
               Defaults to your mic + all system audio with <strong>echo cancellation</strong>; for
               system audio only, set Microphone to Off. <strong>Light</strong> is the best fit for
