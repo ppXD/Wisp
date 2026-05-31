@@ -23,14 +23,14 @@ use wisp_core::audio::AudioSource;
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
-use wisp_core::engine::{AsrEngine, ClipOptions};
+use wisp_core::engine::{AsrEngine, ClipOptions, StreamingAsrEngine};
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_sherpa::{
     GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
-    WhisperEngine,
+    StreamingTransducerEngine, WhisperEngine,
 };
 #[cfg(target_os = "windows")]
 use wisp_loopback::WasapiLoopbackSource;
@@ -233,6 +233,35 @@ fn build_engine(
     }
 }
 
+/// Builds the streaming (online) transducer engine from a downloaded model — encoder/decoder/joiner
+/// ONNX + tokens. Cross-platform CPU; the thread count scales to the machine inside the engine.
+fn build_streaming_engine(
+    descriptor: &ModelDescriptor,
+    dir: &Path,
+) -> WispResult<Box<dyn StreamingAsrEngine>> {
+    let onnx = |needle: &str| {
+        descriptor
+            .files
+            .iter()
+            .find(|f| f.name.contains(needle) && f.name.ends_with(".onnx"))
+            .map(|f| dir.join(&f.name))
+    };
+    let encoder = onnx("encoder")
+        .ok_or_else(|| WispError::Model("streaming model has no encoder".to_owned()))?;
+    let decoder = onnx("decoder")
+        .ok_or_else(|| WispError::Model("streaming model has no decoder".to_owned()))?;
+    let joiner = onnx("joiner")
+        .ok_or_else(|| WispError::Model("streaming model has no joiner".to_owned()))?;
+    let tokens = descriptor
+        .files
+        .iter()
+        .find(|f| f.name.ends_with("tokens.txt"))
+        .map(|f| dir.join(&f.name))
+        .ok_or_else(|| WispError::Model("streaming model has no tokens file".to_owned()))?;
+    let engine = StreamingTransducerEngine::new(&encoder, &decoder, &joiner, &tokens)?;
+    Ok(Box::new(engine))
+}
+
 /// Builds the GPU (Metal) whisper.cpp engine from a downloaded GGUF model. macOS only; elsewhere
 /// this family isn't offered, so the stub just reports it.
 #[cfg(target_os = "macos")]
@@ -318,20 +347,8 @@ fn spawn_session(
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
     settings: &LiveSettings,
 ) -> WispResult<Session> {
-    let mut engine = build_engine(descriptor, dir, &settings.language)?;
-    engine.configure_streaming(&settings.prompt, settings.accurate);
-    let segmenter = build_segmenter(app, kind);
-    let mut transcriber = Transcriber::new(engine, kind);
-    // Live speaker labels: a per-session diarizer (separate numbering per stream). Best-effort —
-    // if the model won't load, transcribe without labels rather than failing the session.
-    if let Some(diarize_dir) = &settings.diarize_dir {
-        match SherpaLiveDiarizer::new(&diarize_dir.join("embedding.onnx")) {
-            Ok(diarizer) => transcriber = transcriber.with_diarizer(Box::new(diarizer)),
-            Err(e) => eprintln!("wisp: live diarizer load failed ({e}); skipping speaker labels"),
-        }
-    }
-    // Per-session denoiser: built-in RNNoise (streams frame-by-frame) or a downloaded model
-    // (GTCRN), built the same way as the File path.
+    // The per-session denoiser and the event sink (cross-stream echo dedup on finals) are the same
+    // regardless of engine kind, so build them once up front.
     let denoiser = settings
         .denoiser
         .as_deref()
@@ -357,8 +374,30 @@ fn spawn_session(
         }
     });
 
-    // Decoupled live session: capture+segmentation runs real-time; the (slow) engine runs on its
-    // own thread draining complete utterances, so it never stalls capture or drops mid-sentence.
+    // A streaming transducer self-segments and decodes cheaply per chunk, so it drives the pipeline
+    // directly on one thread. Every other family is VAD-segmented and transcribed whole on the
+    // decoupled live path — capture stays real-time while the slow engine drains complete utterances
+    // on its own thread, so it never stalls capture or drops audio mid-sentence.
+    if descriptor.family == ModelFamily::StreamingTransducer {
+        let engine = build_streaming_engine(descriptor, dir)?;
+        return Ok(Session::spawn_streaming(
+            engine, source, sink, denoiser, kind,
+        ));
+    }
+
+    let mut engine = build_engine(descriptor, dir, &settings.language)?;
+    engine.configure_streaming(&settings.prompt, settings.accurate);
+    let segmenter = build_segmenter(app, kind);
+    let mut transcriber = Transcriber::new(engine, kind);
+    // Live speaker labels: a per-session diarizer (separate numbering per stream). Best-effort —
+    // if the model won't load, transcribe without labels rather than failing the session.
+    if let Some(diarize_dir) = &settings.diarize_dir {
+        match SherpaLiveDiarizer::new(&diarize_dir.join("embedding.onnx")) {
+            Ok(diarizer) => transcriber = transcriber.with_diarizer(Box::new(diarizer)),
+            Err(e) => eprintln!("wisp: live diarizer load failed ({e}); skipping speaker labels"),
+        }
+    }
+
     Ok(Session::spawn_live(
         segmenter,
         transcriber,
@@ -888,8 +927,11 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
 
             // Echo-cancel the mic against the system reference (WebRTC on macOS, passthrough where
             // there's no platform AEC); either way the reference is consumed and the dedup mops up.
-            let aec_mic: Box<dyn AudioSource> =
-                Box::new(EchoCancellingSource::new(mic, reference_rx, echo_canceller()));
+            let aec_mic: Box<dyn AudioSource> = Box::new(EchoCancellingSource::new(
+                mic,
+                reference_rx,
+                echo_canceller(),
+            ));
             sessions.push(
                 spawn_session(
                     &app,

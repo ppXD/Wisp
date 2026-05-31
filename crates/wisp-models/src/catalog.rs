@@ -15,6 +15,10 @@ const WHISPER_LARGE_V3_BASE: &str =
 const WHISPER_MEDIUM_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-whisper-medium/resolve/main";
 
+/// Hugging Face repo hosting the streaming (online) Zipformer transducer, bilingual zh+en (no auth).
+const STREAMING_ZIPFORMER_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main";
+
 /// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed). Also hosts the optional
 /// Core ML encoder archives (see [`crate::coreml`]).
 pub(crate) const WHISPER_CPP_BASE: &str =
@@ -39,6 +43,7 @@ pub fn builtin_catalog() -> Vec<ModelDescriptor> {
         whisper_large_v3_gpu(),
         sense_voice_int8(),
         sense_voice_fp32(),
+        streaming_zipformer_zh_en(),
         whisper_large_v3(),
         whisper_medium(),
     ]
@@ -255,6 +260,49 @@ fn whisper_medium() -> ModelDescriptor {
     }
 }
 
+/// The streaming (online) Zipformer transducer — emits words as you speak instead of waiting for a
+/// pause, so live transcription feels realtime. CPU-friendly on every platform.
+fn streaming_zipformer_zh_en() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("streaming-zipformer-zh-en".to_owned()),
+        family: ModelFamily::StreamingTransducer,
+        quant: Quant::Q8,
+        display_name: "Streaming Zipformer · zh + en · low latency".to_owned(),
+        files: vec![
+            ModelFile {
+                name: "encoder-epoch-99-avg-1.int8.onnx".to_owned(),
+                url: format!("{STREAMING_ZIPFORMER_BASE}/encoder-epoch-99-avg-1.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 181_895_032,
+            },
+            ModelFile {
+                name: "decoder-epoch-99-avg-1.int8.onnx".to_owned(),
+                url: format!("{STREAMING_ZIPFORMER_BASE}/decoder-epoch-99-avg-1.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 13_091_040,
+            },
+            ModelFile {
+                name: "joiner-epoch-99-avg-1.int8.onnx".to_owned(),
+                url: format!("{STREAMING_ZIPFORMER_BASE}/joiner-epoch-99-avg-1.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 3_228_404,
+            },
+            ModelFile {
+                name: "tokens.txt".to_owned(),
+                url: format!("{STREAMING_ZIPFORMER_BASE}/tokens.txt"),
+                sha256: String::new(),
+                size_bytes: 56_317,
+            },
+        ],
+        languages: vec!["zh".to_owned(), "en".to_owned()],
+        description:
+            "Streaming Zipformer transducer (Chinese + English) — emits words as you speak \
+             (~200-300 ms latency) and runs in real time on the CPU. Lower accuracy than Whisper \
+             but far snappier; best for live captions (~0.2 GB)."
+                .to_owned(),
+    }
+}
+
 /// Speaker-diarization models Wisp offers (segmentation + embedding). Kept separate from
 /// [`builtin_catalog`] because they are not ASR engines and never appear in the model picker; the
 /// File mode downloads one only when "Identify speakers" is turned on.
@@ -358,7 +406,7 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 7);
+        assert_eq!(catalog.len(), 8);
 
         let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
