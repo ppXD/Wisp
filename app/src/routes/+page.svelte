@@ -385,6 +385,9 @@
   let fileTranscribing = $state(false);
   // Decode progress 0–100; 0 means the engine hasn't reported yet (bar shows indeterminate).
   let fileProgress = $state(0);
+  // Current pipeline phase ("decoding"/"reducing noise"/"transcribing"), shown while no % is
+  // available so the bar isn't a content-free sweep.
+  let fileStage = $state("");
   // Accurate (beam search) vs Fast (greedy) decoding. Files default to Accurate.
   let fileAccurate = $state(true);
   // Timeline (timestamps) is opt-in: off = most accurate plain text; on = timed for SRT/VTT.
@@ -488,6 +491,7 @@
     error = "";
     fileSegments = [];
     fileProgress = 0;
+    fileStage = "";
     fileName = path.split(/[\\/]/).pop() ?? path;
     fileHasTimestamps = fileTimestamps;
     fileTranscribing = true;
@@ -562,6 +566,11 @@
     fileListeners.push(
       await listen<number>("file://progress", (e) => {
         fileProgress = e.payload;
+      }),
+    );
+    fileListeners.push(
+      await listen<string>("file://stage", (e) => {
+        fileStage = e.payload;
       }),
     );
     fileListeners.push(
@@ -948,8 +957,8 @@
           <span class="status" class:live={fileTranscribing}>
             <span class="status-dot"></span>{fileTranscribing
               ? fileProgress > 0
-                ? `transcribing… ${fileProgress}%`
-                : "transcribing…"
+                ? `${fileStage || "transcribing"}… ${fileProgress}%`
+                : `${fileStage || "transcribing"}…`
               : "done"}
           </span>
         </div>
