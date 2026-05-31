@@ -43,14 +43,8 @@ unsafe impl Send for StreamingTransducerEngine {}
 
 impl StreamingTransducerEngine {
     /// Loads a streaming transducer from its `encoder`/`decoder`/`joiner` ONNX files and `tokens`.
-    /// `num_threads` should be the machine's physical-core count (see `wisp_core::perf`).
-    pub fn new(
-        encoder: &Path,
-        decoder: &Path,
-        joiner: &Path,
-        tokens: &Path,
-        num_threads: i32,
-    ) -> Result<Self> {
+    /// The worker-thread count scales to the machine's physical cores via the shared policy.
+    pub fn new(encoder: &Path, decoder: &Path, joiner: &Path, tokens: &Path) -> Result<Self> {
         // Every C string must outlive the create call below, so bind them all first.
         let encoder_c = path_cstring(encoder)?;
         let decoder_c = path_cstring(decoder)?;
@@ -70,7 +64,7 @@ impl StreamingTransducerEngine {
             config.model_config.transducer.decoder = decoder_c.as_ptr();
             config.model_config.transducer.joiner = joiner_c.as_ptr();
             config.model_config.tokens = tokens_c.as_ptr();
-            config.model_config.num_threads = num_threads.max(1);
+            config.model_config.num_threads = crate::asr_threads();
             config.model_config.provider = provider_c.as_ptr();
             config.decoding_method = decoding_c.as_ptr();
             config.enable_endpoint = 1;
@@ -222,7 +216,7 @@ mod tests {
             .map(|s| s.expect("read sample") as f32 / 32768.0)
             .collect();
 
-        let mut engine = StreamingTransducerEngine::new(&encoder, &decoder, &joiner, &tokens, 4)
+        let mut engine = StreamingTransducerEngine::new(&encoder, &decoder, &joiner, &tokens)
             .expect("load streaming model");
 
         // Feed ~100 ms chunks like the live pipeline would, tracking the latest hypothesis.

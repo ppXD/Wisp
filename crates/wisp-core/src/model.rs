@@ -14,8 +14,9 @@ pub enum ModelFamily {
     Whisper,
     /// whisper.cpp (GGML/GGUF) models, run via the GPU (Metal on macOS).
     WhisperCpp,
-    /// NVIDIA Parakeet transducer models.
-    Parakeet,
+    /// Streaming transducer models (Zipformer / Parakeet) run through sherpa-onnx's *online*
+    /// recognizer — they emit text as audio arrives, for low-latency live transcription.
+    StreamingTransducer,
     /// sherpa-onnx SenseVoice (single-file multilingual model).
     SenseVoice,
     /// Speaker diarization (segmentation + embedding) — labels who speaks when, not an ASR engine.
