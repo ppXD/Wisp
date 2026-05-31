@@ -6,7 +6,7 @@
 //! app shell; the *choice* is pure and lives here, so it's the same logic everywhere and fully
 //! testable.
 
-use wisp_core::model::{ModelDescriptor, ModelId};
+use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId};
 
 /// RAM at/above which the higher-precision q8 default is recommended; below it, the lighter q5.
 const Q8_MIN_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
@@ -76,6 +76,19 @@ pub fn recommended_default_model(profile: &MachineProfile, catalog: &[ModelDescr
     }
 }
 
+/// Whether an ASR model of `family` can actually run on a host with `accelerator`, so the picker only
+/// offers models this machine can start.
+///
+/// The GPU whisper.cpp family is the macOS Metal engine and needs [`Accelerator::Metal`]; the
+/// CPU-ONNX families (SenseVoice, sherpa Whisper, streaming transducer) run on every platform. Pure,
+/// so the per-platform capability lives in one tested place rather than scattered `cfg` checks.
+pub fn family_runnable(family: ModelFamily, accelerator: Accelerator) -> bool {
+    match family {
+        ModelFamily::WhisperCpp => accelerator == Accelerator::Metal,
+        _ => true,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -131,6 +144,68 @@ mod tests {
                 let id =
                     recommended_default_model(&MachineProfile::new(accel, ram), &builtin_catalog());
                 assert!(ids.contains(&id), "{accel:?}/{ram} → {id:?} not in catalog");
+            }
+        }
+    }
+
+    #[test]
+    fn whisper_cpp_runs_only_on_metal() {
+        // The GPU whisper.cpp engine is macOS/Metal only — every other accelerator must hide it.
+        assert!(family_runnable(ModelFamily::WhisperCpp, Accelerator::Metal));
+        for accel in [
+            Accelerator::Cpu,
+            Accelerator::Cuda,
+            Accelerator::Vulkan,
+            Accelerator::DirectMl,
+        ] {
+            assert!(
+                !family_runnable(ModelFamily::WhisperCpp, accel),
+                "{accel:?} has no Metal whisper.cpp engine"
+            );
+        }
+    }
+
+    #[test]
+    fn cpu_onnx_families_run_on_every_accelerator() {
+        // SenseVoice / sherpa Whisper / streaming transducer are CPU ONNX — runnable everywhere.
+        for family in [
+            ModelFamily::SenseVoice,
+            ModelFamily::Whisper,
+            ModelFamily::StreamingTransducer,
+        ] {
+            for accel in [Accelerator::Metal, Accelerator::Cpu, Accelerator::DirectMl] {
+                assert!(
+                    family_runnable(family, accel),
+                    "{family:?} on {accel:?} should run"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn recommended_default_is_always_runnable_on_its_own_machine() {
+        // The two policies must agree: whatever we recommend for a machine must be runnable on it,
+        // so the auto-default is never a model the picker would (correctly) hide.
+        let catalog = builtin_catalog();
+        for accel in [
+            Accelerator::Metal,
+            Accelerator::Cpu,
+            Accelerator::Cuda,
+            Accelerator::Vulkan,
+            Accelerator::DirectMl,
+        ] {
+            for ram in [8u64, 16, 64].map(|g| g * GIB) {
+                let profile = MachineProfile::new(accel, ram);
+                let id = recommended_default_model(&profile, &catalog);
+                let family = catalog
+                    .iter()
+                    .find(|d| d.id == id)
+                    .expect("recommended id is in the catalog")
+                    .family;
+                assert!(
+                    family_runnable(family, accel),
+                    "recommended {id:?} ({family:?}) must run on {accel:?}"
+                );
             }
         }
     }
