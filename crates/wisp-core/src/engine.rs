@@ -124,6 +124,32 @@ pub trait AsrEngine: Send {
     fn reset(&mut self) {}
 }
 
+/// One incremental result from a [`StreamingAsrEngine`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StreamingResult {
+    /// The current hypothesis for the in-progress utterance (grows as more audio arrives).
+    pub text: String,
+    /// True when an utterance boundary was just reached: treat `text` as final. The engine resets
+    /// internally, so the next call begins a fresh utterance.
+    pub is_endpoint: bool,
+}
+
+/// A *streaming* speech-to-text engine.
+///
+/// Unlike [`AsrEngine`] — which transcribes a whole (VAD-segmented) utterance at once — a streaming
+/// engine consumes audio incrementally and emits a growing hypothesis within a couple hundred
+/// milliseconds, detecting utterance endpoints itself. That removes the segmentation latency, so the
+/// pipeline drives it directly, chunk by chunk, instead of waiting for the speaker to pause.
+pub trait StreamingAsrEngine: Send {
+    /// Feeds a chunk of 16 kHz mono `f32` audio and returns the updated hypothesis, with
+    /// `is_endpoint` set when an utterance boundary was reached (the engine then resets for the
+    /// next utterance).
+    fn accept_waveform(&mut self, sample_rate: u32, samples: &[f32]) -> StreamingResult;
+
+    /// Drops any in-progress hypothesis and starts a fresh utterance (e.g. on session restart).
+    fn reset(&mut self);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -21,7 +21,7 @@ pub use denoise::GtcrnDenoiser;
 pub use diarize::SherpaDiarizer;
 pub use live_diarize::SherpaLiveDiarizer;
 pub use silero::SileroSegmenter;
-pub use streaming::{StreamingResult, StreamingTransducerEngine};
+pub use streaming::StreamingTransducerEngine;
 
 use std::path::Path;
 use std::time::Duration;

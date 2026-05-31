@@ -32,7 +32,9 @@ pub use config::Config;
 pub use dedup::CrossStreamEchoFilter;
 pub use denoise::Denoiser;
 pub use diarize::{assign_speakers, ClipDiarizer, Diarizer, SpeakerSpan};
-pub use engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult};
+pub use engine::{
+    AsrEngine, ClipOptions, EngineInfo, StreamingAsrEngine, StreamingResult, TranscriptionResult,
+};
 pub use error::{Result, WispError};
 pub use export::{format_transcript, ExportFormat};
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
