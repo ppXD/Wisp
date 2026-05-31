@@ -19,5 +19,5 @@ pub use coreml::{coreml_asset, CoremlAsset};
 pub use download::FileDownloader;
 #[cfg(feature = "http")]
 pub use download::HttpDownloader;
-pub use machine::{recommended_default_model, Accelerator, MachineProfile};
+pub use machine::{family_runnable, recommended_default_model, Accelerator, MachineProfile};
 pub use store::FsModelStore;

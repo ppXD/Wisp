@@ -35,8 +35,8 @@ use wisp_engine_sherpa::{
 #[cfg(target_os = "windows")]
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
-    builtin_catalog, coreml_asset, denoise_models, diarization_models, recommended_default_model,
-    Accelerator, FsModelStore, HttpDownloader, MachineProfile,
+    builtin_catalog, coreml_asset, denoise_models, diarization_models, family_runnable,
+    recommended_default_model, Accelerator, FsModelStore, HttpDownloader, MachineProfile,
 };
 use wisp_pipeline::{
     remap_to_original, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session, Transcriber, Vad,
@@ -495,12 +495,16 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
-    let recommended = recommended_default_model(&detect_machine(), &builtin_catalog());
+    let machine = detect_machine();
+    let recommended = recommended_default_model(&machine, &builtin_catalog());
     let models = state
         .store
         .available()
         .into_iter()
         .filter(|d| d.family != ModelFamily::Diarization)
+        // Only offer models this machine can actually start — e.g. the Metal whisper.cpp models are
+        // hidden off macOS, where building their engine would fail.
+        .filter(|d| family_runnable(d.family, machine.accelerator))
         .map(|d| to_model_info(d, &state.store, active.as_ref(), Some(&recommended)))
         .collect();
     Ok(models)
