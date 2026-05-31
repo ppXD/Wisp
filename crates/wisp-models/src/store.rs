@@ -14,10 +14,12 @@ use crate::download::FileDownloader;
 const COMPLETE_MARKER: &str = ".wisp-ok";
 
 /// A [`ModelStore`] that keeps each model in `root/<model-id>/`, downloading missing files
-/// through an injected [`FileDownloader`] and verifying every file's SHA-256.
+/// through an injected [`FileDownloader`] and verifying each file's SHA-256 (or, for an unpinned
+/// file, at least its size).
 ///
 /// Downloads are atomic: each file lands in a `*.part` temporary, is verified, and only then
-/// renamed into place. An interrupted run therefore never leaves a corrupt file that looks valid.
+/// renamed into place — and a failed transfer removes its `*.part`, so an interrupted run never
+/// leaves a partial or corrupt file that looks valid.
 pub struct FsModelStore {
     root: PathBuf,
     catalog: Vec<ModelDescriptor>,
@@ -62,10 +64,18 @@ impl FsModelStore {
         }
     }
 
-    /// Verifies `path` against `file`'s checksum, treating an empty checksum as "unpinned" —
-    /// skipped with a warning (see [`fetch_file`](Self::fetch_file)).
+    /// Verifies `path` against `file`'s checksum. An empty checksum means "unpinned" (the whole
+    /// catalog today): there is no hash to match, so fall back to a size check — at least reject a
+    /// truncated/short transfer instead of accepting it as a complete model.
     fn verify(&self, path: &Path, file: &ModelFile) -> Result<()> {
         if file.sha256.is_empty() {
+            let len = fs::metadata(path)?.len();
+            if len < file.size_bytes {
+                return Err(WispError::Model(format!(
+                    "{}: got {len} bytes, expected at least {} — incomplete download",
+                    file.name, file.size_bytes
+                )));
+            }
             return Ok(());
         }
         verify_file(path, &file.sha256)
@@ -86,14 +96,19 @@ impl FsModelStore {
 
         if file.sha256.is_empty() {
             eprintln!(
-                "wisp-models: downloading {} without a pinned checksum (unverified)",
+                "wisp-models: downloading {} without a pinned checksum (size-checked only)",
                 file.name
             );
         }
 
         let part = dir.join(format!("{}.part", file.name));
-        self.downloader
-            .download_with_progress(&file.url, &part, on_bytes)?;
+        if let Err(e) = self
+            .downloader
+            .download_with_progress(&file.url, &part, on_bytes)
+        {
+            let _ = fs::remove_file(&part); // don't leave a partial transfer behind
+            return Err(e);
+        }
 
         if let Err(e) = self.verify(&part, file) {
             let _ = fs::remove_file(&part);
@@ -166,12 +181,20 @@ impl FsModelStore {
         }
 
         let zip_part = dir.join(format!("{}.zip.part", asset.dir_name));
-        self.downloader
-            .download_with_progress(&asset.url, &zip_part, &mut |bytes| {
-                on_progress(bytes.min(total), total);
-            })?;
+        if let Err(e) =
+            self.downloader
+                .download_with_progress(&asset.url, &zip_part, &mut |bytes| {
+                    on_progress(bytes.min(total), total);
+                })
+        {
+            let _ = fs::remove_file(&zip_part);
+            return Err(e);
+        }
 
-        unzip_into(&zip_part, &dir)?;
+        if let Err(e) = unzip_into(&zip_part, &dir) {
+            let _ = fs::remove_file(&zip_part);
+            return Err(e);
+        }
         let _ = fs::remove_file(&zip_part);
 
         on_progress(total, total);
@@ -379,23 +402,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_checksum_skips_verification() {
+    fn unpinned_complete_file_installs() {
+        // An unpinned file (empty checksum) whose download arrives complete passes the size check
+        // and installs normally.
         let url = "https://example/u.bin";
         let bytes = b"unpinned".to_vec();
-        let desc = ModelDescriptor {
-            id: ModelId("u".into()),
-            family: ModelFamily::SenseVoice,
-            quant: Quant::Q8,
-            display_name: "u".into(),
-            files: vec![ModelFile {
-                name: "u.bin".into(),
-                url: url.into(),
-                sha256: String::new(),
-                size_bytes: bytes.len() as u64,
-            }],
-            languages: vec![],
-            description: String::new(),
-        };
+        let mut desc = single_file_descriptor("u", url, "u.bin", &bytes);
+        desc.files[0].sha256 = String::new(); // unpinned
         let (downloader, calls) = fake_for(url, &bytes);
         let root = tempfile::tempdir().unwrap();
         let store = FsModelStore::new(root.path(), vec![desc], Box::new(downloader));
@@ -404,6 +417,65 @@ mod tests {
         assert!(dir.join("u.bin").is_file());
         assert!(store.local_path(&ModelId("u".into())).is_some());
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn unpinned_download_rejected_when_truncated() {
+        // Unpinned, so there is no checksum — a short transfer must still be rejected on size, not
+        // accepted as a complete model.
+        let url = "https://example/t.bin";
+        let mut desc = single_file_descriptor("t", url, "t.bin", b"short");
+        desc.files[0].sha256 = String::new(); // unpinned
+        desc.files[0].size_bytes = 100; // but 100 expected → the 5 served bytes are truncated
+        let (downloader, _calls) = fake_for(url, b"short");
+        let root = tempfile::tempdir().unwrap();
+        let store = FsModelStore::new(root.path(), vec![desc], Box::new(downloader));
+
+        let err = store.ensure(&ModelId("t".into())).unwrap_err();
+        assert!(matches!(err, WispError::Model(_)));
+
+        let dir = root.path().join("t");
+        assert!(!dir.join(COMPLETE_MARKER).exists());
+        assert!(!dir.join("t.bin").exists());
+        assert!(
+            !dir.join("t.bin.part").exists(),
+            "the .part must be cleaned up"
+        );
+    }
+
+    /// A downloader that writes a partial file and then fails — mimics a connection dropped
+    /// mid-transfer, which leaves a `*.part` the store must clean up.
+    struct PartialThenError;
+    impl FileDownloader for PartialThenError {
+        fn download(&self, url: &str, dest: &Path) -> Result<()> {
+            self.download_with_progress(url, dest, &mut |_| {})
+        }
+        fn download_with_progress(
+            &self,
+            _url: &str,
+            dest: &Path,
+            _on_bytes: &mut dyn FnMut(u64),
+        ) -> Result<()> {
+            std::fs::write(dest, b"partial").unwrap();
+            Err(WispError::Model("connection dropped".into()))
+        }
+    }
+
+    #[test]
+    fn download_error_removes_the_part_file() {
+        let desc = single_file_descriptor("e", "https://example/e.bin", "e.bin", b"whatever");
+        let root = tempfile::tempdir().unwrap();
+        let store = FsModelStore::new(root.path(), vec![desc], Box::new(PartialThenError));
+
+        let err = store.ensure(&ModelId("e".into())).unwrap_err();
+        assert!(matches!(err, WispError::Model(_)));
+
+        let dir = root.path().join("e");
+        assert!(
+            !dir.join("e.bin.part").exists(),
+            "a failed download must not leave its .part behind"
+        );
+        assert!(!dir.join(COMPLETE_MARKER).exists());
     }
 
     #[test]
