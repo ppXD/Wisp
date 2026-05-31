@@ -46,6 +46,23 @@ fn stage_windows_runtime_libs() {
     for dll in DLLS {
         let src = target_dir.join(dll);
         let dst = staged.join(dll);
+
+        // sherpa-rs-sys drops these DLLs into the target dir from its own build script, but cargo
+        // doesn't order that before this one — on a clean build this script can run first, so the
+        // DLL may not be there yet. Re-run staging once it lands.
+        println!("cargo:rerun-if-changed={}", src.display());
+
+        // A missing source is not fatal: a plain `cargo build` (CI's compile check) never bundles,
+        // and the release `tauri build` re-stages once the DLL is in place. Panicking here only made
+        // the compile-only build flaky, so warn and skip instead.
+        if !src.exists() {
+            println!(
+                "cargo:warning=runtime DLL {dll} not staged yet (not in target dir); skipping — \
+                 fine for a compile-only build"
+            );
+            continue;
+        }
+
         let current = std::fs::metadata(&dst)
             .ok()
             .zip(std::fs::metadata(&src).ok())
