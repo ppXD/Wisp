@@ -1443,6 +1443,7 @@ dependencies = [
  "hound",
  "num_cpus",
  "sherpa-rs",
+ "sherpa-rs-sys",
  "wisp-core",
  "wisp-pipeline",
 ]
