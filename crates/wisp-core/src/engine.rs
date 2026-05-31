@@ -100,6 +100,13 @@ pub trait AsrEngine: Send {
         self.transcribe(audio, sample_rate)
     }
 
+    /// Whether [`transcribe_clip`](Self::transcribe_clip) drives the [`ClipOptions::progress`] sink
+    /// as it decodes. Engines with a native long-form path (whisper.cpp) report; the default
+    /// one-shot path can't, so a caller that wants a progress bar must window the clip itself.
+    fn reports_clip_progress(&self) -> bool {
+        false
+    }
+
     /// Configures the streaming [`transcribe`](Self::transcribe) path: a biasing `prompt` (names,
     /// jargon) and whether to use beam search (more accurate, slower) instead of greedy decoding.
     ///
