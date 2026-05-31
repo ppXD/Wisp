@@ -129,6 +129,13 @@ unsafe extern "C" fn progress_trampoline(
 pub struct WhisperCppEngine {
     ctx: *mut sys::whisper_context,
     language: CString,
+    /// True when the user left the language on auto-detect. Only then does the live path lock onto
+    /// the first detected language, so short utterances stop re-detecting and flapping (see
+    /// `transcribe`).
+    auto: bool,
+    /// Sticky language locked from the first real auto-detected utterance and reused for the rest of
+    /// the session, so per-utterance detection can't drift. `None` until locked (or when not on auto).
+    detected_language: Option<CString>,
     n_threads: i32,
     thresholds: DecodeThresholds,
     /// Static streaming-path (live) biasing hints (names, jargon), set via `configure_streaming`.
@@ -157,6 +164,7 @@ impl WhisperCppEngine {
     pub fn new(model: &Path, language: &str) -> Result<Self> {
         let model_c = CString::new(model.to_string_lossy().as_bytes())
             .map_err(|_| WispError::Engine("model path has an interior NUL".to_owned()))?;
+        let auto = language.trim().is_empty() || language.trim() == "auto";
         let language = CString::new(if language.is_empty() {
             "auto"
         } else {
@@ -181,6 +189,8 @@ impl WhisperCppEngine {
         Ok(Self {
             ctx,
             language,
+            auto,
+            detected_language: None,
             n_threads: decode_threads(),
             thresholds: thresholds_from_env(),
             stream_hints: String::new(),
@@ -219,12 +229,22 @@ impl AsrEngine for WhisperCppEngine {
         let prompt_c = CString::new(combined_prompt(&self.stream_hints, &self.rolling_context))
             .unwrap_or_default();
 
-        // SAFETY: `self.ctx` is a live context; `audio` is a valid slice; `self.language` and
-        // `prompt_c` outlive the call so their pointers stay valid through `whisper_full`.
-        let text = unsafe {
+        // Sticky language: reuse the locked language once auto-detect has settled, else the
+        // configured one ("auto" until then). Read from `self`, so the pointer stays valid through
+        // `whisper_full`. `want_detect` gates the post-decode FFI read to when we still need to lock.
+        let language_ptr = self
+            .detected_language
+            .as_deref()
+            .unwrap_or(self.language.as_c_str())
+            .as_ptr();
+        let want_detect = self.auto && self.detected_language.is_none();
+
+        // SAFETY: `self.ctx` is a live context; `audio` is a valid slice; the language and
+        // `prompt_c` pointers outlive the call so they stay valid through `whisper_full`.
+        let (text, detected) = unsafe {
             let mut params = sys::whisper_full_default_params(strategy);
             params.n_threads = self.n_threads;
-            params.language = self.language.as_ptr();
+            params.language = language_ptr;
             params.translate = false;
             params.no_context = true; // no carried decoder state — context is text-only, via the prompt
             params.no_timestamps = true;
@@ -252,8 +272,25 @@ impl AsrEngine for WhisperCppEngine {
                     text.push_str(&CStr::from_ptr(ptr).to_string_lossy());
                 }
             }
-            text
+            // Read what language whisper settled on, but only while we still need to lock one.
+            let detected = if want_detect {
+                detected_language_code(self.ctx)
+            } else {
+                String::new()
+            };
+            (text, detected)
         };
+
+        // Lock the session language the first time real speech yields a detection, so later short
+        // utterances can't independently re-detect and flap between languages.
+        if should_lock_language(
+            self.auto,
+            self.detected_language.is_some(),
+            !text.trim().is_empty(),
+            &detected,
+        ) {
+            self.detected_language = CString::new(detected).ok();
+        }
 
         Ok(to_result(text.trim(), audio))
     }
@@ -401,6 +438,37 @@ fn to_result(text: &str, audio: &[f32]) -> TranscriptionResult {
     }
 }
 
+/// Whether the live auto-detect should lock onto `detected` as the session language. Locks only when
+/// the user left the language on auto, nothing is locked yet, the utterance produced text, and the
+/// detection is a real language code (not empty or `"auto"`). Pure, so the policy is testable with no
+/// model loaded.
+fn should_lock_language(
+    auto: bool,
+    already_locked: bool,
+    produced_text: bool,
+    detected: &str,
+) -> bool {
+    auto && !already_locked && produced_text && !detected.is_empty() && detected != "auto"
+}
+
+/// The language whisper.cpp settled on for the last `whisper_full` decode, as its short code (e.g.
+/// `"en"`, `"zh"`), or `""` if unavailable.
+///
+/// # Safety
+/// `ctx` must be a live whisper context that has just completed a `whisper_full` call.
+unsafe fn detected_language_code(ctx: *mut sys::whisper_context) -> String {
+    let id = sys::whisper_full_lang_id(ctx);
+    if id < 0 {
+        return String::new();
+    }
+    let ptr = sys::whisper_lang_str(id);
+    if ptr.is_null() {
+        String::new()
+    } else {
+        CStr::from_ptr(ptr).to_string_lossy().into_owned()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,6 +521,32 @@ mod tests {
         );
         // Surrounding whitespace on either part is trimmed before joining.
         assert_eq!(combined_prompt("  hints  ", "  ctx  "), "hints ctx");
+    }
+
+    #[test]
+    fn locks_language_on_first_real_auto_detection() {
+        // Auto, nothing locked yet, this utterance produced text, real code → lock it.
+        assert!(should_lock_language(true, false, true, "en"));
+    }
+
+    #[test]
+    fn does_not_lock_when_language_is_pinned() {
+        // User chose a language explicitly → never override it with a detection.
+        assert!(!should_lock_language(false, false, true, "en"));
+    }
+
+    #[test]
+    fn does_not_lock_again_once_locked() {
+        // Already locked → keep it; later utterances must not re-detect.
+        assert!(!should_lock_language(true, true, true, "ja"));
+    }
+
+    #[test]
+    fn does_not_lock_on_silence_or_unknown_detection() {
+        // No text (silence/noise), or a non-language detection, must not lock a bogus language.
+        assert!(!should_lock_language(true, false, false, "en"));
+        assert!(!should_lock_language(true, false, true, ""));
+        assert!(!should_lock_language(true, false, true, "auto"));
     }
 
     #[test]
