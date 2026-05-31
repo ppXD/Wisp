@@ -9,6 +9,8 @@ license = "MIT"
 wisp-core = { path = "../wisp-core" }
 wisp-pipeline = { path = "../wisp-pipeline" }
 sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }
+# Physical-core detection for the ASR thread count (pure Rust; no native lib linked).
+num_cpus = "1"
 
 [dev-dependencies]
 hound = "3.5"

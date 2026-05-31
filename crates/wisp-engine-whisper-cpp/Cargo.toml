@@ -7,6 +7,8 @@ license = "MIT"
 
 [dependencies]
 wisp-core = { path = "../wisp-core" }
+# Physical-core detection for the decode thread count (pure Rust; no native lib linked).
+num_cpus = "1"
 
 [build-dependencies]
 cmake = "0.1"
