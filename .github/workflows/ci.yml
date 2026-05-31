@@ -69,5 +69,11 @@ jobs:
         run: |
           npm ci
           npm run build
+      # Build the sherpa engine first so sherpa-rs-sys drops the onnxruntime / sherpa DLLs into the
+      # target dir before the app's build.rs stages them for tauri's `resources` check. Cargo doesn't
+      # order one build script before a dependent's, so a single `cargo build` can run the app's
+      # build.rs first and fail on the not-yet-present DLLs; a separate prior step removes that race.
+      - name: Stage sherpa runtime DLLs
+        run: cargo build --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
       - name: Build the app
         run: cargo build --manifest-path app/src-tauri/Cargo.toml

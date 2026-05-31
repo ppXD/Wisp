@@ -61,6 +61,11 @@ jobs:
       - name: Install frontend deps
         working-directory: app
         run: npm ci
+      # Drop the sherpa / onnxruntime runtime DLLs into the target dir before `tauri build` runs the
+      # app's build.rs, which stages them for the bundle's `resources`. Cargo doesn't order one build
+      # script before a dependent's, so building the engine first removes that race for the installer.
+      - name: Stage sherpa runtime DLLs
+        run: cargo build --release --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
       - name: Build the app installers
         working-directory: app
         run: npm run tauri build
