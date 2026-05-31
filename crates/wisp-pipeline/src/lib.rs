@@ -21,4 +21,4 @@ pub use segmenter::{EnergySegmenter, Segmenter, Utterance};
 pub use session::{EventSink, Session};
 pub use transcriber::Transcriber;
 pub use vad::{EnergyVad, Vad};
-pub use window::window_bounds;
+pub use window::{transcribe_in_windows, window_bounds};
