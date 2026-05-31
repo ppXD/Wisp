@@ -700,6 +700,13 @@
             {/if}
           {/if}
 
+          <!-- Before download, surface that whisper.cpp models also support an optional ANE boost. -->
+          {#if chosenModel && !chosenModel.installed && chosenModel.coremlAvailable}
+            <span class="coreml-hint">
+              ⚡ Supports Neural Engine acceleration · optional {fmtSize(chosenModel.coremlSizeBytes)} after install
+            </span>
+          {/if}
+
           <!-- Optional Apple Neural Engine encoder for installed whisper.cpp models. -->
           {#if chosenModel && chosenModel.installed && chosenModel.coremlAvailable}
             {#if chosenModel.coremlInstalled}
@@ -1623,6 +1630,11 @@
     font-size: 13px;
     color: var(--accent);
     font-weight: 500;
+  }
+
+  .coreml-hint {
+    font-size: 13px;
+    color: var(--muted);
   }
 
   .notice {
