@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use wisp_audio::{to_mono_16k, TARGET_SAMPLE_RATE};
+use wisp_audio::{Resampler16k, TARGET_SAMPLE_RATE};
 use wisp_core::audio::AudioSource;
 use wisp_core::denoise::Denoiser;
 use wisp_core::engine::StreamingAsrEngine;
@@ -240,11 +240,12 @@ fn run_capture(
     let mut next_id: u64 = 0;
     let mut open_id: Option<u64> = None;
     let mut since_partial = Duration::ZERO;
+    let mut resampler = Resampler16k::new();
 
     while !stop.load(Ordering::Relaxed) {
         match source.next_frame()? {
             Some(frame) => {
-                let mono = to_mono_16k(&frame);
+                let mono = resampler.process(&frame);
                 let mono = match &mut denoiser {
                     Some(d) => d.denoise(&mono, TARGET_SAMPLE_RATE),
                     None => mono,
@@ -292,6 +293,7 @@ fn run_streaming(
 ) -> Result<()> {
     let mut id: u64 = 0;
     let mut utterance_start: Option<Duration> = None;
+    let mut resampler = Resampler16k::new();
 
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = source.next_frame()? else {
@@ -299,7 +301,7 @@ fn run_streaming(
         };
         let start = *utterance_start.get_or_insert(frame.timestamp);
 
-        let mono = to_mono_16k(&frame);
+        let mono = resampler.process(&frame);
         let mono = match &mut denoiser {
             Some(d) => d.denoise(&mono, TARGET_SAMPLE_RATE),
             None => mono,
