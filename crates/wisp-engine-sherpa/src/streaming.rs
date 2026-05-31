@@ -15,6 +15,7 @@
 use std::ffi::{CStr, CString};
 use std::path::Path;
 
+use wisp_core::engine::{StreamingAsrEngine, StreamingResult};
 use wisp_core::error::{Result, WispError};
 
 /// Endpoint detection: finalize after this much trailing silence even if nothing was decoded.
@@ -25,16 +26,6 @@ const RULE2_MIN_TRAILING_SILENCE: f32 = 1.2;
 /// Endpoint detection: force a boundary once an utterance runs this long, so a monologue still
 /// finalizes periodically.
 const RULE3_MIN_UTTERANCE_LENGTH: f32 = 20.0;
-
-/// One incremental result from [`StreamingTransducerEngine::accept_waveform`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct StreamingResult {
-    /// The current hypothesis for the in-progress utterance (grows as more audio arrives).
-    pub text: String,
-    /// True when an utterance boundary was just reached: treat `text` as final. The stream is reset
-    /// internally, so the next call begins a fresh utterance.
-    pub is_endpoint: bool,
-}
 
 /// A streaming online transducer (Zipformer) recognizer.
 ///
@@ -106,10 +97,32 @@ impl StreamingTransducerEngine {
         Ok(Self { recognizer, stream })
     }
 
+    /// Reads the recognizer's current hypothesis text, freeing the result it allocates.
+    ///
+    /// # Safety
+    /// `self.recognizer`/`self.stream` must be live.
+    unsafe fn current_text(&self) -> String {
+        let result = sherpa_rs_sys::SherpaOnnxGetOnlineStreamResult(self.recognizer, self.stream);
+        if result.is_null() {
+            return String::new();
+        }
+        let text = if (*result).text.is_null() {
+            String::new()
+        } else {
+            CStr::from_ptr((*result).text)
+                .to_string_lossy()
+                .into_owned()
+        };
+        sherpa_rs_sys::SherpaOnnxDestroyOnlineRecognizerResult(result);
+        text
+    }
+}
+
+impl StreamingAsrEngine for StreamingTransducerEngine {
     /// Feeds a chunk of 16 kHz mono `f32` audio and returns the updated hypothesis. When the
     /// recognizer detects an utterance endpoint, the result's `is_endpoint` is true and the stream
     /// is reset for the next utterance.
-    pub fn accept_waveform(&mut self, sample_rate: u32, samples: &[f32]) -> StreamingResult {
+    fn accept_waveform(&mut self, sample_rate: u32, samples: &[f32]) -> StreamingResult {
         let rate = if sample_rate == 0 {
             16_000
         } else {
@@ -141,29 +154,9 @@ impl StreamingTransducerEngine {
     }
 
     /// Drops any in-progress hypothesis and starts a fresh utterance (e.g. on session restart).
-    pub fn reset(&mut self) {
+    fn reset(&mut self) {
         // SAFETY: recognizer/stream are live for the lifetime of `self`.
         unsafe { sherpa_rs_sys::SherpaOnnxOnlineStreamReset(self.recognizer, self.stream) };
-    }
-
-    /// Reads the recognizer's current hypothesis text, freeing the result it allocates.
-    ///
-    /// # Safety
-    /// `self.recognizer`/`self.stream` must be live.
-    unsafe fn current_text(&self) -> String {
-        let result = sherpa_rs_sys::SherpaOnnxGetOnlineStreamResult(self.recognizer, self.stream);
-        if result.is_null() {
-            return String::new();
-        }
-        let text = if (*result).text.is_null() {
-            String::new()
-        } else {
-            CStr::from_ptr((*result).text)
-                .to_string_lossy()
-                .into_owned()
-        };
-        sherpa_rs_sys::SherpaOnnxDestroyOnlineRecognizerResult(result);
-        text
     }
 }
 
@@ -188,6 +181,7 @@ fn path_cstring(p: &Path) -> Result<CString> {
 mod tests {
     use super::*;
     use std::path::PathBuf;
+    use wisp_core::engine::StreamingAsrEngine;
 
     /// End-to-end (real streaming inference): loads a streaming Zipformer transducer and feeds a
     /// fixture WAV in small chunks, asserting it produces text and reaches an endpoint. Skip-guarded
