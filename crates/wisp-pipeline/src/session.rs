@@ -9,8 +9,9 @@ use std::time::{Duration, Instant};
 use wisp_audio::{to_mono_16k, TARGET_SAMPLE_RATE};
 use wisp_core::audio::AudioSource;
 use wisp_core::denoise::Denoiser;
+use wisp_core::engine::StreamingAsrEngine;
 use wisp_core::error::{Result, WispError};
-use wisp_core::transcript::{SegmentStatus, TranscriptEvent};
+use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 
 use crate::pipeline::Pipeline;
 use crate::segmenter::{Segmenter, Utterance};
@@ -153,6 +154,42 @@ impl Session {
         }
     }
 
+    /// Spawns a *streaming* live session: a single thread feeds captured audio chunk-by-chunk to an
+    /// online `engine` that emits a growing hypothesis and finalizes on its own endpoint detection.
+    ///
+    /// Unlike [`spawn_live`](Self::spawn_live) — which VAD-segments utterances and transcribes each
+    /// whole on a decoupled thread — a streaming engine decodes incrementally and cheaply per chunk,
+    /// so capture and recognition share one thread without stalling. Each non-empty hypothesis is
+    /// forwarded as a `Partial` segment the UI updates in place by id; on an endpoint it's sent
+    /// `Final` and the next utterance gets a fresh id. `denoiser`, when present, cleans each chunk
+    /// first. `kind` tags every segment with which source it came from.
+    pub fn spawn_streaming(
+        mut engine: Box<dyn StreamingAsrEngine>,
+        mut source: Box<dyn AudioSource>,
+        mut sink: EventSink,
+        denoiser: Option<Box<dyn Denoiser>>,
+        kind: AudioSourceKind,
+    ) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stop_for_thread = Arc::clone(&stop);
+
+        let handle = thread::spawn(move || {
+            run_streaming(
+                &mut *engine,
+                &mut *source,
+                denoiser,
+                &mut sink,
+                kind,
+                &stop_for_thread,
+            )
+        });
+
+        Self {
+            stop,
+            handles: vec![handle],
+        }
+    }
+
     /// Signals the session to stop and waits for its thread(s) to finish, returning the first
     /// error encountered. Use this for live sources (e.g. a microphone) that never end on their
     /// own.
@@ -234,6 +271,63 @@ fn run_capture(
     for utterance in segmenter.flush() {
         let id = open_id.take().unwrap_or_else(|| alloc_id(&mut next_id));
         let _ = job_tx.send(Job::Final(id, utterance));
+    }
+    Ok(())
+}
+
+/// Streaming capture+recognition loop for [`Session::spawn_streaming`]: pull frames, convert each to
+/// 16 kHz mono (optionally denoised), feed it to `engine`, and forward the growing hypothesis as
+/// `Partial`/`Final` segments until `stop` is set or the source ends.
+///
+/// All partials of one utterance share an id with the `Final` that closes it, so the UI updates a
+/// single row in place; the engine's own endpoint detection commits the utterance and advances to a
+/// fresh id and start time.
+fn run_streaming(
+    engine: &mut dyn StreamingAsrEngine,
+    source: &mut dyn AudioSource,
+    mut denoiser: Option<Box<dyn Denoiser>>,
+    sink: &mut EventSink,
+    kind: AudioSourceKind,
+    stop: &AtomicBool,
+) -> Result<()> {
+    let mut id: u64 = 0;
+    let mut utterance_start: Option<Duration> = None;
+
+    while !stop.load(Ordering::Relaxed) {
+        let Some(frame) = source.next_frame()? else {
+            break;
+        };
+        let start = *utterance_start.get_or_insert(frame.timestamp);
+
+        let mono = to_mono_16k(&frame);
+        let mono = match &mut denoiser {
+            Some(d) => d.denoise(&mono, TARGET_SAMPLE_RATE),
+            None => mono,
+        };
+
+        let result = engine.accept_waveform(TARGET_SAMPLE_RATE, &mono);
+        if !result.text.is_empty() {
+            let mut segment = TranscriptSegment::new(
+                id,
+                &result.text,
+                start..(frame.timestamp + frame.duration()),
+                kind,
+            );
+            segment.status = if result.is_endpoint {
+                SegmentStatus::Final
+            } else {
+                SegmentStatus::Partial
+            };
+            sink(TranscriptEvent::Segment(segment));
+        }
+        if result.is_endpoint {
+            // A committed utterance (one that produced text) advances to a fresh id; an empty
+            // endpoint just resets the start so the next utterance reuses this id.
+            if !result.text.is_empty() {
+                id += 1;
+            }
+            utterance_start = None;
+        }
     }
     Ok(())
 }
@@ -502,6 +596,83 @@ mod tests {
             calls.load(Ordering::Relaxed),
             4,
             "the denoiser runs once per captured frame"
+        );
+    }
+
+    #[test]
+    fn spawn_streaming_shares_an_id_across_partials_then_finalizes_per_utterance() {
+        use std::collections::VecDeque;
+        use wisp_core::engine::{StreamingAsrEngine, StreamingResult};
+        use wisp_core::transcript::SegmentStatus;
+
+        // A scripted streaming engine: one result per `accept_waveform` call.
+        struct Scripted(VecDeque<StreamingResult>);
+        impl StreamingAsrEngine for Scripted {
+            fn accept_waveform(&mut self, _rate: u32, _samples: &[f32]) -> StreamingResult {
+                self.0.pop_front().unwrap_or(StreamingResult {
+                    text: String::new(),
+                    is_endpoint: false,
+                })
+            }
+            fn reset(&mut self) {}
+        }
+
+        let frames = vec![
+            frame(0.5, 0),
+            frame(0.5, 100),
+            frame(0.5, 200),
+            frame(0.5, 300),
+        ];
+        let source: Box<dyn AudioSource> = Box::new(MockAudioSource::new(frames));
+        let results = VecDeque::from(vec![
+            StreamingResult {
+                text: "he".to_owned(),
+                is_endpoint: false,
+            },
+            StreamingResult {
+                text: "hello".to_owned(),
+                is_endpoint: false,
+            },
+            StreamingResult {
+                text: "hello.".to_owned(),
+                is_endpoint: true,
+            },
+            StreamingResult {
+                text: "next".to_owned(),
+                is_endpoint: false,
+            },
+        ]);
+
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+
+        let session = Session::spawn_streaming(
+            Box::new(Scripted(results)),
+            source,
+            sink,
+            None,
+            AudioSourceKind::Microphone,
+        );
+        session.join().unwrap();
+
+        let segs: Vec<(u64, String, SegmentStatus)> = rx
+            .try_iter()
+            .map(|e| match e {
+                TranscriptEvent::Segment(s) => (s.id, s.text, s.status),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(
+            segs,
+            vec![
+                (0, "he".to_owned(), SegmentStatus::Partial),
+                (0, "hello".to_owned(), SegmentStatus::Partial),
+                (0, "hello.".to_owned(), SegmentStatus::Final),
+                (1, "next".to_owned(), SegmentStatus::Partial),
+            ],
+            "partials share the utterance id, the endpoint finalizes it, and the next utterance gets a fresh id"
         );
     }
 
