@@ -16,10 +16,12 @@ mod denoise;
 mod diarize;
 mod live_diarize;
 mod silero;
+mod streaming;
 pub use denoise::GtcrnDenoiser;
 pub use diarize::SherpaDiarizer;
 pub use live_diarize::SherpaLiveDiarizer;
 pub use silero::SileroSegmenter;
+pub use streaming::{StreamingResult, StreamingTransducerEngine};
 
 use std::path::Path;
 use std::time::Duration;

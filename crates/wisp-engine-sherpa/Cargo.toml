@@ -9,6 +9,9 @@ license = "MIT"
 wisp-core = { path = "../wisp-core" }
 wisp-pipeline = { path = "../wisp-pipeline" }
 sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }
+# Direct access to the sys layer for the online (streaming) recognizer API, which sherpa-rs only
+# wraps for offline use. Feature-matched to sherpa-rs's own dep so cargo unifies to one sys build.
+sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["download-binaries"] }
 # Physical-core detection for the ASR thread count (pure Rust; no native lib linked).
 num_cpus = "1"
 
