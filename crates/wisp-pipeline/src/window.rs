@@ -1,12 +1,24 @@
-//! Splitting a clip into transcription windows that break at quiet points.
+//! Splitting a clip into transcription windows that break at quiet points, and transcribing it
+//! window by window.
 //!
 //! Engines without a native progress callback (the sherpa offline recognizers) decode a whole clip
 //! in one opaque call, so the only way to show a real percentage is to transcribe the clip in pieces
 //! and report after each. A naive cut every N seconds can slice a word in half; [`window_bounds`]
 //! snaps each cut to the quietest short frame nearby, so windows break in pauses instead of mid-word.
+//! [`transcribe_in_windows`] drives an engine over those windows and stitches the result back onto
+//! the clip timeline.
+
+use std::time::Duration;
+
+use wisp_core::engine::{AsrEngine, ClipOptions};
+use wisp_core::error::Result;
+use wisp_core::transcript::TranscriptSegment;
 
 /// 16 kHz mono — the rate the whole pipeline runs at.
 const SAMPLE_RATE: usize = 16_000;
+
+/// Target transcription-window length: Whisper's native 30 s window (and SenseVoice's too).
+const WINDOW_SECS: usize = 30;
 
 /// One analysis frame for the quiet-point search: 20 ms.
 const FRAME: usize = SAMPLE_RATE / 50;
@@ -63,9 +75,54 @@ fn quietest_cut(audio: &[f32], ideal: usize, radius: usize) -> usize {
     best
 }
 
+/// Transcribes `audio` in windows that break at quiet points (see [`window_bounds`]), offsetting
+/// each window's segment and word timestamps onto the clip timeline and reporting progress after
+/// each window. For engines that decode a whole clip in one opaque call (the sherpa offline
+/// recognizers) and so can't report their own progress; whisper.cpp uses its native long-form path
+/// instead. SenseVoice is non-autoregressive (no cross-window context to lose), so windowing barely
+/// affects accuracy and yields finer segments than the single block it would otherwise produce.
+pub fn transcribe_in_windows(
+    engine: &mut dyn AsrEngine,
+    audio: &[f32],
+    sample_rate: u32,
+    timestamps: bool,
+    beam: bool,
+    prompt: &str,
+    on_progress: &dyn Fn(u8),
+) -> Result<Vec<TranscriptSegment>> {
+    let target = sample_rate as usize * WINDOW_SECS;
+    let radius = sample_rate as usize / 2; // snap each cut within ±0.5 s of the ideal
+    let bounds = window_bounds(audio, target, radius);
+    let total = bounds.len().max(1);
+
+    let mut collected = Vec::new();
+    for (i, &(start, end)) in bounds.iter().enumerate() {
+        let offset = Duration::from_secs_f64(start as f64 / sample_rate as f64);
+        let result = engine.transcribe_clip(
+            &audio[start..end],
+            sample_rate,
+            ClipOptions::new(timestamps, beam, prompt),
+        )?;
+        for mut segment in result.segments {
+            segment.start += offset;
+            segment.end += offset;
+            for word in &mut segment.words {
+                word.start += offset;
+                word.end += offset;
+            }
+            collected.push(segment);
+        }
+        on_progress(((i + 1) * 100 / total) as u8);
+    }
+    Ok(collected)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::{Cell, RefCell};
+    use wisp_core::engine::{EngineInfo, TranscriptionResult};
+    use wisp_core::transcript::{AudioSourceKind, Word};
 
     #[test]
     fn empty_audio_has_no_windows() {
@@ -109,5 +166,94 @@ mod tests {
             gap_start + gap_len
         );
         assert_ne!(cut, 3_000, "did not cut at the loud ideal point");
+    }
+
+    /// A mock engine returning one segment per call spanning the window it was handed — in
+    /// window-local time (`0..len`), with one word over the same span, tagged by call index — so a
+    /// test can check each window's offset reaches both the segment and its words.
+    struct PerWindowEngine {
+        calls: Cell<u32>,
+    }
+
+    impl AsrEngine for PerWindowEngine {
+        fn info(&self) -> EngineInfo {
+            EngineInfo {
+                name: "mock".to_owned(),
+                streaming: false,
+            }
+        }
+
+        fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
+            let n = self.calls.get();
+            self.calls.set(n + 1);
+            let span =
+                Duration::ZERO..Duration::from_secs_f32(audio.len() as f32 / sample_rate as f32);
+            let mut segment =
+                TranscriptSegment::new(0, format!("w{n}"), span.clone(), AudioSourceKind::File);
+            segment.words = vec![Word {
+                text: format!("w{n}"),
+                start: span.start,
+                end: span.end,
+            }];
+            Ok(TranscriptionResult {
+                segments: vec![segment],
+            })
+        }
+    }
+
+    #[test]
+    fn windowed_transcription_offsets_each_window_onto_the_clip_timeline() {
+        // sample_rate 10 → a 30 s window is 300 samples, so a 1 000-sample clip spans several
+        // windows. The engine returns window-local timestamps; transcribe_in_windows must offset
+        // each onto the clip timeline so segments tile forward without overlap.
+        let mut engine = PerWindowEngine {
+            calls: Cell::new(0),
+        };
+        let audio = vec![0.3f32; 1_000];
+        let pcts = RefCell::new(Vec::new());
+
+        let segs = transcribe_in_windows(&mut engine, &audio, 10, true, false, "", &|p| {
+            pcts.borrow_mut().push(p)
+        })
+        .unwrap();
+
+        assert!(
+            segs.len() >= 3,
+            "1 000 samples in ~300-sample windows → ≥3 segments"
+        );
+        assert_eq!(
+            segs[0].start,
+            Duration::ZERO,
+            "the first window starts at 0"
+        );
+        for pair in segs.windows(2) {
+            assert!(
+                pair[1].start >= pair[0].end,
+                "windows are offset in capture order with no overlap"
+            );
+        }
+        // The word timestamps are offset alongside their segment.
+        assert_eq!(segs[0].words[0].start, segs[0].start);
+        let last = segs.last().unwrap();
+        assert_eq!(last.words[0].end, last.end);
+        assert_eq!(*pcts.borrow().last().unwrap(), 100, "progress ends at 100%");
+    }
+
+    #[test]
+    fn windowed_transcription_of_a_sub_window_clip_is_one_tick_at_100() {
+        let mut engine = PerWindowEngine {
+            calls: Cell::new(0),
+        };
+        let audio = vec![0.3f32; 50]; // smaller than one 300-sample window
+        let pcts = RefCell::new(Vec::new());
+
+        let segs = transcribe_in_windows(&mut engine, &audio, 10, false, false, "", &|p| {
+            pcts.borrow_mut().push(p)
+        })
+        .unwrap();
+
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].start, Duration::ZERO);
+        assert_eq!(*pcts.borrow(), vec![100]);
     }
 }

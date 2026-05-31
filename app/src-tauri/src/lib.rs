@@ -39,8 +39,8 @@ use wisp_models::{
     recommended_default_model, Accelerator, FsModelStore, HttpDownloader, MachineProfile,
 };
 use wisp_pipeline::{
-    remap_to_original, window_bounds, EnergySegmenter, EnergyVad, GatedClip, Segmenter, Session,
-    Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
+    remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, Segmenter,
+    Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
 };
 #[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
@@ -1188,6 +1188,7 @@ async fn transcribe_file(
                 transcribe_in_windows(
                     engine.as_mut(),
                     asr_audio,
+                    TARGET_SAMPLE_RATE,
                     need_timestamps,
                     options.accurate,
                     &options.prompt,
@@ -1271,47 +1272,6 @@ fn build_denoiser(id: &str, model_dir: Option<&Path>) -> Option<Box<dyn Denoiser
             None
         }
     }
-}
-
-/// Transcribes `audio` in windows that break at quiet points, offsetting each window's timestamps
-/// onto the clip timeline and reporting progress after each window — for engines that decode in one
-/// opaque call (the sherpa offline recognizers) and so can't report their own progress. whisper.cpp
-/// uses its native long-form path instead. SenseVoice is non-autoregressive (no cross-window context
-/// to lose), and the cuts fall in pauses, so windowing barely affects accuracy.
-fn transcribe_in_windows(
-    engine: &mut dyn AsrEngine,
-    audio: &[f32],
-    timestamps: bool,
-    accurate: bool,
-    prompt: &str,
-    progress: &dyn Fn(u8),
-) -> WispResult<Vec<TranscriptSegment>> {
-    const WINDOW_SECS: usize = 30; // Whisper's native window length, and SenseVoice's too
-    let target = TARGET_SAMPLE_RATE as usize * WINDOW_SECS;
-    let radius = TARGET_SAMPLE_RATE as usize / 2; // snap each cut within ±0.5 s of the ideal
-    let bounds = window_bounds(audio, target, radius);
-    let total = bounds.len().max(1);
-
-    let mut collected = Vec::new();
-    for (i, &(start, end)) in bounds.iter().enumerate() {
-        let offset = Duration::from_secs_f64(start as f64 / TARGET_SAMPLE_RATE as f64);
-        let result = engine.transcribe_clip(
-            &audio[start..end],
-            TARGET_SAMPLE_RATE,
-            ClipOptions::new(timestamps, accurate, prompt),
-        )?;
-        for mut segment in result.segments {
-            segment.start += offset;
-            segment.end += offset;
-            for word in &mut segment.words {
-                word.start += offset;
-                word.end += offset;
-            }
-            collected.push(segment);
-        }
-        progress(((i + 1) * 100 / total) as u8);
-    }
-    Ok(collected)
 }
 
 /// Runs the neural VAD over the whole clip and returns its speech concatenated gap-free, with a
