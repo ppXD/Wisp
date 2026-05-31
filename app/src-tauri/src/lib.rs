@@ -501,7 +501,9 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         .store
         .available()
         .into_iter()
-        .filter(|d| d.family != ModelFamily::Diarization)
+        // Only transcription models belong in the ASR picker — diarization and denoise are support
+        // models with their own pickers.
+        .filter(|d| d.family.is_asr())
         // Only offer models this machine can actually start — e.g. the Metal whisper.cpp models are
         // hidden off macOS, where building their engine would fail.
         .filter(|d| family_runnable(d.family, machine.accelerator))
