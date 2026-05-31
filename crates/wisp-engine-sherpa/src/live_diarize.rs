@@ -28,7 +28,10 @@ impl SherpaLiveDiarizer {
         let extractor = EmbeddingExtractor::new(ExtractorConfig {
             model: embedding_model.to_string_lossy().into_owned(),
             provider: None,
-            num_threads: None,
+            // Scale the embedding pass to the machine's physical cores (shared ASR thread policy).
+            // Left single-threaded it serialized every live utterance onto one core, and that extra
+            // per-utterance latency stalled real-time transcription whenever speaker labels were on.
+            num_threads: Some(crate::asr_threads() as usize),
             debug: false,
         })
         .map_err(|e| WispError::Engine(format!("live diarizer: {e}")))?;
