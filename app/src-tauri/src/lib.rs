@@ -55,6 +55,9 @@ mod permissions;
 /// Event channel the UI listens on for transcript segments.
 const SEGMENT_EVENT: &str = "transcript://segment";
 
+/// Event channel the UI listens on for a live cloud-streaming error (so a failure isn't silent).
+const LIVE_ERROR_EVENT: &str = "live://error";
+
 /// Event channel the UI listens on for model-download progress.
 const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
 
@@ -312,17 +315,6 @@ enum LiveEngine {
     },
 }
 
-/// Builds a cloud realtime-streaming engine for `protocol`. Only the OpenAI Realtime protocol
-/// streams today; other cloud protocols are file-only until their realtime adapter lands.
-fn build_cloud_streaming_engine(protocol: CloudProtocol, model: &str, key: &str, language: &str, params: &ParamValues) -> WispResult<Box<dyn StreamingAsrEngine>> {
-    match protocol {
-        CloudProtocol::OpenAi => Ok(Box::new(OpenAiRealtimeEngine::new(model, key, language, params)?)),
-        other => Err(WispError::Engine(format!(
-            "live cloud streaming isn't supported for {other:?} yet — use it in File mode"
-        ))),
-    }
-}
-
 /// The advanced parameter specs a cloud `provider` exposes for live streaming, or none if it can't
 /// stream. A new streaming provider declares its knobs here and the UI renders them unchanged.
 fn streaming_param_specs(provider: &CloudProvider) -> Vec<ParamSpec> {
@@ -478,8 +470,28 @@ fn spawn_session(
             key,
             params,
         } => {
-            let engine =
-                build_cloud_streaming_engine(*protocol, model, key, &settings.language, params)?;
+            // Surface session errors (bad key/model, server error, dropped connection) to the UI so
+            // a cloud failure is never silent. Runs off the audio thread.
+            let app_err = app.clone();
+            let on_error: Box<dyn Fn(&str) + Send> =
+                Box::new(move |msg: &str| {
+                    let _ = app_err.emit(LIVE_ERROR_EVENT, msg.to_owned());
+                });
+
+            let engine: Box<dyn StreamingAsrEngine> = match protocol {
+                CloudProtocol::OpenAi => Box::new(OpenAiRealtimeEngine::new(
+                    model,
+                    key,
+                    &settings.language,
+                    params,
+                    on_error,
+                )?),
+                other => {
+                    return Err(WispError::Engine(format!(
+                        "live cloud streaming isn't supported for {other:?} yet — use it in File mode"
+                    )))
+                }
+            };
             return Ok(Session::spawn_streaming(engine, source, sink, None, kind));
         }
         LiveEngine::Local { descriptor, dir } => (descriptor, dir),

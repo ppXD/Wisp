@@ -41,6 +41,10 @@ const REALTIME_SAMPLE_RATE: u32 = 24_000;
 /// Default Realtime transcription WebSocket endpoint (overridable via [`OpenAiRealtimeEngine::REALTIME_URL_ENV`]).
 const DEFAULT_REALTIME_URL: &str = "wss://api.openai.com/v1/realtime?intent=transcription";
 
+/// Surfaces a session error the user should see (bad config, server-side error, dropped connection)
+/// — wired by the app to show a notice, so a failure is never silent. Called off the audio thread.
+pub type ErrorSink = Box<dyn Fn(&str) + Send>;
+
 /// A realtime, streaming [`StreamingAsrEngine`] backed by the OpenAI Realtime WebSocket API.
 ///
 /// Construction connects the socket and configures the transcription session (failing fast on a bad
@@ -55,6 +59,8 @@ pub struct OpenAiRealtimeEngine {
     worker: Option<JoinHandle<()>>,
     /// The in-progress utterance's accumulated partial text.
     hypothesis: String,
+    /// Reports errors to the app so they surface in the UI instead of failing silently.
+    on_error: ErrorSink,
 }
 
 impl OpenAiRealtimeEngine {
@@ -109,18 +115,26 @@ impl OpenAiRealtimeEngine {
     /// `api_key`. `language` is an ISO code, or empty to auto-detect; `params` are the advanced knobs
     /// (missing keys fall back to [`Self::param_specs`] defaults). Errors on a blank key, a failed
     /// connection, or a rejected handshake.
-    pub fn new(model: &str, api_key: &str, language: &str, params: &ParamValues) -> Result<Self> {
+    pub fn new(
+        model: &str,
+        api_key: &str,
+        language: &str,
+        params: &ParamValues,
+        on_error: ErrorSink,
+    ) -> Result<Self> {
         let key = api_key.trim();
         if key.is_empty() {
             return Err(WispError::Engine("OpenAI needs an API key".to_owned()));
         }
 
         let mut ws = connect(key)?;
-        set_nonblocking(&mut ws);
+        eprintln!("wisp: OpenAI Realtime connected (model {model})");
 
-        let configure = Message::text(build_session_update(model, language, params));
-        ws.send(configure)
+        // Configure the session while still blocking, so the update is delivered before the worker
+        // flips the socket to non-blocking and starts streaming audio.
+        ws.send(Message::text(build_session_update(model, language, params)))
             .map_err(|e| engine_err("session config", e))?;
+        set_nonblocking(&mut ws);
 
         let (audio_tx, audio_rx) = mpsc::channel::<Vec<u8>>();
         let (event_tx, event_rx) = mpsc::channel::<ServerEvent>();
@@ -135,6 +149,7 @@ impl OpenAiRealtimeEngine {
             stop,
             worker: Some(worker),
             hypothesis: String::new(),
+            on_error,
         })
     }
 
@@ -152,7 +167,11 @@ impl OpenAiRealtimeEngine {
                     final_text = Some(transcript);
                     endpoint = true;
                 }
-                ServerEvent::Failed(_) | ServerEvent::Error(_) => endpoint = true,
+                ServerEvent::Failed(msg) | ServerEvent::Error(msg) => {
+                    eprintln!("wisp: OpenAI Realtime error: {msg}");
+                    (self.on_error)(&msg);
+                    endpoint = true;
+                }
                 ServerEvent::Other => {}
             }
         }
@@ -275,9 +294,14 @@ fn run_socket(
         loop {
             match ws.read() {
                 Ok(Message::Text(text)) => {
+                    // Diagnostic: surface exactly what the server sends (truncated) to the dev log,
+                    // so a "connected but nothing transcribed" session is debuggable.
+                    let snippet: String = text.chars().take(220).collect();
+                    eprintln!("wisp realtime ◀ {snippet}");
                     let _ = event_tx.send(parse_server_event(text.as_str()));
                 }
-                Ok(Message::Close(_)) => {
+                Ok(Message::Close(frame)) => {
+                    eprintln!("wisp: OpenAI Realtime closed: {frame:?}");
                     let _ = event_tx.send(ServerEvent::Error("connection closed".to_owned()));
                     return;
                 }
