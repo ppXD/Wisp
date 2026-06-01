@@ -69,7 +69,6 @@
   let unlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
-  const canStart = $derived(!!activeModel?.installed);
 
   // Which model the picker is showing. Defaults to the active one once models load.
   let chosenId = $state("");
@@ -77,6 +76,10 @@
     if (!chosenId && models.length) chosenId = (models.find((m) => m.active) ?? models[0]).id;
   });
   const chosenModel = $derived(models.find((m) => m.id === chosenId));
+
+  // Ready to start once the *chosen* model is installed. Picking a not-yet-downloaded model must
+  // never silently run a different (previously-active) model — Live and File both gate on this.
+  const canStart = $derived(!!chosenModel?.installed);
 
   async function pickModel(id: string) {
     chosenId = id;
@@ -498,8 +501,8 @@
 
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
-    if (fileEngine === "local" && !canStart) {
-      error = "Download a model in the Live tab first.";
+    if (fileEngine === "local" && !chosenModel?.installed) {
+      error = `Download ${chosenModel?.name ?? "the model"} first.`;
       return;
     }
     if (fileEngine === "cloud" && !fileCloudReady) {
@@ -550,8 +553,8 @@
   }
 
   async function pickFile() {
-    if (fileEngine === "local" && !canStart) {
-      error = "Download a model in the Live tab first.";
+    if (fileEngine === "local" && !chosenModel?.installed) {
+      error = `Download ${chosenModel?.name ?? "the model"} first.`;
       return;
     }
     if (fileEngine === "cloud" && !fileCloudReady) {
@@ -1112,6 +1115,27 @@
             {/if}
           </div>
         {/if}
+        {#if fileEngine === "local" && chosenModel && !chosenModel.installed}
+          <div class="box-aux">
+            {#if downloading === chosenModel.id && downloadProgress}
+              <div class="dl-bar">
+                <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
+                <span class="dl-label">
+                  {downloadPct}% · {fmtSize(downloadProgress.downloaded)} / {fmtSize(downloadProgress.total)}
+                </span>
+              </div>
+            {:else}
+              <button
+                class="btn outline"
+                onclick={() => download(chosenModel.id)}
+                disabled={downloading !== null}
+              >
+                {downloadFailed === chosenModel.id ? "Retry download" : "Download"} · {chosenModel.name}
+                · {fmtSize(chosenModel.sizeBytes)}
+              </button>
+            {/if}
+          </div>
+        {/if}
         <button
           class="dropzone"
           class:over={dragOver}
@@ -1130,11 +1154,11 @@
               {:else}
                 Add your {fileProv?.name ?? "provider"} API key to transcribe in the cloud.
               {/if}
-            {:else if canStart}
+            {:else if chosenModel?.installed}
               mp3, m4a, wav, flac, mp4, mov… transcribed locally with
-              <strong>{activeModel?.name}</strong>.
+              <strong>{chosenModel.name}</strong>.
             {:else}
-              Download a model in the Live tab first.
+              <strong>{chosenModel?.name}</strong> isn't downloaded yet — get it below to transcribe.
             {/if}
           </p>
         </button>
