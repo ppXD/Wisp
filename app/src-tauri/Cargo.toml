@@ -35,6 +35,8 @@ wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 # sherpa-onnx engines (SenseVoice, Whisper-ONNX, diarization, denoise) — cross-platform.
 wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa" }
+# Opt-in cloud transcription engine (HTTP) — cross-platform.
+wisp-engine-cloud = { path = "../../crates/wisp-engine-cloud" }
 
 # macOS-only native deps. System-audio capture (ScreenCaptureKit), WebRTC AEC (needs meson), the
 # Metal Whisper engine, and the AVFoundation/sysctl helpers all live here; other platforms degrade

@@ -33,6 +33,20 @@
     coremlSizeBytes: number;
   };
 
+  type CloudModel = {
+    id: string;
+    name: string;
+    streaming: boolean;
+    batch: boolean;
+    description: string;
+  };
+  type CloudProvider = {
+    id: string;
+    name: string;
+    keySet: boolean;
+    models: CloudModel[];
+  };
+
   let running = $state(false);
   let error = $state("");
   // Non-fatal notice from a started session (e.g. system audio unavailable → mic-only).
@@ -114,6 +128,41 @@
     } catch (e) {
       error = String(e);
     }
+  }
+
+  async function refreshCloudProviders() {
+    try {
+      cloudProviders = await invoke<CloudProvider[]>("list_cloud_providers");
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // Save (or, with an empty draft, clear) a provider's API key — stored only on this device.
+  async function saveKey(providerId: string) {
+    const key = (keyDrafts[providerId] ?? "").trim();
+    try {
+      await invoke("set_cloud_key", { provider: providerId, key });
+      keyDrafts[providerId] = "";
+      await refreshCloudProviders();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  async function clearKey(providerId: string) {
+    try {
+      await invoke("set_cloud_key", { provider: providerId, key: "" });
+      await refreshCloudProviders();
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  function chooseCloud(providerId: string, modelId: string) {
+    cloudPickerOpen = false;
+    cloudProviderId = providerId;
+    cloudModelId = modelId;
   }
 
   async function refreshDevices() {
@@ -411,6 +460,32 @@
   $effect(() => {
     if (!diarizeId && diarizeModels.length) diarizeId = diarizeModels[0].id;
   });
+
+  // Cloud engine for File: a clear, separate choice from the on-device models. Providers and their
+  // key status load from the backend; the keys themselves live only on this device.
+  let fileEngine = $state<"local" | "cloud">("local");
+  let cloudProviders = $state<CloudProvider[]>([]);
+  let cloudProviderId = $state("");
+  let cloudModelId = $state("");
+  let cloudPickerOpen = $state(false);
+  let keysOpen = $state(false);
+  // Per-provider key input buffers — never persisted here, only handed to set_cloud_key on Save.
+  let keyDrafts = $state<Record<string, string>>({});
+  const cloudProvider = $derived(cloudProviders.find((p) => p.id === cloudProviderId));
+  // Only batch-capable models can transcribe a file.
+  const cloudFileModels = $derived(cloudProvider?.models.filter((m) => m.batch) ?? []);
+  const cloudModel = $derived(cloudFileModels.find((m) => m.id === cloudModelId));
+  const cloudReady = $derived(!!cloudProvider?.keySet && !!cloudModel);
+  // Whether the current File engine is ready to accept a file (local model installed, or cloud set).
+  const fileReady = $derived(fileEngine === "cloud" ? cloudReady : canStart);
+  $effect(() => {
+    if (!cloudProviderId && cloudProviders.length) cloudProviderId = cloudProviders[0].id;
+  });
+  $effect(() => {
+    if (cloudFileModels.length && !cloudFileModels.find((m) => m.id === cloudModelId))
+      cloudModelId = cloudFileModels[0].id;
+  });
+
   let dragOver = $state(false);
   let fileListeners: UnlistenFn[] = [];
   let dropUnlisten: UnlistenFn | undefined;
@@ -476,8 +551,14 @@
 
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
-    if (!canStart) {
+    if (fileEngine === "local" && !canStart) {
       error = "Download a model in the Live tab first.";
+      return;
+    }
+    if (fileEngine === "cloud" && !cloudReady) {
+      error = cloudProvider?.keySet
+        ? "Choose a cloud model."
+        : `Add your ${cloudProvider?.name ?? "provider"} API key first.`;
       return;
     }
     if (diarizeOn && !diarizeChosen?.installed) {
@@ -505,6 +586,9 @@
           diarizeModel: diarizeOn ? diarizeId : null,
           gateSpeech: fileGate,
           denoiser: fileDenoiser,
+          engine: fileEngine,
+          cloudProvider: fileEngine === "cloud" ? cloudProviderId : null,
+          cloudModel: fileEngine === "cloud" ? cloudModelId : null,
         },
       });
     } catch (e) {
@@ -519,8 +603,14 @@
   }
 
   async function pickFile() {
-    if (!canStart) {
+    if (fileEngine === "local" && !canStart) {
       error = "Download a model in the Live tab first.";
+      return;
+    }
+    if (fileEngine === "cloud" && !cloudReady) {
+      error = cloudProvider?.keySet
+        ? "Choose a cloud model."
+        : `Add your ${cloudProvider?.name ?? "provider"} API key first.`;
       return;
     }
     try {
@@ -601,6 +691,7 @@
 
   onMount(() => {
     refreshModels();
+    refreshCloudProviders();
     refreshDiarizeModels();
     refreshDenoiseModels();
     refreshDevices();
@@ -668,6 +759,45 @@
       </div>
     {:else}
       <span class="muted">Loading models…</span>
+    {/if}
+  {/snippet}
+
+  {#snippet cloudPicker()}
+    {#if cloudProviders.length}
+      <div class="picker">
+        <button
+          class="picker-trigger"
+          class:open={cloudPickerOpen}
+          onclick={() => (cloudPickerOpen = !cloudPickerOpen)}
+        >
+          <span class="picker-label"
+            >{cloudModel ? `${cloudProvider?.name} · ${cloudModel.name}` : "Select a cloud model"}</span
+          >
+          <span class="picker-caret"></span>
+        </button>
+        {#if cloudPickerOpen}
+          <button class="picker-backdrop" aria-label="Close" onclick={() => (cloudPickerOpen = false)}
+          ></button>
+          <div class="picker-menu" transition:slide={{ duration: 120 }}>
+            {#each cloudProviders as p (p.id)}
+              <div class="picker-section">
+                {p.name}{#if !p.keySet}<span class="picker-tag">key needed</span>{/if}
+              </div>
+              {#each p.models.filter((m) => m.batch) as m (m.id)}
+                <button
+                  class="picker-opt"
+                  class:sel={p.id === cloudProviderId && m.id === cloudModelId}
+                  onclick={() => chooseCloud(p.id, m.id)}
+                >
+                  <span class="picker-opt-name">{m.name}</span>
+                </button>
+              {/each}
+            {/each}
+          </div>
+        {/if}
+      </div>
+    {:else}
+      <span class="muted">Loading providers…</span>
     {/if}
   {/snippet}
 
@@ -1001,19 +1131,53 @@
           </button>
         </div>
       {:else}
-        <div class="box-head">
-          {@render modelPicker()}
+        <div class="box-head file-pick-head">
+          <div class="seg engine-seg">
+            <button class:active={fileEngine === "local"} onclick={() => (fileEngine = "local")}
+              >On-device</button
+            >
+            <button class:active={fileEngine === "cloud"} onclick={() => (fileEngine = "cloud")}
+              >Cloud</button
+            >
+          </div>
+          {#if fileEngine === "local"}
+            {@render modelPicker()}
+          {:else}
+            {@render cloudPicker()}
+          {/if}
         </div>
+        {#if fileEngine === "cloud"}
+          <div class="cloud-key-row">
+            {#if cloudProvider?.keySet}
+              <span class="key-ok">✓ {cloudProvider.name} key saved on this device</span>
+              <button class="link-btn" onclick={() => (keysOpen = true)}>Manage keys</button>
+            {:else}
+              <span class="key-missing"
+                >{cloudProvider?.name ?? "This provider"} needs your API key</span
+              >
+              <button class="btn outline sm" onclick={() => (keysOpen = true)}>Add API key</button>
+            {/if}
+          </div>
+        {/if}
         <button
           class="dropzone"
           class:over={dragOver}
           onclick={pickFile}
-          disabled={!canStart}
+          disabled={!fileReady}
           aria-label="Choose a file to transcribe"
         >
           <div class="dropzone-title">Click to choose a file, or drop one here</div>
           <p class="dropzone-sub">
-            {#if canStart}
+            {#if fileEngine === "cloud"}
+              {#if cloudReady}
+                mp3, m4a, wav, flac, mp4, mov… sent to
+                <strong>{cloudProvider?.name} {cloudModel?.name}</strong>.
+              {:else if cloudProvider?.keySet}
+                Choose a cloud model above.
+              {:else}
+                Add your {cloudProvider?.name ?? "provider"} API key to transcribe in the cloud.
+              {/if}
+            {:else if canStart}
               mp3, m4a, wav, flac, mp4, mov… transcribed locally with
               <strong>{activeModel?.name}</strong>.
             {:else}
@@ -1142,6 +1306,38 @@
               downloads a small model the first time.
             </p>
           </section>
+        </Modal>
+        <Modal bind:open={keysOpen} title="Cloud API keys">
+          <p class="modal-hint">
+            Keys are stored only on this device, and sent only to the provider they belong to.
+          </p>
+          {#each cloudProviders as p (p.id)}
+            <section class="modal-section">
+              <div class="opt-row">
+                <span class="opt-label">{p.name}</span>
+                {#if p.keySet}<span class="key-ok">saved</span>{/if}
+              </div>
+              <div class="key-entry">
+                <input
+                  class="prompt-input key-input"
+                  type="password"
+                  autocomplete="off"
+                  placeholder={p.keySet ? "Replace saved key…" : "Paste API key"}
+                  bind:value={keyDrafts[p.id]}
+                />
+                <button
+                  class="btn sm"
+                  onclick={() => saveKey(p.id)}
+                  disabled={!keyDrafts[p.id]?.trim()}
+                >
+                  Save
+                </button>
+                {#if p.keySet}
+                  <button class="btn outline sm" onclick={() => clearKey(p.id)}>Remove</button>
+                {/if}
+              </div>
+            </section>
+          {/each}
         </Modal>
       {/if}
     </section>
@@ -2023,6 +2219,68 @@
     color: var(--muted);
     font-size: 13.5px;
     line-height: 1.6;
+  }
+
+  /* File: on-device/cloud engine toggle and the cloud key affordance under the picker. */
+  .file-pick-head {
+    justify-content: flex-start;
+  }
+
+  .engine-seg {
+    flex: none;
+  }
+
+  .cloud-key-row {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+    font-size: 13px;
+  }
+
+  .key-ok {
+    color: var(--live);
+    font-weight: 500;
+  }
+
+  .key-missing {
+    color: var(--muted);
+  }
+
+  .link-btn {
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--accent);
+    background: none;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    text-decoration: underline;
+  }
+
+  .link-btn:hover {
+    color: var(--accent-hover);
+  }
+
+  .modal-hint {
+    margin: 0 0 4px;
+    font-size: 12.5px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .key-entry {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  .key-input {
+    flex: 1;
+    min-width: 0;
   }
 
 </style>

@@ -4,6 +4,7 @@
 //! start/stop transcription. A session is spawned per audio source (microphone = "Me", system
 //! loopback = meeting participants), all forwarding transcript segments to the webview.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -20,6 +21,7 @@ use wisp_audio::{
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::AudioSource;
+use wisp_core::cloud::CloudProvider;
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
@@ -28,6 +30,7 @@ use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
+use wisp_engine_cloud::CloudEngine;
 use wisp_engine_sherpa::{
     GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
     StreamingTransducerEngine, WhisperEngine,
@@ -35,8 +38,9 @@ use wisp_engine_sherpa::{
 #[cfg(target_os = "windows")]
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
-    builtin_catalog, coreml_asset, denoise_models, diarization_models, family_runnable,
-    recommended_default_model, Accelerator, FsModelStore, HttpDownloader, MachineProfile,
+    builtin_catalog, cloud_catalog, coreml_asset, denoise_models, diarization_models,
+    family_runnable, recommended_default_model, Accelerator, FsModelStore, HttpDownloader,
+    MachineProfile,
 };
 use wisp_pipeline::{
     remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, Segmenter,
@@ -99,6 +103,11 @@ struct AppState {
     file_segments: Mutex<Vec<TranscriptSegment>>,
     /// File where the active model id is persisted, so the choice survives a restart.
     active_model_path: PathBuf,
+    /// Per-provider cloud API keys, kept purely on-device (persisted to `cloud_keys_path`).
+    cloud_keys: Mutex<HashMap<String, String>>,
+    /// File the cloud API keys persist to — local app data only, never synced or sent anywhere
+    /// except as the auth header to the provider the key belongs to.
+    cloud_keys_path: PathBuf,
 }
 
 /// Serializable transcript segment delivered to the UI.
@@ -182,6 +191,13 @@ struct FileTranscribeOptions {
     gate_speech: bool,
     /// Denoiser id (`"rnnoise"`, …) to clean the audio before ASR, or `None` to leave it untouched.
     denoiser: Option<String>,
+    /// Engine: `None`/`"local"` uses the active on-device model; `"cloud"` uses the provider/model
+    /// below (with the API key read from local storage).
+    engine: Option<String>,
+    /// Cloud provider id, when `engine` is `"cloud"`.
+    cloud_provider: Option<String>,
+    /// Cloud model id, when `engine` is `"cloud"`.
+    cloud_model: Option<String>,
 }
 
 /// Builds the ASR engine for a downloaded model. `language` is a code (`zh`/`yue`/`en`/…) or empty
@@ -542,6 +558,108 @@ fn list_denoise_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, 
         .map(|d| to_model_info(d, &state.store, None, None))
         .collect();
     Ok(models)
+}
+
+/// A cloud transcription model, for the picker.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudModelDto {
+    id: String,
+    name: String,
+    streaming: bool,
+    batch: bool,
+    description: String,
+}
+
+/// A cloud provider with its models and whether its API key is already saved on this device.
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloudProviderDto {
+    id: String,
+    name: String,
+    key_set: bool,
+    models: Vec<CloudModelDto>,
+}
+
+/// The cloud provider with `id` from the built-in catalog, if any.
+fn cloud_provider_by_id(id: &str) -> Option<CloudProvider> {
+    cloud_catalog().into_iter().find(|p| p.id == id)
+}
+
+/// Loads the on-device cloud API keys (provider → key); an absent or unreadable file yields none.
+fn load_cloud_keys(path: &Path) -> HashMap<String, String> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persists `keys` to `path` (local app data only). Best-effort — a write failure is logged.
+fn save_cloud_keys(path: &Path, keys: &HashMap<String, String>) {
+    match serde_json::to_string_pretty(keys) {
+        Ok(json) => {
+            if let Err(e) = fs::write(path, json) {
+                eprintln!("wisp: could not persist cloud keys: {e}");
+            }
+        }
+        Err(e) => eprintln!("wisp: could not serialize cloud keys: {e}"),
+    }
+}
+
+/// The cloud providers and their models, each flagged with whether its API key is already saved on
+/// this device — for the Cloud picker and key manager.
+#[tauri::command]
+fn list_cloud_providers(state: State<'_, AppState>) -> Result<Vec<CloudProviderDto>, String> {
+    let keys = state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let providers = cloud_catalog()
+        .into_iter()
+        .map(|p| CloudProviderDto {
+            key_set: keys.get(&p.id).is_some_and(|k| !k.trim().is_empty()),
+            id: p.id,
+            name: p.display_name,
+            models: p
+                .models
+                .into_iter()
+                .map(|m| CloudModelDto {
+                    id: m.id,
+                    name: m.display_name,
+                    streaming: m.streaming,
+                    batch: m.batch,
+                    description: m.description,
+                })
+                .collect(),
+        })
+        .collect();
+    Ok(providers)
+}
+
+/// Stores (or, with an empty `key`, clears) the API key for `provider`, on this device only.
+#[tauri::command]
+fn set_cloud_key(state: State<'_, AppState>, provider: String, key: String) -> Result<(), String> {
+    let mut keys = state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    if key.trim().is_empty() {
+        keys.remove(&provider);
+    } else {
+        keys.insert(provider, key.trim().to_owned());
+    }
+    save_cloud_keys(&state.cloud_keys_path, &keys);
+    Ok(())
+}
+
+/// Whether an API key is saved for `provider`. Never returns the key itself.
+#[tauri::command]
+fn cloud_key_set(state: State<'_, AppState>, provider: String) -> Result<bool, String> {
+    let keys = state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    Ok(keys.get(&provider).is_some_and(|k| !k.trim().is_empty()))
 }
 
 #[tauri::command]
@@ -1053,6 +1171,22 @@ fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
     }
 }
 
+/// The transcription backend chosen for a file: the active on-device model, or a cloud
+/// provider/model. Resolved before the blocking work so a missing model or key fails fast, then
+/// carried into the worker. The surrounding local steps (denoise, gating, diarization) are the same
+/// for both — only the engine that turns audio into text differs.
+enum FileEngine {
+    Local {
+        descriptor: ModelDescriptor,
+        dir: PathBuf,
+    },
+    Cloud {
+        provider: String,
+        model: String,
+        key: String,
+    },
+}
+
 /// Transcribes an audio/video file at `path` with the active model, prioritising accuracy: the
 /// whole clip is decoded and run through the engine's native long-form path (no VAD chunking).
 /// `timestamps` requests per-segment timings (for SRT/VTT); pass `false` for the most accurate
@@ -1065,27 +1199,61 @@ async fn transcribe_file(
     path: String,
     options: FileTranscribeOptions,
 ) -> Result<(), String> {
-    let active = state
-        .active
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .clone()
-        .ok_or("no model selected")?;
-    let descriptor = state
-        .store
-        .available()
-        .into_iter()
-        .find(|d| d.id == active)
-        .ok_or("selected model is not in the catalog")?;
-    let dir = state
-        .store
-        .local_path(&active)
-        .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
     let language = state
         .language
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
+
+    // The engine for this file: the active on-device model, or a cloud provider/model whose API key
+    // is read from local storage. Resolving here, before the blocking work, fails fast on a missing
+    // model or an unsaved key.
+    let file_engine = match options.engine.as_deref() {
+        Some("cloud") => {
+            let provider = options
+                .cloud_provider
+                .clone()
+                .ok_or("no cloud provider selected")?;
+            let model = options
+                .cloud_model
+                .clone()
+                .ok_or("no cloud model selected")?;
+            let key = state
+                .cloud_keys
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())?
+                .get(&provider)
+                .filter(|k| !k.trim().is_empty())
+                .cloned()
+                .ok_or_else(|| format!("no API key saved for {provider}"))?;
+
+            FileEngine::Cloud {
+                provider,
+                model,
+                key,
+            }
+        }
+        _ => {
+            let active = state
+                .active
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())?
+                .clone()
+                .ok_or("no model selected")?;
+            let descriptor = state
+                .store
+                .available()
+                .into_iter()
+                .find(|d| d.id == active)
+                .ok_or("selected model is not in the catalog")?;
+            let dir = state
+                .store
+                .local_path(&active)
+                .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
+
+            FileEngine::Local { descriptor, dir }
+        }
+    };
 
     // Resolve the diarization model's directory up front (it must already be downloaded); `None`
     // when speaker ID is off. Diarization needs segment timestamps to map speakers onto lines, so
@@ -1161,7 +1329,19 @@ async fn transcribe_file(
                 .map_or(audio.as_slice(), |g| g.audio.as_slice());
 
             let _ = task_app.emit(FILE_STAGE_EVENT, "transcribing");
-            let mut engine = build_engine(&descriptor, &dir, &language)?;
+            let mut engine: Box<dyn AsrEngine> = match &file_engine {
+                FileEngine::Local { descriptor, dir } => build_engine(descriptor, dir, &language)?,
+                FileEngine::Cloud {
+                    provider,
+                    model,
+                    key,
+                } => {
+                    let provider = cloud_provider_by_id(provider).ok_or_else(|| {
+                        WispError::Model(format!("unknown cloud provider {provider}"))
+                    })?;
+                    Box::new(CloudEngine::new(&provider, model, key, &language)?)
+                }
+            };
 
             // Forward 0–100 decode progress to the UI, de-duplicated so we emit only on change.
             let last_pct = std::cell::Cell::new(u8::MAX);
@@ -1320,6 +1500,8 @@ pub fn run() {
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
+            let cloud_keys_path = data_dir.join("cloud-keys.json");
+            let cloud_keys = load_cloud_keys(&cloud_keys_path);
             // The store manages both ASR models and the (separate) diarization models, so it can
             // download either; only ASR models are ever the "active" transcription model.
             let asr_catalog = builtin_catalog();
@@ -1359,6 +1541,8 @@ pub fn run() {
                 tee: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
                 active_model_path,
+                cloud_keys: Mutex::new(cloud_keys),
+                cloud_keys_path,
             });
             Ok(())
         })
@@ -1366,6 +1550,9 @@ pub fn run() {
             list_models,
             list_diarization_models,
             list_denoise_models,
+            list_cloud_providers,
+            set_cloud_key,
+            cloud_key_set,
             download_model,
             download_coreml,
             select_model,
@@ -1390,4 +1577,50 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A unique temp path per test, so parallel runs don't collide on the shared temp dir.
+    fn temp_path(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("wisp-cloud-keys-{}-{tag}.json", std::process::id()))
+    }
+
+    #[test]
+    fn load_cloud_keys_is_empty_for_missing_or_garbage_files() {
+        let missing = temp_path("missing");
+        let _ = fs::remove_file(&missing);
+        assert!(load_cloud_keys(&missing).is_empty(), "absent file → no keys");
+
+        let garbage = temp_path("garbage");
+        fs::write(&garbage, b"not json at all").unwrap();
+        assert!(
+            load_cloud_keys(&garbage).is_empty(),
+            "unparsable file → no keys, no panic"
+        );
+        let _ = fs::remove_file(&garbage);
+    }
+
+    #[test]
+    fn save_then_load_round_trips_keys() {
+        let path = temp_path("roundtrip");
+        let _ = fs::remove_file(&path);
+
+        let mut keys = HashMap::new();
+        keys.insert("openai".to_owned(), "sk-test-123".to_owned());
+        keys.insert("groq".to_owned(), "gsk-test-456".to_owned());
+        save_cloud_keys(&path, &keys);
+
+        assert_eq!(load_cloud_keys(&path), keys, "keys survive a save/load cycle");
+
+        let _ = fs::remove_file(&path);
+    }
+
+    #[test]
+    fn cloud_provider_by_id_finds_seeded_and_rejects_unknown() {
+        assert!(cloud_provider_by_id("openai").is_some());
+        assert!(cloud_provider_by_id("does-not-exist").is_none());
+    }
 }
