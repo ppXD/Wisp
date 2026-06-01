@@ -8,9 +8,6 @@
 
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId};
 
-/// RAM at/above which the higher-precision q8 default is recommended; below it, the lighter q5.
-const Q8_MIN_RAM_BYTES: u64 = 16 * 1024 * 1024 * 1024; // 16 GiB
-
 /// The on-device accelerator the ASR engine can run on.
 ///
 /// `#[non_exhaustive]` so new backends can be added without breaking matches.
@@ -29,74 +26,116 @@ pub enum Accelerator {
     Cpu,
 }
 
-/// What the host machine can run, for picking a default model.
+/// How powerful the GPU ASR engine is on this host — the signal that decides which Whisper a machine
+/// can run *in real time*. Ordered (`None < Entry < Standard < High < Ultra`) so the recommender can
+/// gate models by tier. On Apple Silicon it maps the chip class (base / Pro / Max / Ultra); other
+/// platforms report `None` until a GPU engine is wired (then they map here too).
+///
+/// `#[non_exhaustive]` so finer tiers can be inserted without breaking matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[non_exhaustive]
+pub enum GpuTier {
+    /// No usable GPU ASR engine — CPU only.
+    None,
+    /// Entry GPU — Apple M-series base chip.
+    Entry,
+    /// Mid GPU — Apple "Pro" chip.
+    Standard,
+    /// Strong GPU — Apple "Max" chip.
+    High,
+    /// Top GPU — Apple "Ultra" chip.
+    Ultra,
+}
+
+/// What the host machine can run, for picking a default model — the accelerator, its power tier, and
+/// memory. The recommendation is *computed* from these rather than hard-coded per platform.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MachineProfile {
     /// The best accelerator an ASR engine can use here.
     pub accelerator: Accelerator,
     /// Total physical memory in bytes.
     pub ram_bytes: u64,
+    /// The GPU ASR engine's power tier — the real driver of "can this machine run model X live".
+    pub gpu_tier: GpuTier,
 }
 
 impl MachineProfile {
-    /// A profile for the given accelerator and memory.
+    /// A profile from just accelerator + memory, inferring a GPU tier from memory as a fallback (used
+    /// by tests and any host that can't probe the chip). Real hosts call [`MachineProfile::detailed`]
+    /// with the detected chip tier.
     pub fn new(accelerator: Accelerator, ram_bytes: u64) -> Self {
+        Self::detailed(
+            accelerator,
+            ram_bytes,
+            inferred_gpu_tier(accelerator, ram_bytes),
+        )
+    }
+
+    /// A profile with an explicitly detected GPU tier (the chip class on Apple Silicon).
+    pub fn detailed(accelerator: Accelerator, ram_bytes: u64, gpu_tier: GpuTier) -> Self {
         Self {
             accelerator,
             ram_bytes,
+            gpu_tier,
         }
     }
 }
 
-/// Auto-picks the default ASR model for `profile`: the engine family that best uses the machine's
-/// accelerator, sized to its memory — the most accurate setup it can run in real time.
+/// A GPU tier inferred from accelerator + memory when the chip can't be probed: Metal hosts step up
+/// with RAM (a coarse proxy for chip class), everything else has no GPU engine.
+fn inferred_gpu_tier(accelerator: Accelerator, ram_bytes: u64) -> GpuTier {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    match accelerator {
+        Accelerator::Metal if ram_bytes >= 32 * GIB => GpuTier::High,
+        Accelerator::Metal if ram_bytes >= 16 * GIB => GpuTier::Standard,
+        Accelerator::Metal => GpuTier::Entry,
+        _ => GpuTier::None,
+    }
+}
+
+/// Auto-picks the **Live** default for `profile` — the most accurate Whisper its GPU tier can keep up
+/// with in *real time*, computed from the tier rather than hard-coded per platform:
 ///
-/// - **Metal** (Apple Silicon): the GPU whisper.cpp turbo — q8 with memory headroom (≥ 16 GB), the
-///   lighter/faster q5 below.
-/// - **Anything else** (Windows / Linux, today CPU-bound ONNX): SenseVoice int8 — non-autoregressive,
-///   so fast on the CPU, with strong everyday and CJK accuracy. The GPU arms (CUDA/Vulkan/DirectML)
-///   route here too until a GPU engine is wired for those platforms, then they grow to it.
+/// - **Ultra** GPU → the full large-v3 (real time only on the strongest chips).
+/// - **High / Standard** → large-v3-turbo q8 (the everyday GPU sweet spot).
+/// - **Entry** → the lighter turbo q5.
+/// - **None** (no GPU engine) → SenseVoice — non-autoregressive, so real-time on the CPU.
 ///
-/// The chosen id is guaranteed to exist in `catalog` (falling back to its first entry), so the
-/// caller can always install what's recommended.
+/// As chips get faster the tier rises and the pick follows automatically. The chosen id is guaranteed
+/// to exist in `catalog` (falling back to its first entry).
 pub fn recommended_default_model(profile: &MachineProfile, catalog: &[ModelDescriptor]) -> ModelId {
-    let ideal = match profile.accelerator {
-        Accelerator::Metal if profile.ram_bytes >= Q8_MIN_RAM_BYTES => "whisper-large-v3-turbo-q8",
-        Accelerator::Metal => "whisper-large-v3-turbo-q5",
-        Accelerator::Cuda | Accelerator::Vulkan | Accelerator::DirectMl | Accelerator::Cpu => {
-            "sense-voice"
-        }
+    let ideal = match profile.gpu_tier {
+        GpuTier::Ultra => "whisper-large-v3-gpu",
+        GpuTier::High | GpuTier::Standard => "whisper-large-v3-turbo-q8",
+        GpuTier::Entry => "whisper-large-v3-turbo-q5",
+        GpuTier::None => "sense-voice",
     };
-
-    let id = ModelId(ideal.to_owned());
-    if catalog.iter().any(|d| d.id == id) {
-        id
-    } else {
-        catalog.first().map(|d| d.id.clone()).unwrap_or(id)
-    }
+    resolve(ideal, catalog)
 }
 
-/// Auto-picks the most *accurate* ASR model for `profile`, for the File path where real-time speed
-/// isn't required — the highest-fidelity engine the machine can run. Companion to
-/// [`recommended_default_model`], which favours real-time speed for Live.
+/// Auto-picks the **File** model for `profile`, where real-time speed isn't required — the most
+/// accurate model the machine can run *at all*, again driven by the GPU tier:
 ///
-/// - **Metal** (Apple Silicon): the full Whisper large-v3 (32-layer decoder, not the distilled
-///   turbo) on the GPU — slower than turbo but the most accurate local option.
-/// - **Anything else**: the ONNX Whisper large-v3 — most accurate on the CPU; the GPU arms route here
-///   too until a GPU engine is wired for them.
+/// - **Standard and up** (a real GPU) → the full (non-turbo) large-v3 — most accurate, slow is fine.
+/// - **Entry** → large-v3-turbo q8 (the full model is painfully slow on a base chip).
+/// - **None** → the ONNX large-v3 — most accurate on the CPU.
 ///
-/// The chosen id is guaranteed to exist in `catalog` (falling back to its first entry).
+/// Companion to [`recommended_default_model`]; the chosen id is guaranteed to exist in `catalog`.
 pub fn recommended_accurate_model(
     profile: &MachineProfile,
     catalog: &[ModelDescriptor],
 ) -> ModelId {
-    let ideal = match profile.accelerator {
-        Accelerator::Metal => "whisper-large-v3-gpu",
-        Accelerator::Cuda | Accelerator::Vulkan | Accelerator::DirectMl | Accelerator::Cpu => {
-            "whisper-large-v3"
-        }
+    let ideal = match profile.gpu_tier {
+        GpuTier::Ultra | GpuTier::High | GpuTier::Standard => "whisper-large-v3-gpu",
+        GpuTier::Entry => "whisper-large-v3-turbo-q8",
+        GpuTier::None => "whisper-large-v3",
     };
+    resolve(ideal, catalog)
+}
 
+/// Resolves an ideal id against `catalog`, falling back to its first entry if absent, so the caller
+/// can always install what's recommended.
+fn resolve(ideal: &str, catalog: &[ModelDescriptor]) -> ModelId {
     let id = ModelId(ideal.to_owned());
     if catalog.iter().any(|d| d.id == id) {
         id
@@ -291,5 +330,63 @@ mod tests {
                 "accurate {id:?} ({family:?}) must run on {accel:?}"
             );
         }
+    }
+
+    #[test]
+    fn recommendation_climbs_with_the_gpu_tier() {
+        let catalog = builtin_catalog();
+        let live = |tier| {
+            recommended_default_model(
+                &MachineProfile::detailed(Accelerator::Metal, 32 * GIB, tier),
+                &catalog,
+            )
+        };
+        // Live tracks the chip: an Ultra runs the full large-v3 in real time, a Max/Pro gets turbo-q8,
+        // a base chip the lighter q5 — not a fixed per-platform string.
+        assert_eq!(
+            live(GpuTier::Ultra),
+            ModelId("whisper-large-v3-gpu".to_owned())
+        );
+        assert_eq!(
+            live(GpuTier::High),
+            ModelId("whisper-large-v3-turbo-q8".to_owned())
+        );
+        assert_eq!(
+            live(GpuTier::Entry),
+            ModelId("whisper-large-v3-turbo-q5".to_owned())
+        );
+
+        // File reaches higher (no real-time limit): the full large-v3 on a real GPU, turbo on a base.
+        let file = |tier| {
+            recommended_accurate_model(
+                &MachineProfile::detailed(Accelerator::Metal, 32 * GIB, tier),
+                &catalog,
+            )
+        };
+        assert_eq!(
+            file(GpuTier::High),
+            ModelId("whisper-large-v3-gpu".to_owned())
+        );
+        assert_eq!(
+            file(GpuTier::Entry),
+            ModelId("whisper-large-v3-turbo-q8".to_owned())
+        );
+    }
+
+    #[test]
+    fn new_infers_a_gpu_tier_from_memory_when_the_chip_is_unknown() {
+        // Without a probed chip, a Metal host steps up with RAM; non-Metal reports no GPU engine.
+        assert_eq!(
+            MachineProfile::new(Accelerator::Metal, 32 * GIB).gpu_tier,
+            GpuTier::High
+        );
+        assert_eq!(
+            MachineProfile::new(Accelerator::Metal, 8 * GIB).gpu_tier,
+            GpuTier::Entry
+        );
+        assert_eq!(
+            MachineProfile::new(Accelerator::Cpu, 64 * GIB).gpu_tier,
+            GpuTier::None
+        );
     }
 }
