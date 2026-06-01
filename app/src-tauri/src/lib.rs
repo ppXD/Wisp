@@ -28,7 +28,7 @@ use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
 use wisp_core::engine::{AsrEngine, ClipOptions, StreamingAsrEngine};
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
-use wisp_core::model::{ModelDescriptor, ModelFamily, ModelId, ModelStore};
+use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::CloudEngine;
 use wisp_engine_sherpa::{
@@ -108,6 +108,10 @@ struct AppState {
     /// File the cloud API keys persist to — local app data only, never synced or sent anywhere
     /// except as the auth header to the provider the key belongs to.
     cloud_keys_path: PathBuf,
+    /// User-imported custom models (their files live under `custom_models_dir/<id>/`).
+    custom_models: Mutex<Vec<CustomModel>>,
+    /// Directory holding each imported model's files, and the registry JSON beside it.
+    custom_models_dir: PathBuf,
 }
 
 /// Serializable transcript segment delivered to the UI.
@@ -589,7 +593,7 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
     let machine = detect_machine();
     let live_rec = recommended_default_model(&machine, &builtin_catalog());
     let file_rec = recommended_accurate_model(&machine, &builtin_catalog());
-    let models = state
+    let mut models: Vec<ModelInfoDto> = state
         .store
         .available()
         .into_iter()
@@ -599,8 +603,34 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         // Only offer models this machine can actually start — e.g. the Metal whisper.cpp models are
         // hidden off macOS, where building their engine would fail.
         .filter(|d| family_runnable(d.family, machine.accelerator))
-        .map(|d| to_model_info(d, &state.store, active.as_ref(), Some(&live_rec), Some(&file_rec)))
+        .map(|d| {
+            to_model_info(
+                d,
+                &state.store,
+                active.as_ref(),
+                Some(&live_rec),
+                Some(&file_rec),
+            )
+        })
         .collect();
+
+    // Append the user's imported custom models — always installed, gated by the same runnability
+    // rule (a Metal-only `.bin` stays hidden off macOS).
+    let custom = state
+        .custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    for cm in custom.iter() {
+        let Some(family) = custom_family(&cm.kind) else {
+            continue;
+        };
+        if family_runnable(family, machine.accelerator) {
+            if let Some(info) = custom_model_info(cm, active.as_ref()) {
+                models.push(info);
+            }
+        }
+    }
+
     Ok(models)
 }
 
@@ -765,6 +795,203 @@ fn cloud_key_set(state: State<'_, AppState>, provider: String) -> Result<bool, S
     Ok(keys.get(&provider).is_some_and(|k| !k.trim().is_empty()))
 }
 
+/// A user-imported model. Its files live under `custom_models_dir/<id>/`; `kind` selects the engine
+/// adapter — today only `"whisper-cpp"` (a GGML/GGUF `.bin`); ONNX kinds slot in here later.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CustomModel {
+    id: String,
+    name: String,
+    kind: String,
+    files: Vec<String>,
+}
+
+/// Loads the imported-model registry from `dir/registry.json`; an absent/garbage file yields none.
+fn load_custom_models(dir: &Path) -> Vec<CustomModel> {
+    fs::read_to_string(dir.join("registry.json"))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persists the registry beside the model files. Best-effort — a write failure is logged.
+fn save_custom_models(dir: &Path, models: &[CustomModel]) {
+    match serde_json::to_string_pretty(models) {
+        Ok(json) => {
+            if let Err(e) = fs::write(dir.join("registry.json"), json) {
+                eprintln!("wisp: could not persist custom models: {e}");
+            }
+        }
+        Err(e) => eprintln!("wisp: could not serialize custom models: {e}"),
+    }
+}
+
+/// The engine family a custom `kind` maps to, or `None` if the kind isn't recognised.
+fn custom_family(kind: &str) -> Option<ModelFamily> {
+    match kind {
+        "whisper-cpp" => Some(ModelFamily::WhisperCpp),
+        _ => None,
+    }
+}
+
+/// A `ModelDescriptor` for a custom model, so it flows through `build_engine` exactly like a catalog
+/// model. Its files carry no URL/checksum — they're already on disk.
+fn custom_descriptor(cm: &CustomModel) -> Option<ModelDescriptor> {
+    let family = custom_family(&cm.kind)?;
+    Some(ModelDescriptor {
+        id: ModelId(cm.id.clone()),
+        family,
+        quant: Quant::F32,
+        display_name: cm.name.clone(),
+        files: cm
+            .files
+            .iter()
+            .map(|name| ModelFile {
+                name: name.clone(),
+                url: String::new(),
+                sha256: String::new(),
+                size_bytes: 0,
+            })
+            .collect(),
+        languages: ["yue", "zh", "en", "ja"]
+            .iter()
+            .map(|s| (*s).to_owned())
+            .collect(),
+        description: "Imported custom model.".to_owned(),
+    })
+}
+
+/// The picker DTO for a custom model — always installed (its files are on disk).
+fn custom_model_info(cm: &CustomModel, active: Option<&ModelId>) -> Option<ModelInfoDto> {
+    let descriptor = custom_descriptor(cm)?;
+    let is_active = active == Some(&descriptor.id);
+    Some(ModelInfoDto {
+        id: descriptor.id.0,
+        name: descriptor.display_name,
+        size_bytes: 0,
+        languages: descriptor.languages,
+        description: descriptor.description,
+        installed: true,
+        active: is_active,
+        family: format!("{:?}", descriptor.family),
+        recommended_live: false,
+        recommended_file: false,
+        coreml_available: false,
+        coreml_installed: false,
+        coreml_size_bytes: 0,
+    })
+}
+
+/// Resolves a model id to its descriptor + directory, checking the built-in catalog first and then
+/// the user's imported custom models. The single resolution path for both transcribe and live start.
+fn resolve_local_model(
+    state: &AppState,
+    id: &ModelId,
+) -> Result<(ModelDescriptor, PathBuf), String> {
+    if let Some(descriptor) = state.store.available().into_iter().find(|d| d.id == *id) {
+        let dir = state
+            .store
+            .local_path(id)
+            .ok_or_else(|| format!("model '{}' is not downloaded yet", id.as_str()))?;
+        return Ok((descriptor, dir));
+    }
+
+    let custom = state
+        .custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let cm = custom
+        .iter()
+        .find(|c| c.id == id.0)
+        .ok_or("selected model is not in the catalog")?;
+    let descriptor = custom_descriptor(cm).ok_or("custom model has an unknown kind")?;
+    Ok((descriptor, state.custom_models_dir.join(&cm.id)))
+}
+
+/// Whether `bytes` begin with a GGML/GGUF magic — the marker of a whisper.cpp model file.
+fn is_ggml(bytes: &[u8]) -> bool {
+    matches!(&bytes[..bytes.len().min(4)], b"GGUF" | b"ggml" | b"lmgg")
+}
+
+/// A filesystem-safe `custom-<slug>` id, suffixed `-2`, `-3`, … on collision.
+fn unique_custom_id(name: &str, existing: &[CustomModel]) -> String {
+    let slug: String = name
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let base = format!("custom-{}", slug.trim_matches('-'));
+    let mut id = base.clone();
+    let mut n = 2;
+    while existing.iter().any(|c| c.id == id) {
+        id = format!("{base}-{n}");
+        n += 1;
+    }
+    id
+}
+
+/// Imports the model file the user picked: validates it, copies it into the app's custom-models
+/// directory, registers it, and returns its picker entry. Today it accepts a whisper.cpp GGML/GGUF
+/// `.bin`/`.gguf` (runs on the Metal GPU); ONNX models for the CPU are a later addition.
+#[tauri::command]
+fn import_custom_model(state: State<'_, AppState>, path: String) -> Result<ModelInfoDto, String> {
+    let src = PathBuf::from(&path);
+    let ext = src
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext != "bin" && ext != "gguf" {
+        return Err("Import a Whisper model file (.bin or .gguf, GGML/GGUF format).".to_owned());
+    }
+
+    let mut head = [0u8; 4];
+    {
+        use std::io::Read;
+        let mut f = fs::File::open(&src).map_err(|e| format!("cannot open file: {e}"))?;
+        let _ = f.read(&mut head);
+    }
+    if !is_ggml(&head) {
+        return Err("That file isn't a GGML/GGUF Whisper model.".to_owned());
+    }
+
+    let file_name = src
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or("file has no name")?
+        .to_owned();
+    let name = src
+        .file_stem()
+        .and_then(|n| n.to_str())
+        .unwrap_or("Custom model")
+        .to_owned();
+
+    let mut models = state
+        .custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let id = unique_custom_id(&name, &models);
+
+    let dest_dir = state.custom_models_dir.join(&id);
+    fs::create_dir_all(&dest_dir).map_err(|e| format!("cannot create model dir: {e}"))?;
+    fs::copy(&src, dest_dir.join(&file_name)).map_err(|e| format!("cannot copy model: {e}"))?;
+
+    let cm = CustomModel {
+        id,
+        name,
+        kind: "whisper-cpp".to_owned(),
+        files: vec![file_name],
+    };
+    models.push(cm.clone());
+    save_custom_models(&state.custom_models_dir, &models);
+
+    custom_model_info(&cm, None).ok_or_else(|| "could not register the model".to_owned())
+}
+
 #[tauri::command]
 async fn download_model(
     app: AppHandle,
@@ -856,7 +1083,14 @@ async fn download_coreml(
 #[tauri::command]
 fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let model_id = ModelId(id);
-    if !state.store.available().iter().any(|d| d.id == model_id) {
+    let in_catalog = state.store.available().iter().any(|d| d.id == model_id);
+    let in_custom = state
+        .custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .iter()
+        .any(|c| c.id == model_id.0);
+    if !in_catalog && !in_custom {
         return Err("unknown model".to_owned());
     }
     // Persist the choice so it survives a restart (best-effort — not fatal if it fails).
@@ -1045,16 +1279,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone()
         .ok_or("no model selected")?;
-    let descriptor = state
-        .store
-        .available()
-        .into_iter()
-        .find(|d| d.id == active)
-        .ok_or("selected model is not in the catalog")?;
-    let dir = state
-        .store
-        .local_path(&active)
-        .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
+    let (descriptor, dir) = resolve_local_model(&state, &active)?;
     let language = state
         .language
         .lock()
@@ -1343,16 +1568,7 @@ async fn transcribe_file(
                 .map_err(|_| "state lock poisoned".to_owned())?
                 .clone()
                 .ok_or("no model selected")?;
-            let descriptor = state
-                .store
-                .available()
-                .into_iter()
-                .find(|d| d.id == active)
-                .ok_or("selected model is not in the catalog")?;
-            let dir = state
-                .store
-                .local_path(&active)
-                .ok_or_else(|| format!("model '{}' is not downloaded yet", active.as_str()))?;
+            let (descriptor, dir) = resolve_local_model(&state, &active)?;
 
             FileEngine::Local { descriptor, dir }
         }
@@ -1605,6 +1821,9 @@ pub fn run() {
             let active_model_path = data_dir.join("active-model");
             let cloud_keys_path = data_dir.join("cloud-keys.json");
             let cloud_keys = load_cloud_keys(&cloud_keys_path);
+            let custom_models_dir = data_dir.join("custom-models");
+            let _ = fs::create_dir_all(&custom_models_dir);
+            let custom_models = load_custom_models(&custom_models_dir);
             // The store manages both ASR models and the (separate) diarization models, so it can
             // download either; only ASR models are ever the "active" transcription model.
             let asr_catalog = builtin_catalog();
@@ -1646,6 +1865,8 @@ pub fn run() {
                 active_model_path,
                 cloud_keys: Mutex::new(cloud_keys),
                 cloud_keys_path,
+                custom_models: Mutex::new(custom_models),
+                custom_models_dir,
             });
             Ok(())
         })
@@ -1657,6 +1878,7 @@ pub fn run() {
             set_cloud_key,
             cloud_key_set,
             download_model,
+            import_custom_model,
             download_coreml,
             select_model,
             list_input_devices,
@@ -1746,5 +1968,50 @@ mod tests {
         // The full secret is never present in the hint.
         let key = "sk-secretsecretsecret9999";
         assert!(!mask_key(key).unwrap().contains("secret"));
+    }
+
+    #[test]
+    fn is_ggml_accepts_whisper_magics_and_rejects_others() {
+        assert!(is_ggml(b"GGUF\x00\x00"));
+        assert!(is_ggml(b"ggml...."));
+        assert!(is_ggml(b"lmgg....")); // ggml magic as a little-endian u32 on disk
+        assert!(!is_ggml(b"RIFF")); // a WAV, not a model
+        assert!(!is_ggml(b"\x00\x00\x00\x00"));
+        assert!(!is_ggml(b"GG")); // too short to carry a magic
+    }
+
+    #[test]
+    fn unique_custom_id_slugs_and_disambiguates() {
+        let existing = vec![CustomModel {
+            id: "custom-my-model".to_owned(),
+            name: "My Model".to_owned(),
+            kind: "whisper-cpp".to_owned(),
+            files: vec![],
+        }];
+        // Sanitised to a filesystem-safe slug (non-alphanumerics collapse, edges trimmed).
+        assert_eq!(unique_custom_id("My Model!", &[]), "custom-my-model");
+        // Collides with the existing id → suffixed.
+        assert_eq!(unique_custom_id("My Model", &existing), "custom-my-model-2");
+    }
+
+    #[test]
+    fn custom_models_round_trip_through_the_registry() {
+        let dir = std::env::temp_dir().join(format!("wisp-custom-{}", std::process::id()));
+        let _ = fs::create_dir_all(&dir);
+        assert!(
+            load_custom_models(&dir).is_empty(),
+            "absent registry → none"
+        );
+
+        let models = vec![CustomModel {
+            id: "custom-x".to_owned(),
+            name: "X".to_owned(),
+            kind: "whisper-cpp".to_owned(),
+            files: vec!["ggml-x.bin".to_owned()],
+        }];
+        save_custom_models(&dir, &models);
+        assert_eq!(load_custom_models(&dir), models);
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }
