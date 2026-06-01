@@ -39,7 +39,7 @@ use wisp_engine_sherpa::{
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
     builtin_catalog, cloud_catalog, coreml_asset, denoise_models, diarization_models,
-    family_runnable, recommended_default_model, Accelerator, FsModelStore, HttpDownloader,
+    family_runnable, recommended_default_model, Accelerator, FsModelStore, GpuTier, HttpDownloader,
     MachineProfile,
 };
 use wisp_pipeline::{
@@ -469,9 +469,70 @@ fn host_accelerator() -> Accelerator {
     Accelerator::Cpu
 }
 
-/// Auto-detects what this machine can run, for picking the default model.
+/// Reads a string sysctl by name (e.g. the CPU brand string), or `None` if it isn't available.
+#[cfg(target_os = "macos")]
+fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
+    let mut size: usize = 0;
+    // SAFETY: a null value buffer asks sysctl for the size it needs; `name` is a valid C string.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 || size == 0 {
+        return None;
+    }
+
+    let mut buf = vec![0u8; size];
+    // SAFETY: `buf` holds `size` bytes; `size` is updated in place to the number actually written.
+    let rc = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc != 0 {
+        return None;
+    }
+
+    // `size` counts the trailing NUL — trim it before decoding.
+    Some(String::from_utf8_lossy(&buf[..size.saturating_sub(1)]).into_owned())
+}
+
+/// The GPU power tier. On Apple Silicon it's the chip class parsed from the CPU brand string
+/// ("Apple M2 Max" → High, "… Ultra" → Ultra, "… Pro" → Standard, plain "Apple M_" → Entry), the
+/// signal that decides which Whisper this Mac can run live. Other platforms report `None` until a
+/// GPU ASR engine is wired for them.
+#[cfg(target_os = "macos")]
+fn host_gpu_tier() -> GpuTier {
+    let brand = sysctl_string(c"machdep.cpu.brand_string").unwrap_or_default();
+    if brand.contains("Ultra") {
+        GpuTier::Ultra
+    } else if brand.contains("Max") {
+        GpuTier::High
+    } else if brand.contains("Pro") {
+        GpuTier::Standard
+    } else {
+        GpuTier::Entry
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn host_gpu_tier() -> GpuTier {
+    GpuTier::None
+}
+
+/// Auto-detects what this machine can run, for picking the default model — accelerator, memory, and
+/// the GPU power tier so the recommendation tracks the actual chip rather than a fixed per-OS guess.
 fn detect_machine() -> MachineProfile {
-    MachineProfile::new(host_accelerator(), machine_ram_bytes())
+    MachineProfile::detailed(host_accelerator(), machine_ram_bytes(), host_gpu_tier())
 }
 
 /// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.

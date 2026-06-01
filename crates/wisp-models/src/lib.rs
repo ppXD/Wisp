@@ -22,7 +22,7 @@ pub use download::FileDownloader;
 #[cfg(feature = "http")]
 pub use download::HttpDownloader;
 pub use machine::{
-    family_runnable, recommended_accurate_model, recommended_default_model, Accelerator,
+    family_runnable, recommended_accurate_model, recommended_default_model, Accelerator, GpuTier,
     MachineProfile,
 };
 pub use store::FsModelStore;
