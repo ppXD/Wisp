@@ -11,7 +11,7 @@ use crate::transcript::{SpeakerId, TranscriptSegment};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum ExportFormat {
-    /// Plain text — one line per segment, no timestamps.
+    /// Plain text — segments merged into paragraphs, no timestamps.
     Txt,
     /// SubRip subtitles (numbered cues, `HH:MM:SS,mmm` timestamps).
     Srt,
@@ -49,17 +49,92 @@ pub fn format_transcript(segments: &[TranscriptSegment], format: ExportFormat) -
     }
 }
 
+/// A run of consecutive segments merged into one readable block — what the UI shows as a line and
+/// what plain-text export emits as a paragraph. Subtitles (SRT/VTT) keep the original fine segments.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Paragraph {
+    pub start: Duration,
+    pub end: Duration,
+    pub speaker: Option<SpeakerId>,
+    pub text: String,
+}
+
+/// Longest silence kept inside one paragraph; a longer pause starts a new paragraph.
+pub const PARAGRAPH_GAP: Duration = Duration::from_millis(1500);
+
+/// Soft cap on a paragraph's length in characters; the next segment then starts a fresh paragraph.
+const MAX_PARAGRAPH_CHARS: usize = 240;
+
+/// Merges consecutive segments into paragraphs, breaking on a speaker change, a pause longer than
+/// [`PARAGRAPH_GAP`], or once a paragraph passes [`MAX_PARAGRAPH_CHARS`]. Blank segments are skipped.
+/// Engines (and our windowing) emit one segment per utterance, which reads as a wall of short lines;
+/// grouping turns that into document-like paragraphs without touching the fine SRT/VTT cues.
+pub fn group_paragraphs(segments: &[TranscriptSegment]) -> Vec<Paragraph> {
+    let mut paragraphs: Vec<Paragraph> = Vec::new();
+
+    for segment in segments {
+        let text = segment.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        match paragraphs.last_mut() {
+            Some(para) if continues(para, segment) => {
+                para.text = join_text(&para.text, text);
+                para.end = segment.end;
+            }
+            _ => paragraphs.push(Paragraph {
+                start: segment.start,
+                end: segment.end,
+                speaker: segment.speaker,
+                text: text.to_owned(),
+            }),
+        }
+    }
+
+    paragraphs
+}
+
+/// Whether `segment` continues `para`: same speaker, a short-enough pause, and still under the cap.
+fn continues(para: &Paragraph, segment: &TranscriptSegment) -> bool {
+    para.speaker == segment.speaker
+        && segment.start.saturating_sub(para.end) <= PARAGRAPH_GAP
+        && para.text.chars().count() < MAX_PARAGRAPH_CHARS
+}
+
+/// Joins `next` onto `prev`, inserting a space only when `next` opens with an ASCII word character —
+/// so spaced scripts stay readable while CJK runs together.
+fn join_text(prev: &str, next: &str) -> String {
+    if next
+        .chars()
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric())
+    {
+        format!("{prev} {next}")
+    } else {
+        format!("{prev}{next}")
+    }
+}
+
+/// Plain text: one paragraph per block (speaker-labelled when diarized), a blank line between blocks.
 fn format_txt(segments: &[TranscriptSegment]) -> String {
-    let mut out: String = segments
+    let mut out: String = group_paragraphs(segments)
         .iter()
-        .filter(|s| !s.text.trim().is_empty())
-        .map(labelled_text)
+        .map(labelled_paragraph)
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n\n");
     if !out.is_empty() {
         out.push('\n');
     }
     out
+}
+
+/// A paragraph's text, prefixed with its speaker (`Speaker 1: …`) when diarization labelled it.
+fn labelled_paragraph(para: &Paragraph) -> String {
+    match para.speaker {
+        Some(speaker) => format!("{}: {}", speaker_label(speaker), para.text),
+        None => para.text.clone(),
+    }
 }
 
 fn format_srt(segments: &[TranscriptSegment]) -> String {
@@ -171,16 +246,14 @@ mod tests {
     }
 
     #[test]
-    fn txt_is_plain_lines_skipping_blanks() {
+    fn txt_merges_segments_into_a_paragraph_skipping_blanks() {
         let segs = vec![
             seg("hello", 0, 1000),
             seg("   ", 1000, 2000),
             seg("world", 2000, 3000),
         ];
-        assert_eq!(
-            format_transcript(&segs, ExportFormat::Txt),
-            "hello\nworld\n"
-        );
+        // Blank skipped; the two within PARAGRAPH_GAP merge into one paragraph (space before ASCII).
+        assert_eq!(format_transcript(&segs, ExportFormat::Txt), "hello world\n");
     }
 
     #[test]
@@ -216,7 +289,7 @@ mod tests {
         ];
         assert_eq!(
             format_transcript(&segs, ExportFormat::Txt),
-            "Speaker 1: hello\nSpeaker 2: hi back\n"
+            "Speaker 1: hello\n\nSpeaker 2: hi back\n"
         );
         assert_eq!(
             format_transcript(&segs, ExportFormat::Vtt),
@@ -264,5 +337,32 @@ mod tests {
         assert_eq!(format_transcript(&[], ExportFormat::Txt), "");
         assert_eq!(format_transcript(&[], ExportFormat::Srt), "");
         assert_eq!(format_transcript(&[], ExportFormat::Vtt), "WEBVTT\n\n");
+    }
+
+    #[test]
+    fn paragraphs_break_on_long_pause_and_speaker_change() {
+        // Same speaker, short gap → one paragraph.
+        assert_eq!(
+            group_paragraphs(&[seg("a", 0, 500), seg("b", 800, 1200)]).len(),
+            1
+        );
+        // A pause longer than PARAGRAPH_GAP → two paragraphs.
+        assert_eq!(
+            group_paragraphs(&[seg("a", 0, 500), seg("b", 3000, 3500)]).len(),
+            2
+        );
+        // A speaker change splits even across a short gap.
+        let spk = group_paragraphs(&[
+            seg_with_speaker("a", 0, 500, 0),
+            seg_with_speaker("b", 600, 1000, 1),
+        ]);
+        assert_eq!(spk.len(), 2);
+    }
+
+    #[test]
+    fn cjk_segments_join_without_spaces() {
+        let p = group_paragraphs(&[seg("你好", 0, 500), seg("世界", 700, 1200)]);
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].text, "你好世界");
     }
 }

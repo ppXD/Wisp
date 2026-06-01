@@ -389,6 +389,34 @@
 
   // ── File mode ────────────────────────────────────────────────────────────
   let fileSegments = $state<Segment[]>([]);
+  // Engines emit one segment per utterance; a wall of short lines reads poorly. Merge consecutive
+  // segments into paragraphs for display (mirrors wisp-core's group_paragraphs: same rules so the
+  // on-screen view matches the TXT export).
+  type FileParagraph = { id: number; startMs: number; speaker: number | null; text: string };
+  const PARAGRAPH_GAP_MS = 1500;
+  const MAX_PARAGRAPH_CHARS = 240;
+  function joinParagraphText(prev: string, next: string): string {
+    return /^[A-Za-z0-9]/.test(next) ? `${prev} ${next}` : `${prev}${next}`;
+  }
+  function groupParagraphs(segs: Segment[]): FileParagraph[] {
+    const paras: FileParagraph[] = [];
+    let prevEnd = 0;
+    for (const s of segs) {
+      const text = s.text.trim();
+      if (!text) continue;
+      const cur = paras[paras.length - 1];
+      const fits =
+        cur &&
+        cur.speaker === s.speaker &&
+        s.startMs - prevEnd <= PARAGRAPH_GAP_MS &&
+        [...cur.text].length < MAX_PARAGRAPH_CHARS;
+      if (fits) cur.text = joinParagraphText(cur.text, text);
+      else paras.push({ id: s.id, startMs: s.startMs, speaker: s.speaker, text });
+      prevEnd = s.endMs;
+    }
+    return paras;
+  }
+  const fileParagraphs = $derived(groupParagraphs(fileSegments));
   let fileName = $state("");
   let fileTranscribing = $state(false);
   // Decode progress 0–100; 0 means the engine hasn't reported yet (bar shows indeterminate).
@@ -1054,16 +1082,16 @@
           </div>
         {/if}
         <ul class="feed">
-          {#each fileSegments as seg (seg.id)}
+          {#each fileParagraphs as para (para.id)}
             <li>
               {#if fileHasTimestamps}
-                <span class="meta"><span class="time">{fmtTime(seg.startMs)}</span></span>
+                <span class="meta"><span class="time">{fmtTime(para.startMs)}</span></span>
               {/if}
               <span class="text"
-                >{#if seg.speaker !== null}<span
+                >{#if para.speaker !== null}<span
                     class="speaker"
-                    style="--spk: {speakerColor(seg.speaker)}">{speakerLabel(seg.speaker)}</span
-                  >{/if}{seg.text}</span>
+                    style="--spk: {speakerColor(para.speaker)}">{speakerLabel(para.speaker)}</span
+                  >{/if}{para.text}</span>
             </li>
           {:else}
             <li class="empty">Transcribing… large files take a little while.</li>
