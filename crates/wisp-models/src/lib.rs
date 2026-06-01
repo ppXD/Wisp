@@ -9,12 +9,14 @@
 
 pub mod catalog;
 pub mod checksum;
+pub mod cloud;
 pub mod coreml;
 pub mod download;
 pub mod machine;
 pub mod store;
 
 pub use catalog::{builtin_catalog, denoise_models, diarization_models};
+pub use cloud::cloud_catalog;
 pub use coreml::{coreml_asset, CoremlAsset};
 pub use download::FileDownloader;
 #[cfg(feature = "http")]
