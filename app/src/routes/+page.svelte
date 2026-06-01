@@ -153,6 +153,26 @@
     pickerOpen = false;
     await pickModel(id);
   }
+
+  // Import a user-supplied model file: the backend validates + copies it, then it appears in the
+  // picker and becomes the current mode's pick. Today it accepts a Whisper GGML/GGUF .bin/.gguf.
+  async function importCustom() {
+    pickerOpen = false;
+    error = "";
+    try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "Whisper model", extensions: ["bin", "gguf"] }],
+      });
+      if (typeof path !== "string") return;
+      const info = await invoke<ModelInfo>("import_custom_model", { path });
+      await refreshModels();
+      await pickModel(info.id);
+    } catch (e) {
+      error = String(e);
+    }
+  }
   // System audio on macOS needs Screen Recording permission; only relevant for the one-click source.
   const needsScreenRecording = $derived(
     !!systemAudioId && systemDevice === systemAudioId && !screenAuthorized,
@@ -784,6 +804,7 @@
           <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
           ></button>
           <div class="picker-menu" transition:slide={{ duration: 120 }}>
+            <div class="picker-scroll">
             {#if recommendedModel}
               <div class="picker-section">Recommended</div>
               <button
@@ -819,6 +840,12 @@
                 </button>
               {/each}
             {/if}
+            </div>
+            <!-- Pinned at the bottom, always reachable regardless of how long the list is. -->
+            <button class="picker-custom" onclick={importCustom}>
+              <span class="picker-custom-label">Import custom model…</span>
+              <span class="picker-custom-hint">.bin / .gguf · Whisper GGML/GGUF</span>
+            </button>
           </div>
         {/if}
       </div>
@@ -1631,13 +1658,52 @@
     left: 0;
     right: 0;
     z-index: 21;
+    display: flex;
+    flex-direction: column;
     background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: 12px;
     box-shadow: 0 14px 34px -10px rgba(40, 30, 20, 0.28);
     padding: 6px;
     max-height: 56vh;
+  }
+
+  /* The model list scrolls; the custom-import footer stays pinned below it. */
+  .picker-scroll {
     overflow-y: auto;
+    min-height: 0;
+  }
+
+  .picker-custom {
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+    width: 100%;
+    margin-top: 4px;
+    padding: 9px;
+    border: none;
+    border-top: 1px solid var(--border);
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+    font-family: inherit;
+  }
+
+  .picker-custom:hover {
+    background: var(--surface-active);
+  }
+
+  .picker-custom-label {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--accent);
+  }
+
+  .picker-custom-hint {
+    font-size: 11px;
+    color: var(--muted);
   }
 
   .picker-section {
