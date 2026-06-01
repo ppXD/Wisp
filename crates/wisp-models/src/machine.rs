@@ -76,6 +76,35 @@ pub fn recommended_default_model(profile: &MachineProfile, catalog: &[ModelDescr
     }
 }
 
+/// Auto-picks the most *accurate* ASR model for `profile`, for the File path where real-time speed
+/// isn't required — the highest-fidelity engine the machine can run. Companion to
+/// [`recommended_default_model`], which favours real-time speed for Live.
+///
+/// - **Metal** (Apple Silicon): the full Whisper large-v3 (32-layer decoder, not the distilled
+///   turbo) on the GPU — slower than turbo but the most accurate local option.
+/// - **Anything else**: the ONNX Whisper large-v3 — most accurate on the CPU; the GPU arms route here
+///   too until a GPU engine is wired for them.
+///
+/// The chosen id is guaranteed to exist in `catalog` (falling back to its first entry).
+pub fn recommended_accurate_model(
+    profile: &MachineProfile,
+    catalog: &[ModelDescriptor],
+) -> ModelId {
+    let ideal = match profile.accelerator {
+        Accelerator::Metal => "whisper-large-v3-gpu",
+        Accelerator::Cuda | Accelerator::Vulkan | Accelerator::DirectMl | Accelerator::Cpu => {
+            "whisper-large-v3"
+        }
+    };
+
+    let id = ModelId(ideal.to_owned());
+    if catalog.iter().any(|d| d.id == id) {
+        id
+    } else {
+        catalog.first().map(|d| d.id.clone()).unwrap_or(id)
+    }
+}
+
 /// Whether an ASR model of `family` can actually run on a host with `accelerator`, so the picker only
 /// offers models this machine can start.
 ///
@@ -220,5 +249,47 @@ mod tests {
         let picked =
             recommended_default_model(&MachineProfile::new(Accelerator::Cpu, 8 * GIB), &only);
         assert_eq!(picked, only[0].id);
+    }
+
+    #[test]
+    fn accurate_picks_the_full_large_v3_per_accelerator() {
+        let catalog = builtin_catalog();
+        // Metal → the full (non-turbo) large-v3 on the GPU, the most accurate local option.
+        assert_eq!(
+            recommended_accurate_model(
+                &MachineProfile::new(Accelerator::Metal, 32 * GIB),
+                &catalog
+            ),
+            ModelId("whisper-large-v3-gpu".to_owned())
+        );
+        // Anything else → the ONNX large-v3 (most accurate on the CPU).
+        for accel in [Accelerator::Cpu, Accelerator::Cuda, Accelerator::DirectMl] {
+            assert_eq!(
+                recommended_accurate_model(&MachineProfile::new(accel, 16 * GIB), &catalog),
+                ModelId("whisper-large-v3".to_owned()),
+                "{accel:?} should pick the most accurate CPU model"
+            );
+        }
+    }
+
+    #[test]
+    fn accurate_recommendation_is_in_catalog_and_runnable() {
+        let catalog = builtin_catalog();
+        let ids: std::collections::HashSet<_> = catalog.iter().map(|d| d.id.clone()).collect();
+        for accel in [
+            Accelerator::Metal,
+            Accelerator::Cpu,
+            Accelerator::Cuda,
+            Accelerator::Vulkan,
+            Accelerator::DirectMl,
+        ] {
+            let id = recommended_accurate_model(&MachineProfile::new(accel, 16 * GIB), &catalog);
+            assert!(ids.contains(&id), "{accel:?} → {id:?} not in catalog");
+            let family = catalog.iter().find(|d| d.id == id).unwrap().family;
+            assert!(
+                family_runnable(family, accel),
+                "accurate {id:?} ({family:?}) must run on {accel:?}"
+            );
+        }
     }
 }
