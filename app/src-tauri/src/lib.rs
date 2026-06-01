@@ -21,7 +21,7 @@ use wisp_audio::{
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::AudioSource;
-use wisp_core::cloud::CloudProvider;
+use wisp_core::cloud::{CloudModel, CloudProvider};
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
@@ -108,6 +108,11 @@ struct AppState {
     /// File the cloud API keys persist to — local app data only, never synced or sent anywhere
     /// except as the auth header to the provider the key belongs to.
     cloud_keys_path: PathBuf,
+    /// User-added custom cloud model ids (provider + wire id), so a just-released model is usable
+    /// without an app update. Persisted to `cloud_custom_models_path`.
+    cloud_custom_models: Mutex<Vec<CloudCustomModel>>,
+    /// File the custom cloud model ids persist to — local app data only.
+    cloud_custom_models_path: PathBuf,
     /// User-imported custom models (their files live under `custom_models_dir/<id>/`).
     custom_models: Mutex<Vec<CustomModel>>,
     /// Directory holding each imported model's files, and the registry JSON beside it.
@@ -671,6 +676,8 @@ struct CloudModelDto {
     streaming: bool,
     batch: bool,
     description: String,
+    /// User-added (not in the built-in catalog) — the UI tags it and offers removal.
+    custom: bool,
 }
 
 /// A cloud provider with its models and whether its API key is already saved on this device.
@@ -741,10 +748,17 @@ fn list_cloud_providers(state: State<'_, AppState>) -> Result<Vec<CloudProviderD
         .cloud_keys
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
+    let customs = state
+        .cloud_custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
     let providers = cloud_catalog()
         .into_iter()
         .map(|p| {
             let key_hint = keys.get(&p.id).and_then(|k| mask_key(k));
+            let pid = p.id.clone();
+            let p = with_custom_models(p, &customs);
 
             CloudProviderDto {
                 key_set: key_hint.is_some(),
@@ -756,6 +770,7 @@ fn list_cloud_providers(state: State<'_, AppState>) -> Result<Vec<CloudProviderD
                     .models
                     .into_iter()
                     .map(|m| CloudModelDto {
+                        custom: customs.iter().any(|c| c.provider == pid && c.id.trim() == m.id),
                         id: m.id,
                         name: m.display_name,
                         streaming: m.streaming,
@@ -793,6 +808,109 @@ fn cloud_key_set(state: State<'_, AppState>, provider: String) -> Result<bool, S
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
     Ok(keys.get(&provider).is_some_and(|k| !k.trim().is_empty()))
+}
+
+/// A user-added cloud model id — a `(provider, id)` the built-in catalog doesn't list yet. Because
+/// the cloud adapter routes by the provider's `protocol` (not by model id), any new id of a known
+/// provider runs through the existing engine — the zero-maintenance way to use a model the day it
+/// ships, with no app update. File/batch only (streaming would need a realtime client).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CloudCustomModel {
+    /// The built-in provider this model is reached through, e.g. `"openai"` / `"google"`.
+    provider: String,
+    /// The wire model id sent to the API, e.g. `"gpt-4o-transcribe-2027"`.
+    id: String,
+    /// Display name for the picker; falls back to the id when blank.
+    name: String,
+}
+
+/// Loads the custom cloud model registry from `path`; an absent/garbage file yields none.
+fn load_cloud_custom_models(path: &Path) -> Vec<CloudCustomModel> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persists the custom cloud model registry to `path` (local app data only). Best-effort.
+fn save_cloud_custom_models(path: &Path, models: &[CloudCustomModel]) {
+    match serde_json::to_string_pretty(models) {
+        Ok(json) => {
+            if let Err(e) = fs::write(path, json) {
+                eprintln!("wisp: could not persist custom cloud models: {e}");
+            }
+        }
+        Err(e) => eprintln!("wisp: could not serialize custom cloud models: {e}"),
+    }
+}
+
+/// `provider` with the user's matching custom ids appended as batch-only models, so the picker and
+/// the engine both see them. Blank ids and ones already in the catalog are skipped (no duplicates).
+fn with_custom_models(mut provider: CloudProvider, customs: &[CloudCustomModel]) -> CloudProvider {
+    for cm in customs.iter().filter(|c| c.provider == provider.id) {
+        let id = cm.id.trim();
+
+        if id.is_empty() || provider.models.iter().any(|m| m.id == id) {
+            continue;
+        }
+
+        let name = cm.name.trim();
+
+        provider.models.push(CloudModel {
+            id: id.to_owned(),
+            display_name: if name.is_empty() { id.to_owned() } else { name.to_owned() },
+            streaming: false,
+            batch: true,
+            languages: vec![],
+            description: "Custom model — added by you.".to_owned(),
+        });
+    }
+    provider
+}
+
+/// Adds a custom cloud model id for `provider`, so it appears in the picker and is usable at once.
+/// Rejects an unknown provider, a blank id, or an id that already exists (catalog or custom).
+#[tauri::command]
+fn add_cloud_custom_model(state: State<'_, AppState>, provider: String, model_id: String, name: String) -> Result<(), String> {
+    let base = cloud_provider_by_id(&provider)
+        .ok_or_else(|| format!("unknown cloud provider {provider}"))?;
+
+    let id = model_id.trim().to_owned();
+    if id.is_empty() {
+        return Err("a model id is required".to_owned());
+    }
+
+    let mut customs = state
+        .cloud_custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
+    if with_custom_models(base, &customs).model(&id).is_some() {
+        return Err(format!("model '{id}' already exists for {provider}"));
+    }
+
+    customs.push(CloudCustomModel {
+        provider,
+        id,
+        name: name.trim().to_owned(),
+    });
+    save_cloud_custom_models(&state.cloud_custom_models_path, &customs);
+    Ok(())
+}
+
+/// Removes a previously added custom cloud model id; a no-op if it wasn't present.
+#[tauri::command]
+fn remove_cloud_custom_model(state: State<'_, AppState>, provider: String, model_id: String) -> Result<(), String> {
+    let id = model_id.trim();
+
+    let mut customs = state
+        .cloud_custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
+    customs.retain(|c| !(c.provider == provider && c.id == id));
+    save_cloud_custom_models(&state.cloud_custom_models_path, &customs);
+    Ok(())
 }
 
 /// A user-imported model. Its files live under `custom_models_dir/<id>/`; `kind` selects the engine
@@ -1509,7 +1627,7 @@ enum FileEngine {
         dir: PathBuf,
     },
     Cloud {
-        provider: String,
+        provider: CloudProvider,
         model: String,
         key: String,
     },
@@ -1538,7 +1656,7 @@ async fn transcribe_file(
     // model or an unsaved key.
     let file_engine = match options.engine.as_deref() {
         Some("cloud") => {
-            let provider = options
+            let provider_id = options
                 .cloud_provider
                 .clone()
                 .ok_or("no cloud provider selected")?;
@@ -1550,10 +1668,22 @@ async fn transcribe_file(
                 .cloud_keys
                 .lock()
                 .map_err(|_| "state lock poisoned".to_owned())?
-                .get(&provider)
+                .get(&provider_id)
                 .filter(|k| !k.trim().is_empty())
                 .cloned()
-                .ok_or_else(|| format!("no API key saved for {provider}"))?;
+                .ok_or_else(|| format!("no API key saved for {provider_id}"))?;
+
+            // Resolve the provider with the user's custom model ids merged in, so a custom id
+            // selected in the picker is found by the engine just like a built-in one.
+            let provider = cloud_provider_by_id(&provider_id)
+                .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?;
+            let provider = {
+                let customs = state
+                    .cloud_custom_models
+                    .lock()
+                    .map_err(|_| "state lock poisoned".to_owned())?;
+                with_custom_models(provider, &customs)
+            };
 
             FileEngine::Cloud {
                 provider,
@@ -1654,12 +1784,7 @@ async fn transcribe_file(
                     provider,
                     model,
                     key,
-                } => {
-                    let provider = cloud_provider_by_id(provider).ok_or_else(|| {
-                        WispError::Model(format!("unknown cloud provider {provider}"))
-                    })?;
-                    Box::new(CloudEngine::new(&provider, model, key, &language)?)
-                }
+                } => Box::new(CloudEngine::new(provider, model, key, &language)?),
             };
 
             // Forward 0–100 decode progress to the UI, de-duplicated so we emit only on change.
@@ -1821,6 +1946,8 @@ pub fn run() {
             let active_model_path = data_dir.join("active-model");
             let cloud_keys_path = data_dir.join("cloud-keys.json");
             let cloud_keys = load_cloud_keys(&cloud_keys_path);
+            let cloud_custom_models_path = data_dir.join("cloud-custom-models.json");
+            let cloud_custom_models = load_cloud_custom_models(&cloud_custom_models_path);
             let custom_models_dir = data_dir.join("custom-models");
             let _ = fs::create_dir_all(&custom_models_dir);
             let custom_models = load_custom_models(&custom_models_dir);
@@ -1865,6 +1992,8 @@ pub fn run() {
                 active_model_path,
                 cloud_keys: Mutex::new(cloud_keys),
                 cloud_keys_path,
+                cloud_custom_models: Mutex::new(cloud_custom_models),
+                cloud_custom_models_path,
                 custom_models: Mutex::new(custom_models),
                 custom_models_dir,
             });
@@ -1877,6 +2006,8 @@ pub fn run() {
             list_cloud_providers,
             set_cloud_key,
             cloud_key_set,
+            add_cloud_custom_model,
+            remove_cloud_custom_model,
             download_model,
             import_custom_model,
             download_coreml,
@@ -1954,6 +2085,66 @@ mod tests {
     fn cloud_provider_by_id_finds_seeded_and_rejects_unknown() {
         assert!(cloud_provider_by_id("openai").is_some());
         assert!(cloud_provider_by_id("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn with_custom_models_appends_matching_ids_and_skips_dupes() {
+        let base = cloud_provider_by_id("openai").unwrap();
+        let original = base.models.len();
+        let existing = base.models[0].id.clone();
+
+        let customs = vec![
+            CloudCustomModel {
+                provider: "openai".to_owned(),
+                id: "gpt-4o-transcribe-next".to_owned(),
+                name: "Next".to_owned(),
+            },
+            // Already in the catalog → skipped.
+            CloudCustomModel {
+                provider: "openai".to_owned(),
+                id: existing,
+                name: "dup".to_owned(),
+            },
+            // A different provider → not merged here.
+            CloudCustomModel {
+                provider: "google".to_owned(),
+                id: "other".to_owned(),
+                name: String::new(),
+            },
+            // Blank id → skipped.
+            CloudCustomModel {
+                provider: "openai".to_owned(),
+                id: "   ".to_owned(),
+                name: String::new(),
+            },
+        ];
+
+        let merged = with_custom_models(base, &customs);
+        assert_eq!(merged.models.len(), original + 1, "only the one new id is added");
+
+        let added = merged.model("gpt-4o-transcribe-next").expect("custom id present");
+        assert!(added.batch && !added.streaming, "custom cloud models are file-only");
+        assert_eq!(added.display_name, "Next");
+        assert!(merged.model("other").is_none(), "other provider's id not merged");
+    }
+
+    #[test]
+    fn custom_cloud_models_round_trip_through_the_registry() {
+        let dir = std::env::temp_dir().join(format!("wisp-cloud-customs-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cloud-custom-models.json");
+
+        assert!(load_cloud_custom_models(&path).is_empty(), "absent file → none");
+
+        let models = vec![CloudCustomModel {
+            provider: "google".to_owned(),
+            id: "gemini-3-flash".to_owned(),
+            name: "Gemini 3 Flash".to_owned(),
+        }];
+        save_cloud_custom_models(&path, &models);
+        assert_eq!(load_cloud_custom_models(&path), models);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -1,6 +1,11 @@
 <script lang="ts">
   import { slide } from "svelte/transition";
-  import { cloudState, cloudProvider } from "$lib/cloud.svelte";
+  import {
+    cloudState,
+    cloudProvider,
+    addCloudCustomModel,
+    removeCloudCustomModel,
+  } from "$lib/cloud.svelte";
 
   // Left dropdown picks the provider, right dropdown picks the model. `capability` filters the
   // model list to what this mode can actually run (File = batch, Live = streaming).
@@ -17,6 +22,12 @@
   let provOpen = $state(false);
   let modelOpen = $state(false);
 
+  // Inline "add a custom model id" form, shown at the foot of the model menu (File/batch only).
+  let adding = $state(false);
+  let customId = $state("");
+  let customName = $state("");
+  let addError = $state("");
+
   const provider = $derived(cloudProvider(providerId));
   const models = $derived(
     provider?.models.filter((m) => (capability === "streaming" ? m.streaming : m.batch)) ?? [],
@@ -31,6 +42,13 @@
   $effect(() => {
     if (models.length && !models.find((m) => m.id === modelId)) modelId = models[0].id;
   });
+  // Reset the add-model form whenever the menu closes.
+  $effect(() => {
+    if (!modelOpen) {
+      adding = false;
+      addError = "";
+    }
+  });
 
   function pickProvider(id: string) {
     provOpen = false;
@@ -42,6 +60,34 @@
   function pickModel(id: string) {
     modelOpen = false;
     modelId = id;
+  }
+
+  // Register the typed id as a custom model (batch-only), then select it. The backend rejects a
+  // blank or duplicate id; its message is surfaced inline.
+  async function confirmAdd() {
+    const id = customId.trim();
+    if (!id) return;
+    try {
+      await addCloudCustomModel(providerId, id, customName);
+      customId = "";
+      customName = "";
+      adding = false;
+      pickModel(id);
+    } catch (e) {
+      addError = String(e);
+    }
+  }
+
+  function cancelAdd() {
+    adding = false;
+    addError = "";
+    customId = "";
+    customName = "";
+  }
+
+  async function removeCustom(id: string) {
+    await removeCloudCustomModel(providerId, id);
+    if (modelId === id) modelId = ""; // the effect re-defaults to a remaining model
   }
 </script>
 
@@ -69,7 +115,7 @@
       class="trigger"
       class:open={modelOpen}
       onclick={() => (modelOpen = !modelOpen)}
-      disabled={!models.length}
+      disabled={!models.length && capability !== "batch"}
     >
       <span class="lbl">{model?.name ?? (models.length ? "Model" : "No model")}</span>
       <span class="caret"></span>
@@ -78,10 +124,46 @@
       <button class="bg" aria-label="Close" onclick={() => (modelOpen = false)}></button>
       <div class="menu" transition:slide={{ duration: 120 }}>
         {#each models as m (m.id)}
-          <button class="opt" class:sel={m.id === modelId} onclick={() => pickModel(m.id)}>
-            <span class="opt-name">{m.name}</span>
-          </button>
+          <div class="opt-row">
+            <button class="opt" class:sel={m.id === modelId} onclick={() => pickModel(m.id)}>
+              <span class="opt-name">{m.name}</span>
+              {#if m.custom}<span class="tag">custom</span>{/if}
+            </button>
+            {#if m.custom}
+              <button class="rm" aria-label={`Remove ${m.name}`} onclick={() => removeCustom(m.id)}
+                >×</button
+              >
+            {/if}
+          </div>
         {/each}
+
+        {#if capability === "batch"}
+          <div class="foot">
+            {#if adding}
+              <div class="add">
+                <input
+                  class="in"
+                  placeholder="Model id (e.g. gpt-4o-transcribe)"
+                  bind:value={customId}
+                  onkeydown={(e) => e.key === "Enter" && confirmAdd()}
+                />
+                <input
+                  class="in"
+                  placeholder="Display name (optional)"
+                  bind:value={customName}
+                  onkeydown={(e) => e.key === "Enter" && confirmAdd()}
+                />
+                {#if addError}<span class="err">{addError}</span>{/if}
+                <div class="row">
+                  <button class="ghost" onclick={cancelAdd}>Cancel</button>
+                  <button class="add-btn" disabled={!customId.trim()} onclick={confirmAdd}>Add</button>
+                </div>
+              </div>
+            {:else}
+              <button class="opt add-row" onclick={() => (adding = true)}>+ Custom model…</button>
+            {/if}
+          </div>
+        {/if}
       </div>
     {/if}
   </div>
@@ -172,7 +254,7 @@
     left: 0;
     right: 0;
     min-width: 160px;
-    max-height: 280px;
+    max-height: 320px;
     overflow-y: auto;
     background: var(--surface);
     border: 1px solid var(--border-strong);
@@ -221,5 +303,113 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     border-radius: 999px;
     padding: 1px 7px;
+  }
+
+  /* A model row: the selectable button plus an optional remove (×) for custom ids. */
+  .opt-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .opt-row .opt {
+    flex: 1;
+    min-width: 0;
+    width: auto;
+  }
+
+  .rm {
+    flex: none;
+    width: 22px;
+    height: 22px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 15px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+
+  .rm:hover {
+    color: var(--text);
+    background: var(--surface-active);
+  }
+
+  /* Pinned footer holding the "add a custom model id" affordance. */
+  .foot {
+    border-top: 1px solid var(--border-strong);
+    margin-top: 4px;
+    padding-top: 4px;
+  }
+
+  .add-row {
+    color: var(--accent);
+    font-weight: 500;
+  }
+
+  .add {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 7px;
+  }
+
+  .in {
+    width: 100%;
+    box-sizing: border-box;
+    font-family: inherit;
+    font-size: 12.5px;
+    color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    padding: 6px 8px;
+  }
+
+  .in:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+
+  .err {
+    font-size: 11.5px;
+    color: #d4493f;
+  }
+
+  .row {
+    display: flex;
+    justify-content: flex-end;
+    gap: 6px;
+  }
+
+  .ghost,
+  .add-btn {
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    border-radius: 7px;
+    padding: 5px 11px;
+    cursor: pointer;
+    border: 1px solid transparent;
+  }
+
+  .ghost {
+    color: var(--muted);
+    background: transparent;
+    border-color: var(--border-strong);
+  }
+
+  .add-btn {
+    color: white;
+    background: var(--accent);
+  }
+
+  .add-btn:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 </style>
