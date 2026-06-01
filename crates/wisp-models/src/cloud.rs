@@ -8,7 +8,7 @@ use wisp_core::cloud::{CloudAuth, CloudModel, CloudProtocol, CloudProvider};
 
 /// Built-in cloud providers. Each is opt-in and requires the user's API key.
 pub fn cloud_catalog() -> Vec<CloudProvider> {
-    vec![openai(), groq()]
+    vec![openai(), groq(), google(), qwen()]
 }
 
 /// A multilingual cloud model (empty `languages` = auto-detect).
@@ -81,6 +81,63 @@ fn groq() -> CloudProvider {
                 "Faster large-v3 turbo on Groq — files, multilingual.",
             ),
         ],
+    }
+}
+
+fn google() -> CloudProvider {
+    CloudProvider {
+        id: "google".to_owned(),
+        display_name: "Google (Gemini)".to_owned(),
+        protocol: CloudProtocol::Gemini,
+        base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
+        keys_url: "https://aistudio.google.com/apikey".to_owned(),
+        // Gemini authenticates with a `?key=` query parameter, so this header config is unused; it's
+        // here only because `CloudAuth` is required. (Bearer is the harmless default.)
+        auth: CloudAuth::bearer(),
+        models: vec![
+            model(
+                "gemini-2.5-flash",
+                "Gemini 2.5 Flash",
+                false,
+                true,
+                "Fast multimodal model — transcribes audio with strong multilingual (incl. CJK) \
+                 accuracy.",
+            ),
+            model(
+                "gemini-2.0-flash",
+                "Gemini 2.0 Flash",
+                false,
+                true,
+                "Faster, lower-cost multimodal model for everyday transcription.",
+            ),
+            model(
+                "gemini-1.5-flash",
+                "Gemini 1.5 Flash",
+                false,
+                true,
+                "Earlier fast model, broadly available.",
+            ),
+        ],
+    }
+}
+
+fn qwen() -> CloudProvider {
+    CloudProvider {
+        id: "qwen".to_owned(),
+        display_name: "Qwen (DashScope)".to_owned(),
+        // OpenAI-compatible chat endpoint carrying the audio as an `input_audio` content part.
+        protocol: CloudProtocol::OpenAiChatAudio,
+        // International endpoint; China-region keys use `https://dashscope.aliyuncs.com/...`.
+        base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_owned(),
+        keys_url: "https://modelstudio.console.alibabacloud.com/".to_owned(),
+        auth: CloudAuth::bearer(),
+        models: vec![model(
+            "qwen3-asr-flash",
+            "Qwen3-ASR Flash",
+            false,
+            true,
+            "Alibaba's fast multilingual speech recognition, strong on Chinese and Cantonese.",
+        )],
     }
 }
 
