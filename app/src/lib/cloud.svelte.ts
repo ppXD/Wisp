@@ -16,6 +16,10 @@ export type CloudProvider = {
   id: string;
   name: string;
   keySet: boolean;
+  /** Masked form of the saved key (e.g. `sk-…a1b2`), or null when no key is saved. */
+  keyHint: string | null;
+  /** The provider's "API keys" console page, for the "Get a key" link. */
+  keysUrl: string;
   models: CloudModel[];
 };
 

@@ -578,12 +578,37 @@ struct CloudProviderDto {
     id: String,
     name: String,
     key_set: bool,
+    /// A masked form of the saved key (e.g. `sk-…a1b2`) for display, or `None` when no key is saved.
+    /// The full key never leaves the backend; only this masked hint does.
+    key_hint: Option<String>,
+    /// The provider's "API keys" console page, for the "Get a key" link.
+    keys_url: String,
     models: Vec<CloudModelDto>,
 }
 
 /// The cloud provider with `id` from the built-in catalog, if any.
 fn cloud_provider_by_id(id: &str) -> Option<CloudProvider> {
     cloud_catalog().into_iter().find(|p| p.id == id)
+}
+
+/// A short, non-secret hint for a saved key — a leading `sk-`-style prefix and the last four chars
+/// (e.g. `sk-…a1b2`), matching how provider consoles display stored keys. Returns `None` for a blank
+/// key. Only the last four characters are revealed; the rest is never shown.
+fn mask_key(key: &str) -> Option<String> {
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+
+    let n = key.chars().count();
+    let last4: String = key.chars().skip(n.saturating_sub(4)).collect();
+
+    if n <= 8 {
+        return Some(format!("…{last4}"));
+    }
+
+    let prefix: String = key.chars().take(3).collect();
+    Some(format!("{prefix}…{last4}"))
 }
 
 /// Loads the on-device cloud API keys (provider → key); an absent or unreadable file yields none.
@@ -616,21 +641,27 @@ fn list_cloud_providers(state: State<'_, AppState>) -> Result<Vec<CloudProviderD
         .map_err(|_| "state lock poisoned".to_owned())?;
     let providers = cloud_catalog()
         .into_iter()
-        .map(|p| CloudProviderDto {
-            key_set: keys.get(&p.id).is_some_and(|k| !k.trim().is_empty()),
-            id: p.id,
-            name: p.display_name,
-            models: p
-                .models
-                .into_iter()
-                .map(|m| CloudModelDto {
-                    id: m.id,
-                    name: m.display_name,
-                    streaming: m.streaming,
-                    batch: m.batch,
-                    description: m.description,
-                })
-                .collect(),
+        .map(|p| {
+            let key_hint = keys.get(&p.id).and_then(|k| mask_key(k));
+
+            CloudProviderDto {
+                key_set: key_hint.is_some(),
+                key_hint,
+                keys_url: p.keys_url,
+                id: p.id,
+                name: p.display_name,
+                models: p
+                    .models
+                    .into_iter()
+                    .map(|m| CloudModelDto {
+                        id: m.id,
+                        name: m.display_name,
+                        streaming: m.streaming,
+                        batch: m.batch,
+                        description: m.description,
+                    })
+                    .collect(),
+            }
         })
         .collect();
     Ok(providers)
@@ -1592,7 +1623,10 @@ mod tests {
     fn load_cloud_keys_is_empty_for_missing_or_garbage_files() {
         let missing = temp_path("missing");
         let _ = fs::remove_file(&missing);
-        assert!(load_cloud_keys(&missing).is_empty(), "absent file → no keys");
+        assert!(
+            load_cloud_keys(&missing).is_empty(),
+            "absent file → no keys"
+        );
 
         let garbage = temp_path("garbage");
         fs::write(&garbage, b"not json at all").unwrap();
@@ -1613,7 +1647,11 @@ mod tests {
         keys.insert("groq".to_owned(), "gsk-test-456".to_owned());
         save_cloud_keys(&path, &keys);
 
-        assert_eq!(load_cloud_keys(&path), keys, "keys survive a save/load cycle");
+        assert_eq!(
+            load_cloud_keys(&path),
+            keys,
+            "keys survive a save/load cycle"
+        );
 
         let _ = fs::remove_file(&path);
     }
@@ -1622,5 +1660,19 @@ mod tests {
     fn cloud_provider_by_id_finds_seeded_and_rejects_unknown() {
         assert!(cloud_provider_by_id("openai").is_some());
         assert!(cloud_provider_by_id("does-not-exist").is_none());
+    }
+
+    #[test]
+    fn mask_key_reveals_only_a_prefix_and_last_four() {
+        // A normal key: leading "sk-" prefix + last four, nothing in between.
+        assert_eq!(mask_key("sk-abcdefghijklmnop").as_deref(), Some("sk-…mnop"));
+        // Blank or whitespace-only → no hint.
+        assert_eq!(mask_key("   "), None);
+        assert_eq!(mask_key(""), None);
+        // A short key never reveals more than its last four characters.
+        assert_eq!(mask_key("abcd1234").as_deref(), Some("…1234"));
+        // The full secret is never present in the hint.
+        let key = "sk-secretsecretsecret9999";
+        assert!(!mask_key(key).unwrap().contains("secret"));
     }
 }

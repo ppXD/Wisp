@@ -29,6 +29,7 @@ fn openai() -> CloudProvider {
         display_name: "OpenAI".to_owned(),
         protocol: CloudProtocol::OpenAi,
         base_url: "https://api.openai.com/v1".to_owned(),
+        keys_url: "https://platform.openai.com/api-keys".to_owned(),
         auth: CloudAuth::bearer(),
         models: vec![
             model(
@@ -62,6 +63,7 @@ fn groq() -> CloudProvider {
         display_name: "Groq".to_owned(),
         protocol: CloudProtocol::OpenAi, // OpenAI-compatible endpoint, different base_url
         base_url: "https://api.groq.com/openai/v1".to_owned(),
+        keys_url: "https://console.groq.com/keys".to_owned(),
         auth: CloudAuth::bearer(),
         models: vec![
             model(

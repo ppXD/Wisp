@@ -72,6 +72,9 @@ pub struct CloudProvider {
     pub protocol: CloudProtocol,
     /// Default API endpoint; a user may override it for a self-hosted or compatible gateway.
     pub base_url: String,
+    /// Where the user creates their API key (the provider's console "API keys" page) — surfaced as
+    /// a "Get a key" link in the key manager.
+    pub keys_url: String,
     /// How to authenticate with the user's API key.
     pub auth: CloudAuth,
     /// Models offered, in display order.
@@ -112,6 +115,7 @@ mod tests {
             display_name: "P".to_owned(),
             protocol: CloudProtocol::OpenAi,
             base_url: "https://example".to_owned(),
+            keys_url: "https://example/keys".to_owned(),
             auth: CloudAuth::bearer(),
             models: vec![CloudModel {
                 id: "m1".to_owned(),
