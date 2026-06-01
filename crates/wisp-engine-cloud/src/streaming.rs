@@ -31,6 +31,7 @@ use tungstenite::{Message, WebSocket};
 
 use wisp_core::engine::{StreamingAsrEngine, StreamingResult};
 use wisp_core::error::{Result, WispError};
+use wisp_core::params::{ParamSpec, ParamValues};
 
 use crate::b64;
 
@@ -61,10 +62,54 @@ impl OpenAiRealtimeEngine {
     /// OpenAI-compatible realtime gateway. Unset uses [`DEFAULT_REALTIME_URL`].
     pub const REALTIME_URL_ENV: &'static str = "WISP_OPENAI_REALTIME_URL";
 
+    /// The tunable knobs this engine exposes (server-VAD endpointing + noise reduction), each with a
+    /// smart default — rendered by the generic advanced-parameters UI, read back in `new` via
+    /// [`ParamValues`]. New knobs are added here and need no UI change.
+    pub fn param_specs() -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::float(
+                "vad_threshold",
+                "Voice sensitivity",
+                "How clearly speech must stand out for the server to treat it as voice. Higher = \
+                 stricter (fewer false starts in noise).",
+                0.0,
+                1.0,
+                0.05,
+                0.5,
+            ),
+            ParamSpec::int(
+                "vad_silence_ms",
+                "End-of-speech silence",
+                "How long a pause (ms) ends an utterance and finalises the line. Lower feels snappier; \
+                 higher avoids cutting mid-sentence.",
+                100,
+                2000,
+                500,
+            ),
+            ParamSpec::int(
+                "vad_prefix_padding_ms",
+                "Lead-in padding",
+                "Audio kept before speech starts (ms), so the first word isn't clipped.",
+                0,
+                1000,
+                300,
+            ),
+            ParamSpec::enumerated(
+                "noise_reduction",
+                "Noise reduction",
+                "Server-side denoise before transcription: near for a headset, far for a room mic, or \
+                 off.",
+                &["off", "near_field", "far_field"],
+                "near_field",
+            ),
+        ]
+    }
+
     /// Connects and configures a Realtime transcription session for `model`, authenticating with
-    /// `api_key`. `language` is an ISO code, or empty to auto-detect. Errors on a blank key, a failed
+    /// `api_key`. `language` is an ISO code, or empty to auto-detect; `params` are the advanced knobs
+    /// (missing keys fall back to [`Self::param_specs`] defaults). Errors on a blank key, a failed
     /// connection, or a rejected handshake.
-    pub fn new(model: &str, api_key: &str, language: &str) -> Result<Self> {
+    pub fn new(model: &str, api_key: &str, language: &str, params: &ParamValues) -> Result<Self> {
         let key = api_key.trim();
         if key.is_empty() {
             return Err(WispError::Engine("OpenAI needs an API key".to_owned()));
@@ -73,7 +118,7 @@ impl OpenAiRealtimeEngine {
         let mut ws = connect(key)?;
         set_nonblocking(&mut ws);
 
-        let configure = Message::text(build_session_update(model, language));
+        let configure = Message::text(build_session_update(model, language, params));
         ws.send(configure)
             .map_err(|e| engine_err("session config", e))?;
 
@@ -257,26 +302,30 @@ fn is_would_block(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if io.kind() == ErrorKind::WouldBlock)
 }
 
-/// The `transcription_session.update` payload: PCM16 in, server VAD endpointing, the chosen model.
-fn build_session_update(model: &str, language: &str) -> String {
-    serde_json::json!({
-        "type": "transcription_session.update",
-        "session": {
-            "input_audio_format": "pcm16",
-            "input_audio_transcription": {
-                "model": model,
-                "language": language,
-                "prompt": ""
-            },
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.5,
-                "prefix_padding_ms": 300,
-                "silence_duration_ms": 500
-            }
+/// The `transcription_session.update` payload: PCM16 in, server-VAD endpointing tuned by `params`,
+/// the chosen model, and (unless `off`) server-side noise reduction.
+fn build_session_update(model: &str, language: &str, params: &ParamValues) -> String {
+    let mut session = serde_json::json!({
+        "input_audio_format": "pcm16",
+        "input_audio_transcription": {
+            "model": model,
+            "language": language,
+            "prompt": ""
+        },
+        "turn_detection": {
+            "type": "server_vad",
+            "threshold": params.float("vad_threshold", 0.5),
+            "prefix_padding_ms": params.int("vad_prefix_padding_ms", 300),
+            "silence_duration_ms": params.int("vad_silence_ms", 500)
         }
-    })
-    .to_string()
+    });
+
+    let noise = params.text("noise_reduction", "near_field");
+    if noise != "off" {
+        session["input_audio_noise_reduction"] = serde_json::json!({ "type": noise });
+    }
+
+    serde_json::json!({ "type": "transcription_session.update", "session": session }).to_string()
 }
 
 /// An `input_audio_buffer.append` frame carrying base64 PCM16 audio.
@@ -384,8 +433,9 @@ mod tests {
     }
 
     #[test]
-    fn session_update_configures_pcm16_server_vad_and_model() {
-        let json = build_session_update("gpt-4o-transcribe", "en");
+    fn session_update_uses_param_defaults_for_model_vad_and_noise() {
+        let params = ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs());
+        let json = build_session_update("gpt-4o-transcribe", "en", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(v["type"], "transcription_session.update");
@@ -395,7 +445,36 @@ mod tests {
             "gpt-4o-transcribe"
         );
         assert_eq!(v["session"]["input_audio_transcription"]["language"], "en");
-        assert_eq!(v["session"]["turn_detection"]["type"], "server_vad");
+
+        let vad = &v["session"]["turn_detection"];
+        assert_eq!(vad["type"], "server_vad");
+        assert_eq!(vad["threshold"], 0.5);
+        assert_eq!(vad["silence_duration_ms"], 500);
+        assert_eq!(vad["prefix_padding_ms"], 300);
+        assert_eq!(
+            v["session"]["input_audio_noise_reduction"]["type"],
+            "near_field"
+        );
+    }
+
+    #[test]
+    fn session_update_applies_overrides_and_omits_noise_when_off() {
+        use wisp_core::params::ParamValue;
+
+        let mut params = ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs());
+        params.set("vad_threshold", ParamValue::Float(0.8));
+        params.set("vad_silence_ms", ParamValue::Int(900));
+        params.set("noise_reduction", ParamValue::Text("off".to_owned()));
+
+        let json = build_session_update("gpt-4o-transcribe", "", &params);
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+
+        assert_eq!(v["session"]["turn_detection"]["threshold"], 0.8);
+        assert_eq!(v["session"]["turn_detection"]["silence_duration_ms"], 900);
+        assert!(
+            v["session"]["input_audio_noise_reduction"].is_null(),
+            "noise_reduction omitted when off"
+        );
     }
 
     #[test]
