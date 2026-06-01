@@ -10,6 +10,7 @@ pub mod aec;
 pub mod align;
 pub mod audio;
 pub mod channel;
+pub mod cloud;
 pub mod config;
 pub mod dedup;
 pub mod denoise;
