@@ -90,6 +90,7 @@ dependencies = [
  "wisp-aec",
  "wisp-audio",
  "wisp-core",
+ "wisp-engine-cloud",
  "wisp-engine-sherpa",
  "wisp-engine-whisper-cpp",
  "wisp-loopback",
@@ -6042,6 +6043,17 @@ name = "wisp-core"
 version = "0.0.0"
 dependencies = [
  "thiserror 2.0.18",
+]
+
+[[package]]
+name = "wisp-engine-cloud"
+version = "0.0.0"
+dependencies = [
+ "hound",
+ "serde",
+ "serde_json",
+ "ureq",
+ "wisp-core",
 ]
 
 [[package]]
