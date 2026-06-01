@@ -56,7 +56,7 @@
   let livePrompt = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
-  let mode = $state<"live" | "file" | "cloud">("live");
+  let mode = $state<"live" | "file">("live");
   // Settings modals (replace the old inline disclosures, so opening them never shifts the layout).
   let liveAdvancedOpen = $state(false);
   let fileOptionsOpen = $state(false);
@@ -625,7 +625,6 @@
   <nav class="tabs">
     <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
     <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
-    <button class:active={mode === "cloud"} onclick={() => (mode = "cloud")}>Cloud</button>
   </nav>
 
   {#snippet modelPicker()}
@@ -1146,14 +1145,6 @@
         </Modal>
       {/if}
     </section>
-  {:else}
-    <section class="box box-center">
-      <div class="placeholder-title">Cloud realtime</div>
-      <p class="placeholder-sub">
-        Stream live audio to a realtime transcription API (e.g. OpenAI Realtime) for the highest
-        accuracy with no local model. Coming soon.
-      </p>
-    </section>
   {/if}
 </main>
 
@@ -1241,13 +1232,6 @@
     border: 1px solid var(--border);
     border-radius: 16px;
     overflow: hidden;
-  }
-
-  .box-center {
-    align-items: center;
-    justify-content: center;
-    text-align: center;
-    padding: 28px;
   }
 
   .box-head {
@@ -2041,16 +2025,4 @@
     line-height: 1.6;
   }
 
-  .placeholder-title {
-    font-size: 18px;
-    font-weight: 600;
-  }
-
-  .placeholder-sub {
-    margin: 10px auto 0;
-    max-width: 420px;
-    color: var(--muted);
-    font-size: 14px;
-    line-height: 1.6;
-  }
 </style>
