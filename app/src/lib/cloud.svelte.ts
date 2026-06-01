@@ -64,6 +64,64 @@ export function openKeyModal(): void {
   cloudState.keyModalOpen = true;
 }
 
+// ── Generic engine parameters (the "advanced settings" schema) ──────────────────────────────────
+// An engine declares its tunables as ParamSpecs; the generic <ParamsPanel> renders them and the
+// user's values ride to the backend as overrides. The same panel serves any engine — new knobs are
+// backend-only.
+
+export type ParamValue = number | boolean | string;
+
+export type ParamSpec = {
+  key: string;
+  label: string;
+  help: string;
+  kind: "float" | "int" | "bool" | "enum" | "text";
+  min: number;
+  max: number;
+  step: number;
+  options: string[];
+  default: ParamValue;
+  advanced: boolean;
+};
+
+/** The advanced live-streaming parameter specs a provider exposes (empty if it can't stream). */
+export async function streamingParams(providerId: string): Promise<ParamSpec[]> {
+  if (!providerId) return [];
+  try {
+    return await invoke<ParamSpec[]>("streaming_params", { provider: providerId });
+  } catch {
+    return [];
+  }
+}
+
+/** Each spec's smart default, as a flat key→value map. */
+export function defaultParamValues(specs: ParamSpec[]): Record<string, ParamValue> {
+  return Object.fromEntries(specs.map((s) => [s.key, s.default]));
+}
+
+const PARAMS_KEY = "wisp.params";
+
+/** Saved parameter values for a (provider, model), or `{}` — overlaid on the spec defaults. */
+export function loadParamValues(provider: string, model: string): Record<string, ParamValue> {
+  try {
+    const all = JSON.parse(localStorage.getItem(PARAMS_KEY) ?? "{}");
+    return all?.[`${provider}/${model}`] ?? {};
+  } catch {
+    return {};
+  }
+}
+
+/** Persists parameter values for a (provider, model) on this device. */
+export function saveParamValues(provider: string, model: string, values: Record<string, ParamValue>): void {
+  try {
+    const all = JSON.parse(localStorage.getItem(PARAMS_KEY) ?? "{}");
+    all[`${provider}/${model}`] = values;
+    localStorage.setItem(PARAMS_KEY, JSON.stringify(all));
+  } catch {
+    // localStorage unavailable — params just won't persist; not fatal.
+  }
+}
+
 /** The provider with `id`, if present in the catalog. */
 export function cloudProvider(id: string): CloudProvider | undefined {
   return cloudState.providers.find((p) => p.id === id);
