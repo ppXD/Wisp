@@ -30,7 +30,9 @@
     description: string;
     installed: boolean;
     active: boolean;
-    recommended: boolean;
+    family: string;
+    recommendedLive: boolean;
+    recommendedFile: boolean;
     coremlAvailable: boolean;
     coremlInstalled: boolean;
     coremlSizeBytes: number;
@@ -87,11 +89,27 @@
     if (m?.installed) await selectModel(id); // installed → make it the active model
   }
 
-  // Custom model dropdown. Logical order: ready-to-use (installed) models first, then ones to
-  // download — each kept in catalog (recommendation) order.
+  // Curated model dropdown. One clear "Recommended for this machine" up top (accuracy for File,
+  // real-time for Live), the user's other installed models next, and everything else under "More".
   let pickerOpen = $state(false);
-  const installedModels = $derived(models.filter((m) => m.installed));
-  const availableModels = $derived(models.filter((m) => !m.installed));
+  // This machine has a GPU Whisper engine if the catalog surfaced any (the backend hides them off
+  // Metal); when it does, the CPU-ONNX Whisper models are strictly worse, so they drop to "More".
+  const hasGpuWhisper = $derived(models.some((m) => m.family === "WhisperCpp"));
+  const isRedundant = (m: ModelInfo) => hasGpuWhisper && m.family === "Whisper";
+  const recommendedId = $derived(
+    (mode === "file"
+      ? models.find((m) => m.recommendedFile)
+      : models.find((m) => m.recommendedLive)
+    )?.id,
+  );
+  const recommendedModel = $derived(models.find((m) => m.id === recommendedId));
+  const recommendTag = $derived(mode === "file" ? "best accuracy" : "for this machine");
+  const installedPrimary = $derived(
+    models.filter((m) => m.installed && m.id !== recommendedId && !isRedundant(m)),
+  );
+  const moreModels = $derived(
+    models.filter((m) => m.id !== recommendedId && (!m.installed || isRedundant(m))),
+  );
 
   async function choose(id: string) {
     pickerOpen = false;
@@ -718,23 +736,38 @@
           <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
           ></button>
           <div class="picker-menu" transition:slide={{ duration: 120 }}>
-            {#if installedModels.length}
+            {#if recommendedModel}
+              <div class="picker-section">Recommended</div>
+              <button
+                class="picker-opt"
+                class:sel={recommendedModel.id === chosenId}
+                onclick={() => choose(recommendedModel.id)}
+              >
+                <span class="picker-opt-name">{recommendedModel.name}</span>
+                <span class="picker-tag rec">{recommendTag}</span>
+                {#if recommendedModel.active}<span class="picker-tag">active</span>
+                {:else if !recommendedModel.installed}<span class="picker-opt-size"
+                    >{fmtSize(recommendedModel.sizeBytes)}</span
+                  >{/if}
+              </button>
+            {/if}
+            {#if installedPrimary.length}
               <div class="picker-section">Installed</div>
-              {#each installedModels as m (m.id)}
+              {#each installedPrimary as m (m.id)}
                 <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
                   <span class="picker-opt-name">{m.name}</span>
-                  {#if m.recommended}<span class="picker-tag rec">for this machine</span>{/if}
                   {#if m.active}<span class="picker-tag">active</span>{/if}
                 </button>
               {/each}
             {/if}
-            {#if availableModels.length}
-              <div class="picker-section">Available to download</div>
-              {#each availableModels as m (m.id)}
+            {#if moreModels.length}
+              <div class="picker-section">More models</div>
+              {#each moreModels as m (m.id)}
                 <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
                   <span class="picker-opt-name">{m.name}</span>
-                  {#if m.recommended}<span class="picker-tag rec">for this machine</span>{/if}
-                  <span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span>
+                  {#if m.active}<span class="picker-tag">active</span>
+                  {:else if !m.installed}<span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span
+                    >{/if}
                 </button>
               {/each}
             {/if}

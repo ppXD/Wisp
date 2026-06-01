@@ -39,8 +39,8 @@ use wisp_engine_sherpa::{
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
     builtin_catalog, cloud_catalog, coreml_asset, denoise_models, diarization_models,
-    family_runnable, recommended_default_model, Accelerator, FsModelStore, GpuTier, HttpDownloader,
-    MachineProfile,
+    family_runnable, recommended_accurate_model, recommended_default_model, Accelerator,
+    FsModelStore, GpuTier, HttpDownloader, MachineProfile,
 };
 use wisp_pipeline::{
     remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, Segmenter,
@@ -165,8 +165,13 @@ struct ModelInfoDto {
     description: String,
     installed: bool,
     active: bool,
-    /// Whether this is the model recommended for the user's Mac (by available memory).
-    recommended: bool,
+    /// The engine family (`"Whisper"`, `"WhisperCpp"`, `"SenseVoice"`, `"StreamingTransducer"`), for
+    /// the picker to curate — e.g. de-emphasise CPU-ONNX Whisper on a Mac that has the Metal one.
+    family: String,
+    /// Recommended for this machine's **Live** (real-time) use.
+    recommended_live: bool,
+    /// Recommended for this machine's **File** (accuracy-first) use.
+    recommended_file: bool,
     /// Whether this model has an optional Core ML (Neural Engine) encoder to download.
     coreml_available: bool,
     /// Whether that Core ML encoder is already downloaded next to the model.
@@ -541,11 +546,14 @@ fn to_model_info(
     d: ModelDescriptor,
     store: &FsModelStore,
     active: Option<&ModelId>,
-    recommended: Option<&ModelId>,
+    live_rec: Option<&ModelId>,
+    file_rec: Option<&ModelId>,
 ) -> ModelInfoDto {
     let installed = store.local_path(&d.id).is_some();
     let is_active = active == Some(&d.id);
-    let is_recommended = recommended == Some(&d.id);
+    let recommended_live = live_rec == Some(&d.id);
+    let recommended_file = file_rec == Some(&d.id);
+    let family = format!("{:?}", d.family);
     let size_bytes = d.total_size_bytes();
 
     let coreml = coreml_asset(&d);
@@ -562,7 +570,9 @@ fn to_model_info(
         description: d.description,
         installed,
         active: is_active,
-        recommended: is_recommended,
+        family,
+        recommended_live,
+        recommended_file,
         coreml_available: coreml.is_some(),
         coreml_installed,
         coreml_size_bytes,
@@ -577,7 +587,8 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
     let machine = detect_machine();
-    let recommended = recommended_default_model(&machine, &builtin_catalog());
+    let live_rec = recommended_default_model(&machine, &builtin_catalog());
+    let file_rec = recommended_accurate_model(&machine, &builtin_catalog());
     let models = state
         .store
         .available()
@@ -588,7 +599,7 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         // Only offer models this machine can actually start — e.g. the Metal whisper.cpp models are
         // hidden off macOS, where building their engine would fail.
         .filter(|d| family_runnable(d.family, machine.accelerator))
-        .map(|d| to_model_info(d, &state.store, active.as_ref(), Some(&recommended)))
+        .map(|d| to_model_info(d, &state.store, active.as_ref(), Some(&live_rec), Some(&file_rec)))
         .collect();
     Ok(models)
 }
@@ -602,7 +613,7 @@ fn list_diarization_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDt
         .available()
         .into_iter()
         .filter(|d| d.family == ModelFamily::Diarization)
-        .map(|d| to_model_info(d, &state.store, None, None))
+        .map(|d| to_model_info(d, &state.store, None, None, None))
         .collect();
     Ok(models)
 }
@@ -616,7 +627,7 @@ fn list_denoise_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, 
         .available()
         .into_iter()
         .filter(|d| d.family == ModelFamily::Denoise)
-        .map(|d| to_model_info(d, &state.store, None, None))
+        .map(|d| to_model_info(d, &state.store, None, None, None))
         .collect();
     Ok(models)
 }
