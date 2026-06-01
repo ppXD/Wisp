@@ -418,6 +418,8 @@
   }
   const fileParagraphs = $derived(groupParagraphs(fileSegments));
   let fileName = $state("");
+  // The model this run is transcribing with, captured at submit so the running view shows it.
+  let fileModelLabel = $state("");
   let fileTranscribing = $state(false);
   // Decode progress 0–100; 0 means the engine hasn't reported yet (bar shows indeterminate).
   let fileProgress = $state(0);
@@ -552,6 +554,10 @@
     fileProgress = 0;
     fileStage = "";
     fileName = path.split(/[\\/]/).pop() ?? path;
+    fileModelLabel =
+      fileEngine === "cloud"
+        ? `${fileProv?.name ?? "Cloud"} · ${fileMod?.name ?? fileCloudModel}`
+        : (chosenModel?.name ?? "On-device model");
     fileHasTimestamps = fileTimestamps;
     fileTranscribing = true;
     try {
@@ -1064,7 +1070,11 @@
     <section class="box">
       {#if fileTranscribing || fileSegments.length}
         <div class="box-head">
-          <span class="active-model">{fileName || "File"}</span>
+          <span class="active-model"
+            >{fileName || "File"}{#if fileModelLabel}<span class="file-model">
+                · {fileModelLabel}</span
+              >{/if}</span
+          >
           <span class="status" class:live={fileTranscribing}>
             <span class="status-dot"></span>{fileTranscribing
               ? fileProgress > 0
@@ -1628,6 +1638,12 @@
     overflow: hidden;
     white-space: nowrap;
     text-overflow: ellipsis;
+  }
+
+  /* The model a File run is using, shown muted next to the file name in the running header. */
+  .file-model {
+    font-weight: 400;
+    color: var(--muted);
   }
 
   .live-pip {
