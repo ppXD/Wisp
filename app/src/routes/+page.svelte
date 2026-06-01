@@ -72,21 +72,59 @@
 
   const activeModel = $derived(models.find((m) => m.active));
 
-  // Which model the picker is showing. Defaults to the active one once models load.
-  let chosenId = $state("");
-  $effect(() => {
-    if (!chosenId && models.length) chosenId = (models.find((m) => m.active) ?? models[0]).id;
-  });
+  // Each mode remembers its own model — File leans accurate, Live leans real-time — persisted across
+  // restarts and seeded from the per-mode recommendation on first run. The picker shows the current
+  // mode's pick.
+  let liveModelId = $state("");
+  let fileModelId = $state("");
+  const chosenId = $derived(mode === "file" ? fileModelId : liveModelId);
   const chosenModel = $derived(models.find((m) => m.id === chosenId));
+
+  function persistModeModels() {
+    try {
+      localStorage.setItem(
+        "wisp.modelByMode",
+        JSON.stringify({ live: liveModelId, file: fileModelId }),
+      );
+    } catch {
+      /* storage unavailable (private mode) — keep the choice in memory for this session */
+    }
+  }
+
+  // Seed an unset mode from its recommendation once models load.
+  $effect(() => {
+    if (!models.length) return;
+    if (!liveModelId)
+      liveModelId =
+        models.find((m) => m.recommendedLive)?.id ??
+        models.find((m) => m.active)?.id ??
+        models[0].id;
+    if (!fileModelId) fileModelId = models.find((m) => m.recommendedFile)?.id ?? liveModelId;
+  });
+
+  // Keep the backend's active model in step with the current mode's pick (so the "active" tag and
+  // any immediate transcribe use the right model when you switch modes).
+  $effect(() => {
+    const m = models.find((x) => x.id === chosenId);
+    if (m?.installed && !m.active) selectModel(chosenId);
+  });
 
   // Ready to start once the *chosen* model is installed. Picking a not-yet-downloaded model must
   // never silently run a different (previously-active) model — Live and File both gate on this.
   const canStart = $derived(!!chosenModel?.installed);
 
   async function pickModel(id: string) {
-    chosenId = id;
+    if (mode === "file") fileModelId = id;
+    else liveModelId = id;
+    persistModeModels();
     const m = models.find((x) => x.id === id);
-    if (m?.installed) await selectModel(id); // installed → make it the active model
+    if (m?.installed) await selectModel(id); // installed → apply it as the active model
+  }
+
+  /** Make sure the backend's active model is this mode's pick before a transcribe/start. */
+  async function ensureActiveModel() {
+    const m = models.find((x) => x.id === chosenId);
+    if (m?.installed && !m.active) await selectModel(chosenId);
   }
 
   // Curated model dropdown. One clear "Recommended for this machine" up top (accuracy for File,
@@ -352,6 +390,7 @@
       return;
     }
     try {
+      await ensureActiveModel();
       await applyDevices();
       await applyLanguage();
       await applyDenoise();
@@ -579,6 +618,7 @@
     fileHasTimestamps = fileTimestamps;
     fileTranscribing = true;
     try {
+      if (fileEngine === "local") await ensureActiveModel();
       await invoke("transcribe_file", {
         path,
         options: {
@@ -692,6 +732,14 @@
   }
 
   onMount(() => {
+    // Restore each mode's saved model from the previous session (the seed effect fills any gaps).
+    try {
+      const saved = JSON.parse(localStorage.getItem("wisp.modelByMode") || "{}");
+      if (saved.live) liveModelId = saved.live;
+      if (saved.file) fileModelId = saved.file;
+    } catch {
+      /* ignore unreadable storage */
+    }
     refreshModels();
     refreshCloud();
     refreshDiarizeModels();
