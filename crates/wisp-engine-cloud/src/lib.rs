@@ -18,6 +18,9 @@ use wisp_core::engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult}
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 
+mod streaming;
+pub use streaming::OpenAiRealtimeEngine;
+
 /// An [`AsrEngine`] backed by a cloud transcription API. One engine spans several wire protocols —
 /// the OpenAI transcription endpoint, Gemini's `generateContent`, and OpenAI-compatible
 /// chat-with-audio — with the protocol choosing how a clip is uploaded and how the transcript reads
@@ -217,7 +220,7 @@ fn parse_openai_transcription(json: &str) -> Result<String> {
 }
 
 /// Standard base64 of `bytes` — the encoding both JSON-body protocols use for the audio.
-fn b64(bytes: &[u8]) -> String {
+pub(crate) fn b64(bytes: &[u8]) -> String {
     use base64::Engine;
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
