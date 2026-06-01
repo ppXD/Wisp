@@ -6,7 +6,7 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
-  import { slide } from "svelte/transition";
+  import { slide, fly } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
   import CloudPicker from "$lib/CloudPicker.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
@@ -81,6 +81,7 @@
   let micBlocked = $state(false);
   let permissionBusy = $state(false);
   let unlisten: UnlistenFn | undefined;
+  let liveErrorUnlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
 
@@ -382,6 +383,11 @@
         segments = next;
       }
     });
+    // A cloud-streaming error (bad key/model, server error, dropped connection) — surface it as a
+    // notice rather than failing silently.
+    liveErrorUnlisten = await listen<string>("live://error", (event) => {
+      liveNotice = `Cloud error: ${event.payload}`;
+    });
   }
 
   async function ensureProgressListener() {
@@ -570,6 +576,7 @@
   // from saved overrides (or smart defaults), and persist edits. Driven entirely by <ParamsPanel>.
   let liveParamSpecs = $state<ParamSpec[]>([]);
   let liveParams = $state<Record<string, ParamValue>>({});
+  let liveParamsOpen = $state(false);
 
   $effect(() => {
     const provider = liveCloudProvider;
@@ -829,6 +836,7 @@
   });
   onDestroy(() => {
     unlisten?.();
+    liveErrorUnlisten?.();
     progressUnlisten?.();
     fileListeners.forEach((u) => u());
     dropUnlisten?.();
@@ -1050,17 +1058,32 @@
           <p class="cloud-live-note">
             Cloud realtime streams audio continuously to {liveProv?.name ?? "the provider"} — it bills
             per minute and needs a stable connection.
+            <button class="link-btn" onclick={openKeyModal}>Manage API key</button>
           </p>
 
           {#if liveParamSpecs.length}
-            <details class="cloud-params">
-              <summary>Advanced parameters</summary>
-              <div class="cloud-params-body">
-                <ParamsPanel specs={liveParamSpecs} bind:values={liveParams} />
-              </div>
-            </details>
+            <button class="params-trigger" onclick={() => (liveParamsOpen = true)}>
+              <span class="params-ico" aria-hidden="true"></span>Advanced parameters
+            </button>
           {/if}
         </div>
+      {/if}
+
+      <!-- Advanced parameters as a right-side drawer (OpenAI-Studio style). -->
+      {#if !running && liveEngine === "cloud" && liveParamsOpen && liveParamSpecs.length}
+        <button class="drawer-scrim" aria-label="Close" onclick={() => (liveParamsOpen = false)}
+        ></button>
+        <aside class="drawer" transition:fly={{ x: 340, duration: 180 }}>
+          <div class="drawer-head">
+            <span class="drawer-title">{liveProv?.name ?? "Cloud"} parameters</span>
+            <button class="drawer-x" aria-label="Close" onclick={() => (liveParamsOpen = false)}
+              >×</button
+            >
+          </div>
+          <div class="drawer-body">
+            <ParamsPanel specs={liveParamSpecs} bind:values={liveParams} />
+          </div>
+        </aside>
       {/if}
 
       <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
@@ -1621,39 +1644,105 @@
     color: var(--muted);
   }
 
-  .cloud-params {
-    border: 1px solid var(--border-strong);
-    border-radius: 10px;
-    padding: 4px 12px;
-  }
-
-  .cloud-params summary {
+  /* Trigger for the right-side parameters drawer. */
+  .params-trigger {
+    align-self: flex-start;
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: inherit;
     font-size: 13px;
     font-weight: 500;
     color: var(--text);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 7px 12px;
     cursor: pointer;
-    padding: 6px 0;
-    list-style: none;
+    transition: border-color 0.15s;
   }
 
-  .cloud-params summary::-webkit-details-marker {
-    display: none;
+  .params-trigger:hover {
+    border-color: var(--accent);
   }
 
-  .cloud-params summary::before {
-    content: "▸";
-    display: inline-block;
-    margin-right: 7px;
+  /* Three-line "sliders" glyph, drawn so the panel needs no icon asset. */
+  .params-ico {
+    width: 13px;
+    height: 9px;
+    background-image:
+      linear-gradient(var(--muted), var(--muted)), linear-gradient(var(--muted), var(--muted)),
+      linear-gradient(var(--muted), var(--muted));
+    background-size:
+      13px 1.5px,
+      13px 1.5px,
+      13px 1.5px;
+    background-position:
+      left 0,
+      left 4px,
+      left 8px;
+    background-repeat: no-repeat;
+    position: relative;
+  }
+
+  /* Dimmed catch behind the drawer; clicking it closes. */
+  .drawer-scrim {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: rgba(0, 0, 0, 0.18);
+    border: none;
+    cursor: default;
+  }
+
+  .drawer {
+    position: fixed;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    z-index: 41;
+    width: 340px;
+    max-width: 86vw;
+    display: flex;
+    flex-direction: column;
+    background: var(--bg);
+    border-left: 1px solid var(--border-strong);
+    box-shadow: -14px 0 36px rgba(0, 0, 0, 0.14);
+  }
+
+  .drawer-head {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 16px 18px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .drawer-title {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .drawer-x {
+    font-size: 20px;
+    line-height: 1;
     color: var(--muted);
-    transition: transform 0.15s;
+    background: none;
+    border: none;
+    cursor: pointer;
+    padding: 0 2px;
   }
 
-  .cloud-params[open] summary::before {
-    transform: rotate(90deg);
+  .drawer-x:hover {
+    color: var(--text);
   }
 
-  .cloud-params-body {
-    padding: 8px 0 12px;
+  .drawer-body {
+    flex: 1;
+    overflow-y: auto;
+    padding: 18px;
   }
 
   /* Non-fatal info banner (e.g. system audio unavailable → mic-only) shown above the feed. */
