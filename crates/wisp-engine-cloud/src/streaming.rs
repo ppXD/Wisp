@@ -10,11 +10,13 @@
 //! round-trip), which is exactly what the Live loop already tolerates: render the growing text,
 //! commit on the endpoint the server's VAD reports.
 //!
-//! Protocol (verified against OpenAI's `openapi.yaml`): connect to
-//! `wss://api.openai.com/v1/realtime?intent=transcription`, send `transcription_session.update`
-//! (model + server VAD + `pcm16`), stream `input_audio_buffer.append` frames, and read
-//! `conversation.item.input_audio_transcription.delta` (partial) and `.completed` (final). `pcm16`
-//! input must be 16-bit PCM, **24 kHz**, mono, little-endian — so we resample the pipeline's 16 kHz.
+//! Protocol (OpenAI GA Realtime, verified against `openapi.yaml`): connect to
+//! `wss://api.openai.com/v1/realtime?intent=transcription` with just the bearer token (the old
+//! `OpenAI-Beta: realtime=v1` header selects the retired beta shape, now rejected), send a
+//! `session.update` configuring a `transcription` session (model + server VAD nested under
+//! `session.audio.input`), stream `input_audio_buffer.append` frames, and read
+//! `conversation.item.input_audio_transcription.delta` (partial) and `.completed` (final). Input is
+//! 16-bit PCM, **24 kHz**, mono, little-endian — so we resample the pipeline's 16 kHz.
 
 use std::io::ErrorKind;
 use std::net::TcpStream;
@@ -252,9 +254,9 @@ fn connect(key: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
 
     let bearer = HeaderValue::from_str(&format!("Bearer {key}"))
         .map_err(|e| engine_err("auth header", e))?;
-    let headers = request.headers_mut();
-    headers.insert(AUTHORIZATION, bearer);
-    headers.insert("OpenAI-Beta", HeaderValue::from_static("realtime=v1"));
+    // GA Realtime: just the bearer token. The old `OpenAI-Beta: realtime=v1` header selects the
+    // retired beta API shape, which the server now rejects ("beta_api_shape_disabled").
+    request.headers_mut().insert(AUTHORIZATION, bearer);
 
     let (ws, _response) = tungstenite::connect(request).map_err(|e| engine_err("connect", e))?;
     Ok(ws)
@@ -326,16 +328,18 @@ fn is_would_block(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if io.kind() == ErrorKind::WouldBlock)
 }
 
-/// The `transcription_session.update` payload: PCM16 in, server-VAD endpointing tuned by `params`,
-/// the chosen model, and (unless `off`) server-side noise reduction.
+/// The GA `session.update` payload for a transcription session: 24 kHz PCM input, the chosen model,
+/// server-VAD endpointing tuned by `params`, and (unless `off`) server-side noise reduction. GA
+/// nests everything under `session.audio.input`; `language` is sent only when non-empty.
 fn build_session_update(model: &str, language: &str, params: &ParamValues) -> String {
-    let mut session = serde_json::json!({
-        "input_audio_format": "pcm16",
-        "input_audio_transcription": {
-            "model": model,
-            "language": language,
-            "prompt": ""
-        },
+    let mut transcription = serde_json::json!({ "model": model });
+    if !language.is_empty() {
+        transcription["language"] = serde_json::json!(language);
+    }
+
+    let mut input = serde_json::json!({
+        "format": { "type": "audio/pcm", "rate": REALTIME_SAMPLE_RATE },
+        "transcription": transcription,
         "turn_detection": {
             "type": "server_vad",
             "threshold": params.float("vad_threshold", 0.5),
@@ -346,10 +350,14 @@ fn build_session_update(model: &str, language: &str, params: &ParamValues) -> St
 
     let noise = params.text("noise_reduction", "near_field");
     if noise != "off" {
-        session["input_audio_noise_reduction"] = serde_json::json!({ "type": noise });
+        input["noise_reduction"] = serde_json::json!({ "type": noise });
     }
 
-    serde_json::json!({ "type": "transcription_session.update", "session": session }).to_string()
+    serde_json::json!({
+        "type": "session.update",
+        "session": { "type": "transcription", "audio": { "input": input } }
+    })
+    .to_string()
 }
 
 /// An `input_audio_buffer.append` frame carrying base64 PCM16 audio.
@@ -462,23 +470,21 @@ mod tests {
         let json = build_session_update("gpt-4o-transcribe", "en", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(v["type"], "transcription_session.update");
-        assert_eq!(v["session"]["input_audio_format"], "pcm16");
-        assert_eq!(
-            v["session"]["input_audio_transcription"]["model"],
-            "gpt-4o-transcribe"
-        );
-        assert_eq!(v["session"]["input_audio_transcription"]["language"], "en");
+        assert_eq!(v["type"], "session.update");
+        assert_eq!(v["session"]["type"], "transcription");
 
-        let vad = &v["session"]["turn_detection"];
+        let input = &v["session"]["audio"]["input"];
+        assert_eq!(input["format"]["type"], "audio/pcm");
+        assert_eq!(input["format"]["rate"], 24_000);
+        assert_eq!(input["transcription"]["model"], "gpt-4o-transcribe");
+        assert_eq!(input["transcription"]["language"], "en");
+
+        let vad = &input["turn_detection"];
         assert_eq!(vad["type"], "server_vad");
         assert_eq!(vad["threshold"], 0.5);
         assert_eq!(vad["silence_duration_ms"], 500);
         assert_eq!(vad["prefix_padding_ms"], 300);
-        assert_eq!(
-            v["session"]["input_audio_noise_reduction"]["type"],
-            "near_field"
-        );
+        assert_eq!(input["noise_reduction"]["type"], "near_field");
     }
 
     #[test]
@@ -493,11 +499,16 @@ mod tests {
         let json = build_session_update("gpt-4o-transcribe", "", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
-        assert_eq!(v["session"]["turn_detection"]["threshold"], 0.8);
-        assert_eq!(v["session"]["turn_detection"]["silence_duration_ms"], 900);
+        let input = &v["session"]["audio"]["input"];
+        assert_eq!(input["turn_detection"]["threshold"], 0.8);
+        assert_eq!(input["turn_detection"]["silence_duration_ms"], 900);
         assert!(
-            v["session"]["input_audio_noise_reduction"].is_null(),
+            input["noise_reduction"].is_null(),
             "noise_reduction omitted when off"
+        );
+        assert!(
+            input["transcription"]["language"].is_null(),
+            "language omitted when empty"
         );
     }
 
