@@ -18,14 +18,20 @@ use wisp_core::engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult}
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
 
-/// An [`AsrEngine`] backed by a cloud transcription API.
+/// An [`AsrEngine`] backed by a cloud transcription API. One engine spans several wire protocols —
+/// the OpenAI transcription endpoint, Gemini's `generateContent`, and OpenAI-compatible
+/// chat-with-audio — with the protocol choosing how a clip is uploaded and how the transcript reads
+/// back.
 pub struct CloudEngine {
-    /// Full transcription endpoint, e.g. `https://api.openai.com/v1/audio/transcriptions`.
-    endpoint: String,
-    /// Auth header name and its value (scheme + key), e.g. `("Authorization", "Bearer sk-…")`.
+    protocol: CloudProtocol,
+    /// Base URL without a trailing slash, e.g. `https://api.openai.com/v1`.
+    base_url: String,
+    /// Auth header name + value for header-authed protocols (`Authorization`, `Bearer …`).
     auth_header: String,
     auth_value: String,
-    /// Wire model id, e.g. `gpt-4o-transcribe`.
+    /// The raw key, for query-param-authed protocols (Gemini's `?key=`).
+    api_key: String,
+    /// Wire model id, e.g. `gpt-4o-transcribe` / `gemini-2.0-flash` / `qwen3-asr-flash`.
     model: String,
     /// Language code, or empty to let the provider auto-detect.
     language: String,
@@ -34,7 +40,7 @@ pub struct CloudEngine {
 impl CloudEngine {
     /// Builds an engine for `model_id` of `provider`, authenticating with `api_key`. `language` is a
     /// provider language code, or empty for auto-detect. Errors if the model is unknown, can't do
-    /// file transcription, or speaks a protocol not wired yet.
+    /// file transcription, or the key is blank.
     pub fn new(
         provider: &CloudProvider,
         model_id: &str,
@@ -56,19 +62,12 @@ impl CloudEngine {
             )));
         }
 
-        let path = match provider.protocol {
-            CloudProtocol::OpenAi => "/audio/transcriptions",
-            other => {
-                return Err(WispError::Engine(format!(
-                    "cloud protocol {other:?} is not supported yet"
-                )))
-            }
-        };
-
         Ok(Self {
-            endpoint: format!("{}{path}", provider.base_url.trim_end_matches('/')),
+            protocol: provider.protocol,
+            base_url: provider.base_url.trim_end_matches('/').to_owned(),
             auth_header: provider.auth.header.clone(),
             auth_value: provider.auth.header_value(api_key),
+            api_key: api_key.to_owned(),
             model: model_id.to_owned(),
             language: language.to_owned(),
         })
@@ -77,20 +76,51 @@ impl CloudEngine {
     /// Uploads `audio` and returns the transcript as a single segment spanning the clip.
     fn transcribe_upload(&self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
         let wav = encode_wav_16bit(audio, sample_rate);
-        let (content_type, body) = build_multipart(&wav, &self.model, &self.language);
+        let text = match self.protocol {
+            CloudProtocol::OpenAi => self.post_multipart(&wav),
+            CloudProtocol::Gemini => self.post_gemini(&wav),
+            CloudProtocol::OpenAiChatAudio => self.post_chat_audio(&wav),
+            other => Err(WispError::Engine(format!(
+                "cloud protocol {other:?} is not supported yet"
+            ))),
+        }?;
+        Ok(to_result(&text, audio, sample_rate))
+    }
 
-        let response = ureq::post(&self.endpoint)
+    /// OpenAI `/audio/transcriptions`: a multipart upload returning `{ "text": … }`.
+    fn post_multipart(&self, wav: &[u8]) -> Result<String> {
+        let endpoint = format!("{}/audio/transcriptions", self.base_url);
+        let (content_type, body) = build_multipart(wav, &self.model, &self.language);
+        let sent = ureq::post(&endpoint)
             .set(&self.auth_header, &self.auth_value)
             .set("Content-Type", &content_type)
             .timeout(Duration::from_secs(300))
-            .send_bytes(&body)
-            .map_err(|e| WispError::Engine(format!("cloud transcribe request: {e}")))?;
+            .send_bytes(&body);
+        parse_openai_transcription(&body_or_error(sent)?)
+    }
 
-        let json = response
-            .into_string()
-            .map_err(|e| WispError::Engine(format!("cloud transcribe read: {e}")))?;
+    /// Gemini `generateContent`: JSON with inline base64 audio; the key rides in the query string.
+    fn post_gemini(&self, wav: &[u8]) -> Result<String> {
+        let url = format!(
+            "{}/models/{}:generateContent?key={}",
+            self.base_url, self.model, self.api_key
+        );
+        let sent = ureq::post(&url)
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(300))
+            .send_string(&build_gemini_body(wav, &self.language));
+        parse_gemini(&body_or_error(sent)?)
+    }
 
-        Ok(to_result(&parse_transcription(&json)?, audio, sample_rate))
+    /// OpenAI-compatible `/chat/completions` with the audio as an `input_audio` content part.
+    fn post_chat_audio(&self, wav: &[u8]) -> Result<String> {
+        let endpoint = format!("{}/chat/completions", self.base_url);
+        let sent = ureq::post(&endpoint)
+            .set(&self.auth_header, &self.auth_value)
+            .set("Content-Type", "application/json")
+            .timeout(Duration::from_secs(300))
+            .send_string(&build_chat_audio_body(wav, &self.model, &self.language));
+        parse_chat_completion(&body_or_error(sent)?)
     }
 }
 
@@ -175,20 +205,147 @@ fn build_multipart(wav: &[u8], model: &str, language: &str) -> (String, Vec<u8>)
     (format!("multipart/form-data; boundary={BOUNDARY}"), body)
 }
 
-/// The transcript text from a provider response. OpenAI-shaped APIs return `{ "text": "…" }`.
-fn parse_transcription(json: &str) -> Result<String> {
+/// The transcript text from an OpenAI-shaped transcription response: `{ "text": "…" }`.
+fn parse_openai_transcription(json: &str) -> Result<String> {
     #[derive(serde::Deserialize)]
     struct Response {
         text: String,
     }
 
-    let response: Response = serde_json::from_str(json).map_err(|e| {
-        let snippet: String = json.chars().take(200).collect();
-        WispError::Engine(format!(
-            "cloud response was not transcription JSON: {e} — got: {snippet}"
-        ))
-    })?;
+    let response: Response = serde_json::from_str(json).map_err(|e| not_json_error(json, e))?;
     Ok(response.text)
+}
+
+/// Standard base64 of `bytes` — the encoding both JSON-body protocols use for the audio.
+fn b64(bytes: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(bytes)
+}
+
+/// The instruction sent to chat-style models (Gemini, Qwen) to get a clean verbatim transcript.
+fn transcribe_prompt(language: &str) -> String {
+    let base = "Transcribe the audio exactly as spoken, verbatim. Output only the transcript text \
+                — no commentary, labels, or quotation marks.";
+    if language.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base} The audio language is \"{language}\".")
+    }
+}
+
+/// Gemini `generateContent` request body: one user turn with the prompt and inline base64 audio.
+fn build_gemini_body(wav: &[u8], language: &str) -> String {
+    serde_json::json!({
+        "contents": [{
+            "role": "user",
+            "parts": [
+                { "text": transcribe_prompt(language) },
+                { "inlineData": { "mimeType": "audio/wav", "data": b64(wav) } }
+            ]
+        }],
+        "generationConfig": { "temperature": 0 }
+    })
+    .to_string()
+}
+
+/// The transcript from a Gemini response — the concatenated text parts of the first candidate.
+fn parse_gemini(json: &str) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        candidates: Vec<Candidate>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Candidate {
+        content: Content,
+    }
+    #[derive(serde::Deserialize)]
+    struct Content {
+        #[serde(default)]
+        parts: Vec<Part>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Part {
+        #[serde(default)]
+        text: String,
+    }
+
+    let resp: Resp = serde_json::from_str(json).map_err(|e| not_json_error(json, e))?;
+    Ok(resp
+        .candidates
+        .first()
+        .map(|c| c.content.parts.iter().map(|p| p.text.as_str()).collect())
+        .unwrap_or_default())
+}
+
+/// OpenAI-compatible `/chat/completions` body carrying the audio as an `input_audio` content part.
+fn build_chat_audio_body(wav: &[u8], model: &str, language: &str) -> String {
+    serde_json::json!({
+        "model": model,
+        "messages": [{
+            "role": "user",
+            "content": [
+                { "type": "input_audio", "input_audio": { "data": b64(wav), "format": "wav" } },
+                { "type": "text", "text": transcribe_prompt(language) }
+            ]
+        }]
+    })
+    .to_string()
+}
+
+/// The transcript from an OpenAI-style chat completion: `choices[0].message.content`.
+fn parse_chat_completion(json: &str) -> Result<String> {
+    #[derive(serde::Deserialize)]
+    struct Resp {
+        #[serde(default)]
+        choices: Vec<Choice>,
+    }
+    #[derive(serde::Deserialize)]
+    struct Choice {
+        message: Message,
+    }
+    #[derive(serde::Deserialize)]
+    struct Message {
+        #[serde(default)]
+        content: String,
+    }
+
+    let resp: Resp = serde_json::from_str(json).map_err(|e| not_json_error(json, e))?;
+    Ok(resp
+        .choices
+        .first()
+        .map(|c| c.message.content.clone())
+        .unwrap_or_default())
+}
+
+/// A uniform "response wasn't the JSON we expected" error carrying a short snippet of what we got.
+fn not_json_error(json: &str, e: serde_json::Error) -> WispError {
+    let snippet: String = json.chars().take(200).collect();
+    WispError::Engine(format!(
+        "cloud response wasn't the expected JSON: {e} — got: {snippet}"
+    ))
+}
+
+/// Turns a ureq send result into the response body text, surfacing the API's own error body (key
+/// rejected, model unknown, quota exceeded) on a non-2xx status rather than a bare status code.
+fn body_or_error(sent: std::result::Result<ureq::Response, ureq::Error>) -> Result<String> {
+    match sent {
+        Ok(response) => response
+            .into_string()
+            .map_err(|e| WispError::Engine(format!("cloud transcribe read: {e}"))),
+        Err(ureq::Error::Status(code, response)) => {
+            let detail: String = response
+                .into_string()
+                .unwrap_or_default()
+                .chars()
+                .take(300)
+                .collect();
+            Err(WispError::Engine(format!(
+                "cloud transcribe failed (HTTP {code}): {detail}"
+            )))
+        }
+        Err(e) => Err(WispError::Engine(format!("cloud transcribe request: {e}"))),
+    }
 }
 
 /// Wraps `text` (spanning `audio` at `sample_rate`) as a single File segment; empty text → empty.
@@ -244,12 +401,9 @@ mod tests {
     }
 
     #[test]
-    fn new_builds_endpoint_and_auth_and_rejects_bad_inputs() {
+    fn new_trims_base_url_and_auth_and_rejects_bad_inputs() {
         let engine = CloudEngine::new(&provider(), "gpt-4o-transcribe", "sk-abc", "en").unwrap();
-        assert_eq!(
-            engine.endpoint,
-            "https://api.example.com/v1/audio/transcriptions"
-        );
+        assert_eq!(engine.base_url, "https://api.example.com/v1"); // trailing slash trimmed
         assert_eq!(engine.auth_header, "Authorization");
         assert_eq!(engine.auth_value, "Bearer sk-abc");
 
@@ -292,13 +446,59 @@ mod tests {
     }
 
     #[test]
-    fn parses_transcription_text_and_errors_on_garbage() {
+    fn parses_openai_transcription_text_and_errors_on_garbage() {
         assert_eq!(
-            parse_transcription(r#"{"text":"hello world"}"#).unwrap(),
+            parse_openai_transcription(r#"{"text":"hello world"}"#).unwrap(),
             "hello world"
         );
-        assert!(parse_transcription(r#"{"error":"bad key"}"#).is_err());
-        assert!(parse_transcription("not json").is_err());
+        assert!(parse_openai_transcription(r#"{"error":"bad key"}"#).is_err());
+        assert!(parse_openai_transcription("not json").is_err());
+    }
+
+    #[test]
+    fn gemini_body_uses_inline_base64_audio_and_parses_candidate_text() {
+        let body = build_gemini_body(b"RIFFfakewav", "yue");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        // Exact Gemini camelCase fields + base64 payload (verified against the API discovery doc).
+        let blob = &v["contents"][0]["parts"][1]["inlineData"];
+        assert_eq!(blob["mimeType"], "audio/wav");
+        assert_eq!(blob["data"], b64(b"RIFFfakewav"));
+        assert!(v["contents"][0]["parts"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("yue"));
+
+        // Response: candidates[0].content.parts[].text, concatenated.
+        assert_eq!(
+            parse_gemini(
+                r#"{"candidates":[{"content":{"parts":[{"text":"你好"},{"text":"世界"}]}}]}"#
+            )
+            .unwrap(),
+            "你好世界"
+        );
+        assert_eq!(parse_gemini(r#"{"candidates":[]}"#).unwrap(), "");
+    }
+
+    #[test]
+    fn chat_audio_body_uses_input_audio_and_parses_message_content() {
+        let body = build_chat_audio_body(b"RIFFfakewav", "qwen3-asr-flash", "");
+        let v: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(v["model"], "qwen3-asr-flash");
+        // The OpenAI `input_audio` content part (verified against OpenAI's OpenAPI spec).
+        let audio = &v["messages"][0]["content"][0];
+        assert_eq!(audio["type"], "input_audio");
+        assert_eq!(audio["input_audio"]["format"], "wav");
+        assert_eq!(audio["input_audio"]["data"], b64(b"RIFFfakewav"));
+
+        // Response: choices[0].message.content.
+        assert_eq!(
+            parse_chat_completion(
+                r#"{"choices":[{"message":{"role":"assistant","content":"hi there"}}]}"#
+            )
+            .unwrap(),
+            "hi there"
+        );
+        assert_eq!(parse_chat_completion(r#"{"choices":[]}"#).unwrap(), "");
     }
 
     #[test]

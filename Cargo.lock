@@ -2050,6 +2050,7 @@ dependencies = [
 name = "wisp-engine-cloud"
 version = "0.0.0"
 dependencies = [
+ "base64",
  "hound",
  "serde",
  "serde_json",
