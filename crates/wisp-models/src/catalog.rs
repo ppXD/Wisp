@@ -40,6 +40,7 @@ pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
         whisper_turbo_q8(),
         whisper_turbo_q5(),
+        whisper_turbo_full(),
         whisper_large_v3_gpu(),
         sense_voice_int8(),
         sense_voice_fp32(),
@@ -116,6 +117,27 @@ fn whisper_large_v3_gpu() -> ModelDescriptor {
             "The full Whisper large-v3 (32-layer decoder, not distilled) on the GPU (Metal) — the \
              most accurate option, best for files with the Accurate mode. Slower than turbo; \
              ~1.1 GB."
+                .to_owned(),
+    }
+}
+
+fn whisper_turbo_full() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-large-v3-turbo".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::F16,
+        display_name: "Whisper large-v3-turbo · GPU (Metal) · full".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-large-v3-turbo.bin".to_owned(),
+            // Declared size is a safe under-estimate (the store rejects a download shorter than this).
+            url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo.bin"),
+            sha256: String::new(),
+            size_bytes: 1_550_000_000,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Full-precision large-v3-turbo on the GPU (Metal) — the most accurate turbo, a touch \
+             slower and larger than q8. Real Cantonese (yue) + ~99 languages. ~1.6 GB."
                 .to_owned(),
     }
 }
@@ -406,7 +428,7 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 8);
+        assert_eq!(catalog.len(), 9);
 
         let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
