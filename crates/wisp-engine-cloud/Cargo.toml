@@ -1,0 +1,15 @@
+[package]
+name = "wisp-engine-cloud"
+version = "0.0.0"
+description = "Cloud transcription engine (HTTP) for Wisp"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+# Synchronous HTTP client (rustls, pure Rust — no native TLS), matching the model downloader.
+ureq = "2"
+# Encode the 16 kHz f32 audio to in-memory 16-bit WAV for the multipart upload.
+hound = "3.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
