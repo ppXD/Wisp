@@ -21,7 +21,7 @@ use wisp_audio::{
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::AudioSource;
-use wisp_core::cloud::{CloudModel, CloudProvider};
+use wisp_core::cloud::{CloudModel, CloudProtocol, CloudProvider};
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
@@ -29,8 +29,9 @@ use wisp_core::engine::{AsrEngine, ClipOptions, StreamingAsrEngine};
 use wisp_core::error::{Result as WispResult, WispError};
 use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
+use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
-use wisp_engine_cloud::CloudEngine;
+use wisp_engine_cloud::{CloudEngine, OpenAiRealtimeEngine};
 use wisp_engine_sherpa::{
     GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
     StreamingTransducerEngine, WhisperEngine,
@@ -296,6 +297,66 @@ fn build_streaming_engine(
     Ok(Box::new(engine))
 }
 
+/// Which engine a live session runs: an on-device model, or a cloud realtime-streaming provider.
+/// Resolved once when a session starts and shared by every captured stream (mic + system).
+enum LiveEngine {
+    Local {
+        descriptor: ModelDescriptor,
+        dir: PathBuf,
+    },
+    CloudStreaming {
+        protocol: CloudProtocol,
+        model: String,
+        key: String,
+        params: ParamValues,
+    },
+}
+
+/// Builds a cloud realtime-streaming engine for `protocol`. Only the OpenAI Realtime protocol
+/// streams today; other cloud protocols are file-only until their realtime adapter lands.
+fn build_cloud_streaming_engine(protocol: CloudProtocol, model: &str, key: &str, language: &str, params: &ParamValues) -> WispResult<Box<dyn StreamingAsrEngine>> {
+    match protocol {
+        CloudProtocol::OpenAi => Ok(Box::new(OpenAiRealtimeEngine::new(model, key, language, params)?)),
+        other => Err(WispError::Engine(format!(
+            "live cloud streaming isn't supported for {other:?} yet — use it in File mode"
+        ))),
+    }
+}
+
+/// The advanced parameter specs a cloud `provider` exposes for live streaming, or none if it can't
+/// stream. A new streaming provider declares its knobs here and the UI renders them unchanged.
+fn streaming_param_specs(provider: &CloudProvider) -> Vec<ParamSpec> {
+    match provider.protocol {
+        CloudProtocol::OpenAi => OpenAiRealtimeEngine::param_specs(),
+        _ => vec![],
+    }
+}
+
+/// Builds a [`ParamValues`] from an engine's `specs` (smart defaults) overlaid with the user's raw
+/// JSON `overrides`. Each override is coerced to its spec's kind; unknown keys and wrong types are
+/// ignored, so a stale or malformed override never breaks a session.
+fn build_param_values(specs: &[ParamSpec], overrides: &HashMap<String, serde_json::Value>) -> ParamValues {
+    let mut values = ParamValues::from_specs(specs);
+
+    for spec in specs {
+        if let Some(value) = overrides.get(&spec.key).and_then(|raw| coerce_param(raw, &spec.kind)) {
+            values.set(&spec.key, value);
+        }
+    }
+    values
+}
+
+/// Coerces a raw JSON override to the [`ParamValue`] its [`ParamKind`] expects, or `None` on a type
+/// mismatch (so the default stands).
+fn coerce_param(raw: &serde_json::Value, kind: &ParamKind) -> Option<ParamValue> {
+    match kind {
+        ParamKind::Float { .. } => raw.as_f64().map(ParamValue::Float),
+        ParamKind::Int { .. } => raw.as_i64().map(ParamValue::Int),
+        ParamKind::Bool => raw.as_bool().map(ParamValue::Bool),
+        ParamKind::Enum(_) | ParamKind::Text => raw.as_str().map(|s| ParamValue::Text(s.to_owned())),
+    }
+}
+
 /// Builds the GPU (Metal) whisper.cpp engine from a downloaded GGUF model. macOS only; elsewhere
 /// this family isn't offered, so the stub just reports it.
 #[cfg(target_os = "macos")]
@@ -374,8 +435,7 @@ struct LiveSettings {
 /// dropped rather than emitted.
 fn spawn_session(
     app: &AppHandle,
-    descriptor: &ModelDescriptor,
-    dir: &Path,
+    engine_source: &LiveEngine,
     source: Box<dyn AudioSource>,
     kind: AudioSourceKind,
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
@@ -407,6 +467,23 @@ fn spawn_session(
             }
         }
     });
+
+    let (descriptor, dir) = match engine_source {
+        // Cloud realtime self-segments and denoises server-side, so it drives the streaming pipeline
+        // directly — no local segmenter, diarizer, or RNNoise (the cloud's noise_reduction param
+        // handles denoise; doubling it up would hurt).
+        LiveEngine::CloudStreaming {
+            protocol,
+            model,
+            key,
+            params,
+        } => {
+            let engine =
+                build_cloud_streaming_engine(*protocol, model, key, &settings.language, params)?;
+            return Ok(Session::spawn_streaming(engine, source, sink, None, kind));
+        }
+        LiveEngine::Local { descriptor, dir } => (descriptor, dir),
+    };
 
     // A streaming transducer self-segments and decodes cheaply per chunk, so it drives the pipeline
     // directly on one thread. Every other family is VAD-segmented and transcribed whole on the
@@ -913,6 +990,71 @@ fn remove_cloud_custom_model(state: State<'_, AppState>, provider: String, model
     Ok(())
 }
 
+/// One tunable parameter spec, flattened for the UI's generic advanced-settings panel: `kind`
+/// selects the control, with `min`/`max`/`step` for sliders and `options` for a dropdown.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ParamSpecDto {
+    key: String,
+    label: String,
+    help: String,
+    /// `"float"` | `"int"` | `"bool"` | `"enum"` | `"text"`.
+    kind: String,
+    min: f64,
+    max: f64,
+    step: f64,
+    options: Vec<String>,
+    /// Smart default as raw JSON (number/bool/string) — the control's initial value.
+    default: serde_json::Value,
+    advanced: bool,
+}
+
+/// Flattens a [`ParamSpec`] into its UI DTO.
+fn param_spec_dto(spec: &ParamSpec) -> ParamSpecDto {
+    let (kind, min, max, step, options) = match &spec.kind {
+        ParamKind::Float { min, max, step } => ("float", *min, *max, *step, vec![]),
+        ParamKind::Int { min, max } => ("int", *min as f64, *max as f64, 1.0, vec![]),
+        ParamKind::Bool => ("bool", 0.0, 0.0, 0.0, vec![]),
+        ParamKind::Enum(opts) => ("enum", 0.0, 0.0, 0.0, opts.clone()),
+        ParamKind::Text => ("text", 0.0, 0.0, 0.0, vec![]),
+    };
+
+    ParamSpecDto {
+        key: spec.key.clone(),
+        label: spec.label.clone(),
+        help: spec.help.clone(),
+        kind: kind.to_owned(),
+        min,
+        max,
+        step,
+        options,
+        default: param_value_json(&spec.default),
+        advanced: spec.advanced,
+    }
+}
+
+/// A [`ParamValue`] as raw JSON, for the control's initial value.
+fn param_value_json(value: &ParamValue) -> serde_json::Value {
+    match value {
+        ParamValue::Float(v) => serde_json::json!(v),
+        ParamValue::Int(v) => serde_json::json!(v),
+        ParamValue::Bool(v) => serde_json::json!(v),
+        ParamValue::Text(v) => serde_json::json!(v),
+    }
+}
+
+/// The advanced live-streaming parameter specs a cloud `provider` exposes, for the generic settings
+/// panel. Empty when the provider can't stream (so the panel simply shows nothing).
+#[tauri::command]
+fn streaming_params(provider: String) -> Result<Vec<ParamSpecDto>, String> {
+    let provider = cloud_provider_by_id(&provider)
+        .ok_or_else(|| format!("unknown cloud provider {provider}"))?;
+    Ok(streaming_param_specs(&provider)
+        .iter()
+        .map(param_spec_dto)
+        .collect())
+}
+
 /// A user-imported model. Its files live under `custom_models_dir/<id>/`; `kind` selects the engine
 /// adapter — today only `"whisper-cpp"` (a GGML/GGUF `.bin`); ONNX kinds slot in here later.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1379,10 +1521,65 @@ fn echo_canceller() -> Box<dyn EchoCanceller> {
     Box::new(PassthroughEchoCanceller)
 }
 
+/// How a live session is engined: the active on-device model (default), or a cloud realtime provider
+/// with its advanced parameter overrides. Mirrors the File path's `engine`/`cloudProvider` options.
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LiveOptions {
+    /// `"cloud"` for a realtime cloud provider; anything else (or absent) uses the on-device model.
+    engine: Option<String>,
+    cloud_provider: Option<String>,
+    cloud_model: Option<String>,
+    /// Advanced parameter overrides keyed by `ParamSpec::key` (raw JSON, coerced per spec).
+    #[serde(default)]
+    params: HashMap<String, serde_json::Value>,
+}
+
+/// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
+/// cloud realtime provider/model with its key (from local storage) and merged parameter overrides.
+fn resolve_live_engine(state: &AppState, options: &LiveOptions) -> Result<LiveEngine, String> {
+    if options.engine.as_deref() != Some("cloud") {
+        let active = state
+            .active
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?
+            .clone()
+            .ok_or("no model selected")?;
+        let (descriptor, dir) = resolve_local_model(state, &active)?;
+        return Ok(LiveEngine::Local { descriptor, dir });
+    }
+
+    let provider_id = options
+        .cloud_provider
+        .clone()
+        .ok_or("no cloud provider selected")?;
+    let model = options.cloud_model.clone().ok_or("no cloud model selected")?;
+
+    let key = state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .get(&provider_id)
+        .filter(|k| !k.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| format!("no API key saved for {provider_id}"))?;
+
+    let provider = cloud_provider_by_id(&provider_id)
+        .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?;
+    let params = build_param_values(&streaming_param_specs(&provider), &options.params);
+
+    Ok(LiveEngine::CloudStreaming {
+        protocol: provider.protocol,
+        model,
+        key,
+        params,
+    })
+}
+
 /// Starts a live session. Returns an optional non-fatal notice (e.g. system audio was unavailable
 /// so it fell back to mic-only) for the UI to surface; `None` means everything started as requested.
 #[tauri::command]
-fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<String>, String> {
+fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOptions) -> Result<Option<String>, String> {
     let mut sessions = state
         .sessions
         .lock()
@@ -1391,13 +1588,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
         return Err("a session is already running".to_owned());
     }
 
-    let active = state
-        .active
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .clone()
-        .ok_or("no model selected")?;
-    let (descriptor, dir) = resolve_local_model(&state, &active)?;
+    let live_engine = resolve_live_engine(&state, &options)?;
     let language = state
         .language
         .lock()
@@ -1514,8 +1705,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
             sessions.push(
                 spawn_session(
                     &app,
-                    &descriptor,
-                    &dir,
+                    &live_engine,
                     aec_mic,
                     AudioSourceKind::Microphone,
                     Some(Arc::clone(&dedup)),
@@ -1529,8 +1719,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
             sessions.push(
                 spawn_session(
                     &app,
-                    &descriptor,
-                    &dir,
+                    &live_engine,
                     meeting,
                     AudioSourceKind::System,
                     Some(dedup),
@@ -1550,8 +1739,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
             sessions.push(
                 spawn_session(
                     &app,
-                    &descriptor,
-                    &dir,
+                    &live_engine,
                     mic,
                     AudioSourceKind::Microphone,
                     None,
@@ -1566,8 +1754,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>) -> Result<Option<St
             sessions.push(
                 spawn_session(
                     &app,
-                    &descriptor,
-                    &dir,
+                    &live_engine,
                     system,
                     AudioSourceKind::System,
                     None,
@@ -2008,6 +2195,7 @@ pub fn run() {
             cloud_key_set,
             add_cloud_custom_model,
             remove_cloud_custom_model,
+            streaming_params,
             download_model,
             import_custom_model,
             download_coreml,

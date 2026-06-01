@@ -9,8 +9,20 @@
   import { slide } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
   import CloudPicker from "$lib/CloudPicker.svelte";
+  import ParamsPanel from "$lib/ParamsPanel.svelte";
   import ApiKeyManager from "$lib/ApiKeyManager.svelte";
-  import { refreshCloud, cloudReady, cloudProvider, openKeyModal } from "$lib/cloud.svelte";
+  import {
+    refreshCloud,
+    cloudReady,
+    cloudProvider,
+    openKeyModal,
+    streamingParams,
+    defaultParamValues,
+    loadParamValues,
+    saveParamValues,
+    type ParamSpec,
+    type ParamValue,
+  } from "$lib/cloud.svelte";
 
   type Segment = {
     id: number;
@@ -403,21 +415,35 @@
   async function start() {
     error = "";
     liveNotice = "";
-    // Real-time cloud has no backend yet; the Start button is disabled in cloud mode, but guard too.
-    if (liveEngine === "cloud") return;
-    if (liveDiarize && !diarizeChosen?.installed) {
+    if (liveEngine === "cloud") {
+      if (!liveCloudReady) {
+        error = "Pick a cloud model and save its API key first.";
+        return;
+      }
+    } else if (liveDiarize && !diarizeChosen?.installed) {
       error = "Download the speaker model first.";
       return;
     }
     try {
-      await ensureActiveModel();
+      // Local-only prep (the cloud engine self-segments and denoises server-side); the device and
+      // language selections apply to both.
+      if (liveEngine === "local") await ensureActiveModel();
       await applyDevices();
       await applyLanguage();
-      await applyDenoise();
-      await applyLiveDiarize();
-      await applyLiveDecode();
+      if (liveEngine === "local") {
+        await applyDenoise();
+        await applyLiveDiarize();
+        await applyLiveDecode();
+      }
       await ensureListener();
-      const notice = await invoke<string | null>("start_session");
+      const notice = await invoke<string | null>("start_session", {
+        options: {
+          engine: liveEngine,
+          cloudProvider: liveEngine === "cloud" ? liveCloudProvider : null,
+          cloudModel: liveEngine === "cloud" ? liveCloudModel : null,
+          params: liveEngine === "cloud" ? liveParams : {},
+        },
+      });
       liveNotice = notice ?? "";
       running = true;
       // Capture started, so the permissions it needed are granted — clear any stale prompts
@@ -536,6 +562,33 @@
   let liveEngine = $state<"local" | "cloud">("local");
   let liveCloudProvider = $state("");
   let liveCloudModel = $state("");
+
+  const liveProv = $derived(cloudProvider(liveCloudProvider));
+  const liveCloudReady = $derived(cloudReady(liveCloudProvider, liveCloudModel, "streaming"));
+
+  // Generic advanced parameters for the selected streaming provider: fetch its specs, seed values
+  // from saved overrides (or smart defaults), and persist edits. Driven entirely by <ParamsPanel>.
+  let liveParamSpecs = $state<ParamSpec[]>([]);
+  let liveParams = $state<Record<string, ParamValue>>({});
+
+  $effect(() => {
+    const provider = liveCloudProvider;
+    const model = liveCloudModel;
+    if (liveEngine !== "cloud" || !provider) {
+      liveParamSpecs = [];
+      return;
+    }
+    streamingParams(provider).then((specs) => {
+      liveParamSpecs = specs;
+      liveParams = { ...defaultParamValues(specs), ...loadParamValues(provider, model) };
+    });
+  });
+
+  $effect(() => {
+    if (liveEngine === "cloud" && liveCloudProvider && liveParamSpecs.length) {
+      saveParamValues(liveCloudProvider, liveCloudModel, liveParams);
+    }
+  });
 
   const fileProv = $derived(cloudProvider(fileCloudProvider));
   const fileCloudReady = $derived(cloudReady(fileCloudProvider, fileCloudModel, "batch"));
@@ -884,7 +937,9 @@
           <span class="status-dot"></span>{running
             ? "listening"
             : liveEngine === "cloud"
-              ? "coming soon"
+              ? liveCloudReady
+                ? "ready"
+                : "key needed"
               : canStart
                 ? "ready"
                 : "no model"}
@@ -980,16 +1035,31 @@
 
       {#if !running && liveEngine === "cloud"}
         <div class="box-aux">
-          <div class="notice">
-            <span class="notice-text">
-              <strong>Real-time cloud is coming soon.</strong> Cloud transcription works in the
-              <button class="link-btn" onclick={() => (mode = "file")}>File</button> tab today — you
-              can still save your API key here for when live cloud lands.
-            </span>
-            <span class="notice-actions">
-              <button class="btn outline sm" onclick={openKeyModal}>API keys</button>
-            </span>
-          </div>
+          {#if !liveCloudReady}
+            <div class="notice">
+              <span class="notice-text">
+                <strong>Add your {liveProv?.name ?? "provider"} API key</strong> to stream live cloud
+                transcription. Stored on this device only.
+              </span>
+              <span class="notice-actions">
+                <button class="btn outline sm" onclick={openKeyModal}>API keys</button>
+              </span>
+            </div>
+          {/if}
+
+          <p class="cloud-live-note">
+            Cloud realtime streams audio continuously to {liveProv?.name ?? "the provider"} — it bills
+            per minute and needs a stable connection.
+          </p>
+
+          {#if liveParamSpecs.length}
+            <details class="cloud-params">
+              <summary>Advanced parameters</summary>
+              <div class="cloud-params-body">
+                <ParamsPanel specs={liveParamSpecs} bind:values={liveParams} />
+              </div>
+            </details>
+          {/if}
         </div>
       {/if}
 
@@ -1014,7 +1084,7 @@
           <button
             class="btn primary"
             onclick={start}
-            disabled={liveEngine === "cloud" || !canStart || downloading !== null}
+            disabled={(liveEngine === "cloud" ? !liveCloudReady : !canStart) || downloading !== null}
           >
             {downloading !== null ? "Downloading…" : "Start"}
           </button>
@@ -1541,6 +1611,49 @@
     gap: 9px;
     padding: 12px 14px;
     border-bottom: 1px solid var(--border);
+  }
+
+  /* Cloud realtime: cost/connection caveat + the collapsible generic parameters panel. */
+  .cloud-live-note {
+    margin: 0;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+
+  .cloud-params {
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    padding: 4px 12px;
+  }
+
+  .cloud-params summary {
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    cursor: pointer;
+    padding: 6px 0;
+    list-style: none;
+  }
+
+  .cloud-params summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .cloud-params summary::before {
+    content: "▸";
+    display: inline-block;
+    margin-right: 7px;
+    color: var(--muted);
+    transition: transform 0.15s;
+  }
+
+  .cloud-params[open] summary::before {
+    transform: rotate(90deg);
+  }
+
+  .cloud-params-body {
+    padding: 8px 0 12px;
   }
 
   /* Non-fatal info banner (e.g. system audio unavailable → mic-only) shown above the feed. */
