@@ -10,6 +10,8 @@ export type CloudModel = {
   streaming: boolean;
   batch: boolean;
   description: string;
+  /** User-added (not in the built-in catalog) — the picker tags it and offers removal. */
+  custom: boolean;
 };
 
 export type CloudProvider = {
@@ -38,6 +40,22 @@ export async function refreshCloud(): Promise<void> {
 /** Save (non-empty `key`) or clear (empty `key`) a provider's API key on this device, then refresh. */
 export async function setCloudKey(providerId: string, key: string): Promise<void> {
   await invoke("set_cloud_key", { provider: providerId, key: key.trim() });
+  await refreshCloud();
+}
+
+/**
+ * Add a custom model id for a provider so it's usable immediately, with no app update — the cloud
+ * adapter routes by the provider's protocol, so any new id of a known provider just works. Throws
+ * (with the backend's message) on a blank or duplicate id; refreshes the catalog on success.
+ */
+export async function addCloudCustomModel(providerId: string, modelId: string, name: string): Promise<void> {
+  await invoke("add_cloud_custom_model", { provider: providerId, modelId: modelId.trim(), name: name.trim() });
+  await refreshCloud();
+}
+
+/** Remove a previously added custom cloud model id, then refresh the catalog. */
+export async function removeCloudCustomModel(providerId: string, modelId: string): Promise<void> {
+  await invoke("remove_cloud_custom_model", { provider: providerId, modelId });
   await refreshCloud();
 }
 
