@@ -77,7 +77,7 @@ export type ParamSpec = {
   key: string;
   label: string;
   help: string;
-  kind: "float" | "int" | "bool" | "enum" | "text";
+  kind: "float" | "int" | "bool" | "enum" | "text" | "textarea";
   min: number;
   max: number;
   step: number;

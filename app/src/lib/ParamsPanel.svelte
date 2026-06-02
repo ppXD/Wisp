@@ -72,6 +72,13 @@
           >
             {#each s.options as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
           </select>
+        {:else if s.kind === "textarea"}
+          <textarea
+            class="text area"
+            rows="6"
+            value={String(values[s.key] ?? "")}
+            oninput={(e) => set(s.key, e.currentTarget.value)}
+          ></textarea>
         {:else}
           <input
             class="text"
@@ -172,6 +179,12 @@
   .text:focus {
     outline: none;
     border-color: var(--accent);
+  }
+
+  .area {
+    resize: vertical;
+    min-height: 64px;
+    line-height: 1.45;
   }
 
   .toggle {

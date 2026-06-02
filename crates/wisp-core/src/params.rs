@@ -26,8 +26,10 @@ pub enum ParamKind {
     Bool,
     /// One of a fixed set of options (a dropdown), each a value + display label.
     Enum(Vec<EnumOption>),
-    /// Free text (a text field).
+    /// Free text (a single-line field).
     Text,
+    /// Multi-line free text (a textarea) — for prompts / instructions.
+    TextArea,
 }
 
 /// A tunable value carried by a [`ParamValues`]; its variant matches its [`ParamSpec`]'s `kind`.
@@ -112,13 +114,24 @@ impl ParamSpec {
         Self::new(key, label, help, ParamKind::Bool, ParamValue::Bool(default))
     }
 
-    /// A free-text field.
+    /// A single-line free-text field.
     pub fn text(key: &str, label: &str, help: &str, default: &str) -> Self {
         Self::new(
             key,
             label,
             help,
             ParamKind::Text,
+            ParamValue::Text(default.to_owned()),
+        )
+    }
+
+    /// A multi-line free-text field (textarea) — for prompts / instructions.
+    pub fn textarea(key: &str, label: &str, help: &str, default: &str) -> Self {
+        Self::new(
+            key,
+            label,
+            help,
+            ParamKind::TextArea,
             ParamValue::Text(default.to_owned()),
         )
     }
