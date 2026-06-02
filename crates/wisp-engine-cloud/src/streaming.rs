@@ -70,60 +70,34 @@ impl OpenAiRealtimeEngine {
     /// OpenAI-compatible realtime gateway. Unset uses [`DEFAULT_REALTIME_URL`].
     pub const REALTIME_URL_ENV: &'static str = "WISP_OPENAI_REALTIME_URL";
 
-    /// The tunable knobs this engine exposes **for `model`**, each with a smart default — rendered by
-    /// the generic advanced-parameters UI and read back in `new` via [`ParamValues`]. Per-model
-    /// because OpenAI's transcription params differ by model (`prompt` vs `delay`); a new knob is
-    /// added here and needs no UI change.
-    pub fn param_specs(model: &str) -> Vec<ParamSpec> {
-        let mut specs = vec![ParamSpec::enumerated(
-            "language",
-            "Language",
-            "The spoken language, or auto-detect. Setting it improves accuracy and latency.",
-            &[
-                ("", "Auto-detect"),
-                ("yue", "Cantonese"),
-                ("zh", "Chinese (Mandarin)"),
-                ("en", "English"),
-                ("ja", "Japanese"),
-                ("ko", "Korean"),
-            ],
-            "",
-        )
-        .basic()];
-
-        // Model-specific: gpt-realtime-whisper takes a decode `delay`; the gpt-4o-transcribe family
-        // takes a biasing `prompt`. OpenAI rejects each knob on the other model.
-        if model == "gpt-realtime-whisper" {
-            specs.push(
-                ParamSpec::enumerated(
-                    "delay",
-                    "Delay",
-                    "How long to wait before emitting text — higher is more accurate but higher \
-                     latency.",
-                    &[
-                        ("minimal", "Minimal"),
-                        ("low", "Low"),
-                        ("medium", "Medium"),
-                        ("high", "High"),
-                        ("xhigh", "Extra high"),
-                    ],
-                    "low",
-                )
-                .basic(),
-            );
-        } else {
-            specs.push(
-                ParamSpec::text(
-                    "prompt",
-                    "Hints",
-                    "Names, jargon, or acronyms to bias the transcription (e.g. \"Acme, kubectl\").",
-                    "",
-                )
-                .basic(),
-            );
-        }
-
-        specs.extend([
+    /// The tunable knobs this engine exposes, each with a smart default — rendered by the generic
+    /// advanced-parameters UI and read back in `new` via [`ParamValues`]. Takes `model` (and the UI
+    /// threads it through) so a future model with different params can diverge here; the streaming
+    /// transcription models (`gpt-4o-transcribe`, `…-mini-transcribe`) share one set today.
+    pub fn param_specs(_model: &str) -> Vec<ParamSpec> {
+        vec![
+            ParamSpec::enumerated(
+                "language",
+                "Language",
+                "The spoken language, or auto-detect. Setting it improves accuracy and latency.",
+                &[
+                    ("", "Auto-detect"),
+                    ("yue", "Cantonese"),
+                    ("zh", "Chinese (Mandarin)"),
+                    ("en", "English"),
+                    ("ja", "Japanese"),
+                    ("ko", "Korean"),
+                ],
+                "",
+            )
+            .basic(),
+            ParamSpec::text(
+                "prompt",
+                "Hints",
+                "Names, jargon, or acronyms to bias the transcription (e.g. \"Acme, kubectl\").",
+                "",
+            )
+            .basic(),
             ParamSpec::float(
                 "vad_threshold",
                 "Voice sensitivity",
@@ -162,9 +136,7 @@ impl OpenAiRealtimeEngine {
                 ],
                 "near_field",
             ),
-        ]);
-
-        specs
+        ]
     }
 
     /// Connects and configures a Realtime transcription session for `model`, authenticating with
@@ -387,7 +359,7 @@ fn is_would_block(e: &tungstenite::Error) -> bool {
 /// and are sent only when set (each is model-specific — see [`Self::param_specs`]).
 fn build_session_update(model: &str, params: &ParamValues) -> String {
     let mut transcription = serde_json::json!({ "model": model });
-    for key in ["language", "prompt", "delay"] {
+    for key in ["language", "prompt"] {
         let value = params.text(key, "");
         if !value.is_empty() {
             transcription[key] = serde_json::json!(value);
@@ -573,29 +545,21 @@ mod tests {
     }
 
     #[test]
-    fn param_specs_are_per_model() {
-        let keys = |model: &str| {
-            OpenAiRealtimeEngine::param_specs(model)
-                .into_iter()
-                .map(|s| s.key)
-                .collect::<Vec<_>>()
-        };
+    fn param_specs_expose_language_prompt_and_vad() {
+        let keys = OpenAiRealtimeEngine::param_specs("gpt-4o-transcribe")
+            .into_iter()
+            .map(|s| s.key)
+            .collect::<Vec<_>>();
 
-        let transcribe = keys("gpt-4o-transcribe");
-        assert!(transcribe.iter().any(|k| k == "prompt"), "4o has a prompt");
-        assert!(!transcribe.iter().any(|k| k == "delay"), "4o has no delay");
-
-        let whisper = keys("gpt-realtime-whisper");
-        assert!(whisper.iter().any(|k| k == "delay"), "whisper has a delay");
-        assert!(
-            !whisper.iter().any(|k| k == "prompt"),
-            "whisper has no prompt"
-        );
-
-        // Language and the VAD knobs are common to every model.
-        for model in ["gpt-4o-transcribe", "gpt-realtime-whisper"] {
-            assert!(keys(model).iter().any(|k| k == "language"));
-            assert!(keys(model).iter().any(|k| k == "vad_threshold"));
+        for expected in [
+            "language",
+            "prompt",
+            "vad_threshold",
+            "vad_silence_ms",
+            "vad_prefix_padding_ms",
+            "noise_reduction",
+        ] {
+            assert!(keys.iter().any(|k| k == expected), "missing {expected}");
         }
     }
 
