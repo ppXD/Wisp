@@ -345,7 +345,9 @@ fn coerce_param(raw: &serde_json::Value, kind: &ParamKind) -> Option<ParamValue>
         ParamKind::Float { .. } => raw.as_f64().map(ParamValue::Float),
         ParamKind::Int { .. } => raw.as_i64().map(ParamValue::Int),
         ParamKind::Bool => raw.as_bool().map(ParamValue::Bool),
-        ParamKind::Enum(_) | ParamKind::Text => raw.as_str().map(|s| ParamValue::Text(s.to_owned())),
+        ParamKind::Enum(_) | ParamKind::Text | ParamKind::TextArea => {
+            raw.as_str().map(|s| ParamValue::Text(s.to_owned()))
+        }
     }
 }
 
@@ -1042,6 +1044,7 @@ fn param_spec_dto(spec: &ParamSpec) -> ParamSpecDto {
         ParamKind::Bool => ("bool", 0.0, 0.0, 0.0),
         ParamKind::Enum(_) => ("enum", 0.0, 0.0, 0.0),
         ParamKind::Text => ("text", 0.0, 0.0, 0.0),
+        ParamKind::TextArea => ("textarea", 0.0, 0.0, 0.0),
     };
 
     ParamSpecDto {

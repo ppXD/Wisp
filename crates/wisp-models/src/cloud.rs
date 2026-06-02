@@ -60,6 +60,28 @@ fn openai() -> CloudProvider {
                 true,
                 "OpenAI's hosted Whisper — files only, broad language coverage.",
             ),
+            model(
+                "gpt-realtime",
+                "GPT Realtime",
+                true,
+                false,
+                "Realtime model with text output — steer it with Instructions to transcribe or \
+                 translate. More flexible (and pricier) than the dedicated transcribers.",
+            ),
+            model(
+                "gpt-realtime-mini",
+                "GPT Realtime mini",
+                true,
+                false,
+                "Cost-efficient realtime model — transcribe or translate via Instructions.",
+            ),
+            model(
+                "gpt-realtime-2",
+                "GPT Realtime 2",
+                true,
+                false,
+                "Reasoning realtime model — transcribe or translate via Instructions.",
+            ),
         ],
     }
 }

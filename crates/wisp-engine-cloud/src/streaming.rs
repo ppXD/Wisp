@@ -40,8 +40,48 @@ use crate::b64;
 /// OpenAI Realtime requires 24 kHz PCM16 input.
 const REALTIME_SAMPLE_RATE: u32 = 24_000;
 
-/// Default Realtime transcription WebSocket endpoint (overridable via [`OpenAiRealtimeEngine::REALTIME_URL_ENV`]).
-const DEFAULT_REALTIME_URL: &str = "wss://api.openai.com/v1/realtime?intent=transcription";
+/// The default `instructions` for a model session — a strict verbatim transcriber. The user edits it
+/// (e.g. to translate). Heavy guardrails keep the LLM from chatting back instead of transcribing.
+const DEFAULT_TRANSCRIBE_INSTRUCTIONS: &str = "You are a real-time transcription engine. Transcribe \
+the user's speech into text, verbatim.\n\nRules:\n- Output ONLY the transcript — no commentary, \
+labels, prefixes, or quotation marks.\n- NEVER respond conversationally and NEVER answer questions; \
+transcribe the question itself.\n- Keep the speaker's exact words and original language; do not \
+paraphrase, summarise, or translate.\n- If audio is unclear, transcribe what you can make out; do \
+not invent content.\n\nTo translate instead, replace these instructions, e.g. \"Translate the \
+speech to English. Output only the translation, nothing else.\"";
+
+/// Base Realtime WebSocket endpoint (overridable via [`OpenAiRealtimeEngine::REALTIME_URL_ENV`]); the
+/// per-session query (`?intent=transcription` for ASR, `?model=…` for a model session) is appended.
+const DEFAULT_REALTIME_URL: &str = "wss://api.openai.com/v1/realtime";
+
+/// Which Realtime session shape a model speaks — each has a different config and event set.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SessionKind {
+    /// Dedicated ASR (`gpt-4o-transcribe…`): `?intent=transcription`, server VAD, transcript events.
+    Transcription,
+    /// A general realtime model with text output (`gpt-realtime…`): `?model=…`, instructions-driven,
+    /// `response.output_text.*` events.
+    Model,
+}
+
+/// The session shape `model` uses.
+fn session_kind(model: &str) -> SessionKind {
+    if model.starts_with("gpt-realtime") {
+        SessionKind::Model
+    } else {
+        SessionKind::Transcription
+    }
+}
+
+/// The WebSocket URL for `model`'s session, off the env-overridable base.
+fn realtime_url(model: &str, kind: SessionKind) -> String {
+    let base = std::env::var(OpenAiRealtimeEngine::REALTIME_URL_ENV)
+        .unwrap_or_else(|_| DEFAULT_REALTIME_URL.to_owned());
+    match kind {
+        SessionKind::Transcription => format!("{base}?intent=transcription"),
+        SessionKind::Model => format!("{base}?model={model}"),
+    }
+}
 
 /// Surfaces a session error the user should see (bad config, server-side error, dropped connection)
 /// — wired by the app to show a notice, so a failure is never silent. Called off the audio thread.
@@ -70,34 +110,47 @@ impl OpenAiRealtimeEngine {
     /// OpenAI-compatible realtime gateway. Unset uses [`DEFAULT_REALTIME_URL`].
     pub const REALTIME_URL_ENV: &'static str = "WISP_OPENAI_REALTIME_URL";
 
-    /// The tunable knobs this engine exposes, each with a smart default — rendered by the generic
-    /// advanced-parameters UI and read back in `new` via [`ParamValues`]. Takes `model` (and the UI
-    /// threads it through) so a future model with different params can diverge here; the streaming
-    /// transcription models (`gpt-4o-transcribe`, `…-mini-transcribe`) share one set today.
-    pub fn param_specs(_model: &str) -> Vec<ParamSpec> {
-        vec![
-            ParamSpec::enumerated(
-                "language",
-                "Language",
-                "The spoken language, or auto-detect. Setting it improves accuracy and latency.",
-                &[
-                    ("", "Auto-detect"),
-                    ("yue", "Cantonese"),
-                    ("zh", "Chinese (Mandarin)"),
-                    ("en", "English"),
-                    ("ja", "Japanese"),
-                    ("ko", "Korean"),
-                ],
-                "",
+    /// The tunable knobs `model` exposes, each with a smart default — rendered by the generic
+    /// advanced-parameters UI and read back in `new` via [`ParamValues`]. Per-model: a model session
+    /// is steered by free-form `instructions`; a transcription session takes a `language` + `prompt`.
+    /// Both share the server-VAD endpointing + noise-reduction knobs.
+    pub fn param_specs(model: &str) -> Vec<ParamSpec> {
+        let mut specs = match session_kind(model) {
+            SessionKind::Model => vec![ParamSpec::textarea(
+                "instructions",
+                "Instructions",
+                "The system prompt steering the model — transcribes verbatim by default; edit it to \
+                 translate (e.g. \"Translate the speech to English\") or change behaviour.",
+                DEFAULT_TRANSCRIBE_INSTRUCTIONS,
             )
-            .basic(),
-            ParamSpec::text(
-                "prompt",
-                "Hints",
-                "Names, jargon, or acronyms to bias the transcription (e.g. \"Acme, kubectl\").",
-                "",
-            )
-            .basic(),
+            .basic()],
+            SessionKind::Transcription => vec![
+                ParamSpec::enumerated(
+                    "language",
+                    "Language",
+                    "The spoken language, or auto-detect. Setting it improves accuracy and latency.",
+                    &[
+                        ("", "Auto-detect"),
+                        ("yue", "Cantonese"),
+                        ("zh", "Chinese (Mandarin)"),
+                        ("en", "English"),
+                        ("ja", "Japanese"),
+                        ("ko", "Korean"),
+                    ],
+                    "",
+                )
+                .basic(),
+                ParamSpec::text(
+                    "prompt",
+                    "Hints",
+                    "Names, jargon, or acronyms to bias the transcription (e.g. \"Acme, kubectl\").",
+                    "",
+                )
+                .basic(),
+            ],
+        };
+
+        specs.extend([
             ParamSpec::float(
                 "vad_threshold",
                 "Voice sensitivity",
@@ -136,7 +189,9 @@ impl OpenAiRealtimeEngine {
                 ],
                 "near_field",
             ),
-        ]
+        ]);
+
+        specs
     }
 
     /// Connects and configures a Realtime transcription session for `model`, authenticating with
@@ -154,12 +209,17 @@ impl OpenAiRealtimeEngine {
             return Err(WispError::Engine("OpenAI needs an API key".to_owned()));
         }
 
-        let mut ws = connect(key)?;
-        eprintln!("wisp: OpenAI Realtime connected (model {model})");
+        let kind = session_kind(model);
+        let mut ws = connect(&realtime_url(model, kind), key)?;
+        eprintln!("wisp: OpenAI Realtime connected ({model}, {kind:?})");
 
         // Configure the session while still blocking, so the update is delivered before the worker
         // flips the socket to non-blocking and starts streaming audio.
-        ws.send(Message::text(build_session_update(model, params)))
+        let config = match kind {
+            SessionKind::Transcription => build_transcription_update(model, params),
+            SessionKind::Model => build_model_update(params),
+        };
+        ws.send(Message::text(config))
             .map_err(|e| engine_err("session config", e))?;
         set_nonblocking(&mut ws);
 
@@ -267,13 +327,10 @@ enum ServerEvent {
     Other,
 }
 
-/// Opens the Realtime WebSocket, authenticating with `key`. Fails fast on connect/handshake errors.
-fn connect(key: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
-    let url = std::env::var(OpenAiRealtimeEngine::REALTIME_URL_ENV)
-        .unwrap_or_else(|_| DEFAULT_REALTIME_URL.to_owned());
-
+/// Opens the Realtime WebSocket at `url`, authenticating with `key`. Fails fast on connect/handshake
+/// errors.
+fn connect(url: &str, key: &str) -> Result<WebSocket<MaybeTlsStream<TcpStream>>> {
     let mut request = url
-        .as_str()
         .into_client_request()
         .map_err(|e| engine_err("bad realtime url", e))?;
 
@@ -353,11 +410,35 @@ fn is_would_block(e: &tungstenite::Error) -> bool {
     matches!(e, tungstenite::Error::Io(io) if io.kind() == ErrorKind::WouldBlock)
 }
 
-/// The GA `session.update` payload for a transcription session: 24 kHz PCM input, the chosen model,
-/// server-VAD endpointing tuned by `params`, and (unless `off`) server-side noise reduction. GA
-/// nests everything under `session.audio.input`. Language, prompt, and delay all ride in `params`
-/// and are sent only when set (each is model-specific — see [`Self::param_specs`]).
-fn build_session_update(model: &str, params: &ParamValues) -> String {
+/// The shared `audio.input` config: 24 kHz PCM, server-VAD endpointing tuned by `params`, and
+/// (unless `off`) server-side noise reduction. `create_response` is set for a model session so the
+/// model replies on each turn; a transcription session leaves it off.
+fn audio_input(params: &ParamValues, create_response: bool) -> serde_json::Value {
+    let mut turn_detection = serde_json::json!({
+        "type": "server_vad",
+        "threshold": params.float("vad_threshold", 0.5),
+        "prefix_padding_ms": params.int("vad_prefix_padding_ms", 300),
+        "silence_duration_ms": params.int("vad_silence_ms", 500)
+    });
+    if create_response {
+        turn_detection["create_response"] = serde_json::json!(true);
+    }
+
+    let mut input = serde_json::json!({
+        "format": { "type": "audio/pcm", "rate": REALTIME_SAMPLE_RATE },
+        "turn_detection": turn_detection
+    });
+
+    let noise = params.text("noise_reduction", "near_field");
+    if noise != "off" {
+        input["noise_reduction"] = serde_json::json!({ "type": noise });
+    }
+    input
+}
+
+/// The GA `session.update` for a transcription session (dedicated ASR): the model plus optional
+/// language/prompt under `audio.input.transcription`, server-VAD endpointing, optional noise reduction.
+fn build_transcription_update(model: &str, params: &ParamValues) -> String {
     let mut transcription = serde_json::json!({ "model": model });
     for key in ["language", "prompt"] {
         let value = params.text(key, "");
@@ -366,25 +447,29 @@ fn build_session_update(model: &str, params: &ParamValues) -> String {
         }
     }
 
-    let mut input = serde_json::json!({
-        "format": { "type": "audio/pcm", "rate": REALTIME_SAMPLE_RATE },
-        "transcription": transcription,
-        "turn_detection": {
-            "type": "server_vad",
-            "threshold": params.float("vad_threshold", 0.5),
-            "prefix_padding_ms": params.int("vad_prefix_padding_ms", 300),
-            "silence_duration_ms": params.int("vad_silence_ms", 500)
-        }
-    });
-
-    let noise = params.text("noise_reduction", "near_field");
-    if noise != "off" {
-        input["noise_reduction"] = serde_json::json!({ "type": noise });
-    }
+    let mut input = audio_input(params, false);
+    input["transcription"] = transcription;
 
     serde_json::json!({
         "type": "session.update",
         "session": { "type": "transcription", "audio": { "input": input } }
+    })
+    .to_string()
+}
+
+/// The `session.update` for a realtime model session with text output: the model is steered by the
+/// user's free-form `instructions` and replies in text on each server-VAD turn.
+fn build_model_update(params: &ParamValues) -> String {
+    let instructions = params.text("instructions", DEFAULT_TRANSCRIBE_INSTRUCTIONS);
+
+    serde_json::json!({
+        "type": "session.update",
+        "session": {
+            "type": "realtime",
+            "output_modalities": ["text"],
+            "instructions": instructions,
+            "audio": { "input": audio_input(params, true) }
+        }
     })
     .to_string()
 }
@@ -413,6 +498,9 @@ fn parse_server_event(json: &str) -> ServerEvent {
         delta: String,
         #[serde(default)]
         transcript: String,
+        /// `response.output_text.done` carries the final text here (not in `transcript`).
+        #[serde(default)]
+        text: String,
         #[serde(default)]
         error: Option<Err_>,
     }
@@ -429,11 +517,15 @@ fn parse_server_event(json: &str) -> ServerEvent {
     };
 
     match event.kind.as_str() {
+        // Transcription session.
         "conversation.item.input_audio_transcription.delta" => ServerEvent::Delta(event.delta),
         "conversation.item.input_audio_transcription.completed" => {
             ServerEvent::Completed(event.transcript)
         }
         "conversation.item.input_audio_transcription.failed" => ServerEvent::Failed(message()),
+        // Model session (text output).
+        "response.output_text.delta" => ServerEvent::Delta(event.delta),
+        "response.output_text.done" => ServerEvent::Completed(event.text),
         "error" => ServerEvent::Error(message()),
         _ => ServerEvent::Other,
     }
@@ -497,7 +589,7 @@ mod tests {
     fn session_update_uses_param_defaults_for_model_vad_and_noise() {
         let params =
             ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs("gpt-4o-transcribe"));
-        let json = build_session_update("gpt-4o-transcribe", &params);
+        let json = build_transcription_update("gpt-4o-transcribe", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(v["type"], "session.update");
@@ -531,7 +623,7 @@ mod tests {
         params.set("vad_threshold", ParamValue::Float(0.8));
         params.set("noise_reduction", ParamValue::Text("off".to_owned()));
 
-        let json = build_session_update("gpt-4o-transcribe", &params);
+        let json = build_transcription_update("gpt-4o-transcribe", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let input = &v["session"]["audio"]["input"];
@@ -561,6 +653,51 @@ mod tests {
         ] {
             assert!(keys.iter().any(|k| k == expected), "missing {expected}");
         }
+    }
+
+    #[test]
+    fn model_session_uses_instructions_text_output_and_parses_output_text() {
+        use wisp_core::params::ParamValue;
+
+        // A gpt-realtime model exposes an `instructions` knob, not language/prompt.
+        let keys = OpenAiRealtimeEngine::param_specs("gpt-realtime")
+            .into_iter()
+            .map(|s| s.key)
+            .collect::<Vec<_>>();
+        assert!(keys.iter().any(|k| k == "instructions"));
+        assert!(
+            !keys.iter().any(|k| k == "language"),
+            "model session has no language knob"
+        );
+
+        // The session.update is a model session: text output, instructions, server VAD that creates
+        // a response each turn.
+        let mut params =
+            ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs("gpt-realtime"));
+        params.set(
+            "instructions",
+            ParamValue::Text("Translate to English.".to_owned()),
+        );
+        let v: serde_json::Value = serde_json::from_str(&build_model_update(&params)).unwrap();
+        assert_eq!(v["session"]["type"], "realtime");
+        assert_eq!(v["session"]["output_modalities"][0], "text");
+        assert_eq!(v["session"]["instructions"], "Translate to English.");
+        assert_eq!(
+            v["session"]["audio"]["input"]["turn_detection"]["create_response"],
+            true
+        );
+
+        // The model session's text events map to the same Delta/Completed the Live loop consumes.
+        let delta = r#"{"type":"response.output_text.delta","delta":"Hel"}"#;
+        assert_eq!(
+            parse_server_event(delta),
+            ServerEvent::Delta("Hel".to_owned())
+        );
+        let done = r#"{"type":"response.output_text.done","text":"Hello."}"#;
+        assert_eq!(
+            parse_server_event(done),
+            ServerEvent::Completed("Hello.".to_owned())
+        );
     }
 
     #[test]
