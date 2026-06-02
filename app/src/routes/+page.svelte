@@ -570,7 +570,14 @@
   let liveCloudModel = $state("");
 
   const liveProv = $derived(cloudProvider(liveCloudProvider));
+  const liveMod = $derived(liveProv?.models.find((m) => m.id === liveCloudModel));
   const liveCloudReady = $derived(cloudReady(liveCloudProvider, liveCloudModel, "streaming"));
+  // The running header's model label: the cloud provider/model in cloud mode, else the on-device one.
+  const liveRunningLabel = $derived(
+    liveEngine === "cloud"
+      ? `${liveProv?.name ?? "Cloud"} · ${liveMod?.name ?? liveCloudModel}`
+      : (activeModel?.name ?? "Model"),
+  );
 
   // Generic advanced parameters for the selected streaming provider: fetch its specs, seed values
   // from saved overrides (or smart defaults), and persist edits. Driven entirely by <ParamsPanel>.
@@ -919,7 +926,7 @@
     <section class="box">
       <div class="box-head">
         {#if running}
-          <span class="active-model"><span class="live-pip"></span>{activeModel?.name ?? "Model"}</span>
+          <span class="active-model"><span class="live-pip"></span>{liveRunningLabel}</span>
         {:else}
           <div class="engine-group">
             <div class="seg engine-seg">
