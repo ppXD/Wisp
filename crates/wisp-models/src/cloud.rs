@@ -54,6 +54,13 @@ fn openai() -> CloudProvider {
                 "Realtime-optimised Whisper — lowest-latency live streaming; multilingual.",
             ),
             model(
+                "gpt-4o-transcribe-diarize",
+                "GPT-4o Transcribe (diarized)",
+                false,
+                true,
+                "GPT-4o transcription with speaker labels — File only (realtime can't diarise).",
+            ),
+            model(
                 "whisper-1",
                 "Whisper",
                 false,

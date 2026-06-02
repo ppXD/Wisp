@@ -16,7 +16,11 @@ use std::time::Duration;
 use wisp_core::cloud::{CloudProtocol, CloudProvider};
 use wisp_core::engine::{AsrEngine, ClipOptions, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
-use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
+use wisp_core::transcript::{AudioSourceKind, SpeakerId, TranscriptSegment};
+
+/// The OpenAI model that returns diarized (speaker-labelled) segments. File only — realtime
+/// transcription events carry no speaker, so this is the one way to get cloud speaker labels.
+const OPENAI_DIARIZE_MODEL: &str = "gpt-4o-transcribe-diarize";
 
 mod streaming;
 pub use streaming::OpenAiRealtimeEngine;
@@ -76,9 +80,17 @@ impl CloudEngine {
         })
     }
 
-    /// Uploads `audio` and returns the transcript as a single segment spanning the clip.
+    /// Uploads `audio` and returns the transcript — one segment spanning the clip, or one per speaker
+    /// turn for the diarized model.
     fn transcribe_upload(&self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
         let wav = encode_wav_16bit(audio, sample_rate);
+
+        // The diarized OpenAI model returns speaker-labelled segments — parse them directly rather
+        // than as one block of text.
+        if self.protocol == CloudProtocol::OpenAi && self.model == OPENAI_DIARIZE_MODEL {
+            return parse_diarized(&self.post_multipart_raw(&wav)?);
+        }
+
         let text = match self.protocol {
             CloudProtocol::OpenAi => self.post_multipart(&wav),
             CloudProtocol::Gemini => self.post_gemini(&wav),
@@ -90,8 +102,8 @@ impl CloudEngine {
         Ok(to_result(&text, audio, sample_rate))
     }
 
-    /// OpenAI `/audio/transcriptions`: a multipart upload returning `{ "text": … }`.
-    fn post_multipart(&self, wav: &[u8]) -> Result<String> {
+    /// OpenAI `/audio/transcriptions`: a multipart upload, returning the raw response body.
+    fn post_multipart_raw(&self, wav: &[u8]) -> Result<String> {
         let endpoint = format!("{}/audio/transcriptions", self.base_url);
         let (content_type, body) = build_multipart(wav, &self.model, &self.language);
         let sent = ureq::post(&endpoint)
@@ -99,7 +111,12 @@ impl CloudEngine {
             .set("Content-Type", &content_type)
             .timeout(Duration::from_secs(300))
             .send_bytes(&body);
-        parse_openai_transcription(&body_or_error(sent)?)
+        body_or_error(sent)
+    }
+
+    /// OpenAI `/audio/transcriptions`: a multipart upload returning `{ "text": … }`.
+    fn post_multipart(&self, wav: &[u8]) -> Result<String> {
+        parse_openai_transcription(&self.post_multipart_raw(wav)?)
     }
 
     /// Gemini `generateContent`: JSON with inline base64 audio; the key rides in the query string.
@@ -146,6 +163,13 @@ impl AsrEngine for CloudEngine {
         _options: ClipOptions<'_>,
     ) -> Result<TranscriptionResult> {
         self.transcribe_upload(audio, sample_rate)
+    }
+
+    fn reports_clip_progress(&self) -> bool {
+        // The diarized model must see the whole file in one upload so its speaker labels stay
+        // consistent — windowing would diarize each chunk independently. Reporting here stops the app
+        // from windowing the clip (it forwards the whole file to one `transcribe_clip` call instead).
+        self.protocol == CloudProtocol::OpenAi && self.model == OPENAI_DIARIZE_MODEL
     }
 }
 
@@ -194,7 +218,15 @@ fn build_multipart(wav: &[u8], model: &str, language: &str) -> (String, Vec<u8>)
     if !language.is_empty() {
         append_field(&mut body, BOUNDARY, "language", language);
     }
-    append_field(&mut body, BOUNDARY, "response_format", "json");
+
+    // The diarized model needs `diarized_json` to return per-speaker segments; everyone else gets the
+    // plain `{ "text": … }`.
+    let response_format = if model == OPENAI_DIARIZE_MODEL {
+        "diarized_json"
+    } else {
+        "json"
+    };
+    append_field(&mut body, BOUNDARY, "response_format", response_format);
 
     body.extend_from_slice(
         format!(
@@ -217,6 +249,58 @@ fn parse_openai_transcription(json: &str) -> Result<String> {
 
     let response: Response = serde_json::from_str(json).map_err(|e| not_json_error(json, e))?;
     Ok(response.text)
+}
+
+/// Parses an OpenAI `diarized_json` response (`{ segments: [{ start, end, text, speaker }] }`) into
+/// one [`TranscriptSegment`] per speaker turn, with timestamps and a stable speaker index.
+fn parse_diarized(json: &str) -> Result<TranscriptionResult> {
+    #[derive(serde::Deserialize)]
+    struct Response {
+        #[serde(default)]
+        segments: Vec<DiarizedSegment>,
+    }
+    #[derive(serde::Deserialize)]
+    struct DiarizedSegment {
+        #[serde(default)]
+        start: f64,
+        #[serde(default)]
+        end: f64,
+        #[serde(default)]
+        text: String,
+        #[serde(default)]
+        speaker: String,
+    }
+
+    let response: Response = serde_json::from_str(json).map_err(|e| not_json_error(json, e))?;
+
+    // Map each speaker label ("A"/"B"/a name) to a stable 0-based index by first appearance.
+    let mut labels: Vec<String> = Vec::new();
+    let mut segments = Vec::new();
+    for (index, seg) in response.segments.iter().enumerate() {
+        let text = seg.text.trim();
+        if text.is_empty() {
+            continue;
+        }
+
+        let speaker = labels
+            .iter()
+            .position(|l| *l == seg.speaker)
+            .unwrap_or_else(|| {
+                labels.push(seg.speaker.clone());
+                labels.len() - 1
+            });
+
+        let mut segment = TranscriptSegment::new(
+            index as u64,
+            text,
+            Duration::from_secs_f64(seg.start)..Duration::from_secs_f64(seg.end),
+            AudioSourceKind::File,
+        );
+        segment.speaker = Some(SpeakerId(speaker as u32));
+        segments.push(segment);
+    }
+
+    Ok(TranscriptionResult { segments })
 }
 
 /// Standard base64 of `bytes` — the encoding both JSON-body protocols use for the audio.
@@ -456,6 +540,31 @@ mod tests {
         );
         assert!(parse_openai_transcription(r#"{"error":"bad key"}"#).is_err());
         assert!(parse_openai_transcription("not json").is_err());
+    }
+
+    #[test]
+    fn parse_diarized_maps_speakers_and_drops_blanks() {
+        let json = r#"{"segments":[
+            {"start":0.0,"end":1.5,"text":"Hello.","speaker":"A"},
+            {"start":1.5,"end":3.0,"text":"Hi there.","speaker":"B"},
+            {"start":3.0,"end":3.2,"text":"   ","speaker":"A"},
+            {"start":3.2,"end":4.0,"text":"Bye.","speaker":"A"}
+        ]}"#;
+        let result = parse_diarized(json).unwrap();
+
+        assert_eq!(result.segments.len(), 3, "the blank segment is dropped");
+        assert_eq!(result.segments[0].text, "Hello.");
+        assert_eq!(result.segments[0].speaker, Some(SpeakerId(0)));
+        assert_eq!(
+            result.segments[1].speaker,
+            Some(SpeakerId(1)),
+            "new speaker → 1"
+        );
+        assert_eq!(
+            result.segments[2].speaker,
+            Some(SpeakerId(0)),
+            "speaker A reused → 0"
+        );
     }
 
     #[test]
