@@ -71,6 +71,8 @@ export function openKeyModal(): void {
 
 export type ParamValue = number | boolean | string;
 
+export type EnumOption = { value: string; label: string };
+
 export type ParamSpec = {
   key: string;
   label: string;
@@ -79,16 +81,16 @@ export type ParamSpec = {
   min: number;
   max: number;
   step: number;
-  options: string[];
+  options: EnumOption[];
   default: ParamValue;
   advanced: boolean;
 };
 
-/** The advanced live-streaming parameter specs a provider exposes (empty if it can't stream). */
-export async function streamingParams(providerId: string): Promise<ParamSpec[]> {
-  if (!providerId) return [];
+/** The advanced live-streaming parameter specs a provider's `model` exposes (empty if it can't stream). */
+export async function streamingParams(providerId: string, model: string): Promise<ParamSpec[]> {
+  if (!providerId || !model) return [];
   try {
-    return await invoke<ParamSpec[]>("streaming_params", { provider: providerId });
+    return await invoke<ParamSpec[]>("streaming_params", { provider: providerId, model });
   } catch {
     return [];
   }

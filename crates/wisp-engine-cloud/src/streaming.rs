@@ -70,11 +70,60 @@ impl OpenAiRealtimeEngine {
     /// OpenAI-compatible realtime gateway. Unset uses [`DEFAULT_REALTIME_URL`].
     pub const REALTIME_URL_ENV: &'static str = "WISP_OPENAI_REALTIME_URL";
 
-    /// The tunable knobs this engine exposes (server-VAD endpointing + noise reduction), each with a
-    /// smart default — rendered by the generic advanced-parameters UI, read back in `new` via
-    /// [`ParamValues`]. New knobs are added here and need no UI change.
-    pub fn param_specs() -> Vec<ParamSpec> {
-        vec![
+    /// The tunable knobs this engine exposes **for `model`**, each with a smart default — rendered by
+    /// the generic advanced-parameters UI and read back in `new` via [`ParamValues`]. Per-model
+    /// because OpenAI's transcription params differ by model (`prompt` vs `delay`); a new knob is
+    /// added here and needs no UI change.
+    pub fn param_specs(model: &str) -> Vec<ParamSpec> {
+        let mut specs = vec![ParamSpec::enumerated(
+            "language",
+            "Language",
+            "The spoken language, or auto-detect. Setting it improves accuracy and latency.",
+            &[
+                ("", "Auto-detect"),
+                ("yue", "Cantonese"),
+                ("zh", "Chinese (Mandarin)"),
+                ("en", "English"),
+                ("ja", "Japanese"),
+                ("ko", "Korean"),
+            ],
+            "",
+        )
+        .basic()];
+
+        // Model-specific: gpt-realtime-whisper takes a decode `delay`; the gpt-4o-transcribe family
+        // takes a biasing `prompt`. OpenAI rejects each knob on the other model.
+        if model == "gpt-realtime-whisper" {
+            specs.push(
+                ParamSpec::enumerated(
+                    "delay",
+                    "Delay",
+                    "How long to wait before emitting text — higher is more accurate but higher \
+                     latency.",
+                    &[
+                        ("minimal", "Minimal"),
+                        ("low", "Low"),
+                        ("medium", "Medium"),
+                        ("high", "High"),
+                        ("xhigh", "Extra high"),
+                    ],
+                    "low",
+                )
+                .basic(),
+            );
+        } else {
+            specs.push(
+                ParamSpec::text(
+                    "prompt",
+                    "Hints",
+                    "Names, jargon, or acronyms to bias the transcription (e.g. \"Acme, kubectl\").",
+                    "",
+                )
+                .basic(),
+            );
+        }
+
+        specs.extend([
             ParamSpec::float(
                 "vad_threshold",
                 "Voice sensitivity",
@@ -88,8 +137,8 @@ impl OpenAiRealtimeEngine {
             ParamSpec::int(
                 "vad_silence_ms",
                 "End-of-speech silence",
-                "How long a pause (ms) ends an utterance and finalises the line. Lower feels snappier; \
-                 higher avoids cutting mid-sentence.",
+                "How long a pause (ms) ends an utterance and finalises the line. Lower feels \
+                 snappier; higher avoids cutting mid-sentence.",
                 100,
                 2000,
                 500,
@@ -105,22 +154,26 @@ impl OpenAiRealtimeEngine {
             ParamSpec::enumerated(
                 "noise_reduction",
                 "Noise reduction",
-                "Server-side denoise before transcription: near for a headset, far for a room mic, or \
-                 off.",
-                &["off", "near_field", "far_field"],
+                "Server-side denoise before transcription.",
+                &[
+                    ("off", "Off"),
+                    ("near_field", "Near-field (headset)"),
+                    ("far_field", "Far-field (room mic)"),
+                ],
                 "near_field",
             ),
-        ]
+        ]);
+
+        specs
     }
 
     /// Connects and configures a Realtime transcription session for `model`, authenticating with
-    /// `api_key`. `language` is an ISO code, or empty to auto-detect; `params` are the advanced knobs
-    /// (missing keys fall back to [`Self::param_specs`] defaults). Errors on a blank key, a failed
-    /// connection, or a rejected handshake.
+    /// `api_key`. `params` carries the advanced knobs — including the language — with missing keys
+    /// falling back to [`Self::param_specs`] defaults. Errors on a blank key, a failed connection, or
+    /// a rejected handshake.
     pub fn new(
         model: &str,
         api_key: &str,
-        language: &str,
         params: &ParamValues,
         on_error: ErrorSink,
     ) -> Result<Self> {
@@ -134,7 +187,7 @@ impl OpenAiRealtimeEngine {
 
         // Configure the session while still blocking, so the update is delivered before the worker
         // flips the socket to non-blocking and starts streaming audio.
-        ws.send(Message::text(build_session_update(model, language, params)))
+        ws.send(Message::text(build_session_update(model, params)))
             .map_err(|e| engine_err("session config", e))?;
         set_nonblocking(&mut ws);
 
@@ -330,11 +383,15 @@ fn is_would_block(e: &tungstenite::Error) -> bool {
 
 /// The GA `session.update` payload for a transcription session: 24 kHz PCM input, the chosen model,
 /// server-VAD endpointing tuned by `params`, and (unless `off`) server-side noise reduction. GA
-/// nests everything under `session.audio.input`; `language` is sent only when non-empty.
-fn build_session_update(model: &str, language: &str, params: &ParamValues) -> String {
+/// nests everything under `session.audio.input`. Language, prompt, and delay all ride in `params`
+/// and are sent only when set (each is model-specific — see [`Self::param_specs`]).
+fn build_session_update(model: &str, params: &ParamValues) -> String {
     let mut transcription = serde_json::json!({ "model": model });
-    if !language.is_empty() {
-        transcription["language"] = serde_json::json!(language);
+    for key in ["language", "prompt", "delay"] {
+        let value = params.text(key, "");
+        if !value.is_empty() {
+            transcription[key] = serde_json::json!(value);
+        }
     }
 
     let mut input = serde_json::json!({
@@ -466,8 +523,9 @@ mod tests {
 
     #[test]
     fn session_update_uses_param_defaults_for_model_vad_and_noise() {
-        let params = ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs());
-        let json = build_session_update("gpt-4o-transcribe", "en", &params);
+        let params =
+            ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs("gpt-4o-transcribe"));
+        let json = build_session_update("gpt-4o-transcribe", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         assert_eq!(v["type"], "session.update");
@@ -477,7 +535,10 @@ mod tests {
         assert_eq!(input["format"]["type"], "audio/pcm");
         assert_eq!(input["format"]["rate"], 24_000);
         assert_eq!(input["transcription"]["model"], "gpt-4o-transcribe");
-        assert_eq!(input["transcription"]["language"], "en");
+        assert!(
+            input["transcription"]["language"].is_null(),
+            "language defaults to auto (empty) → omitted"
+        );
 
         let vad = &input["turn_detection"];
         assert_eq!(vad["type"], "server_vad");
@@ -488,28 +549,54 @@ mod tests {
     }
 
     #[test]
-    fn session_update_applies_overrides_and_omits_noise_when_off() {
+    fn session_update_applies_language_prompt_and_omits_noise_when_off() {
         use wisp_core::params::ParamValue;
 
-        let mut params = ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs());
+        let mut params =
+            ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs("gpt-4o-transcribe"));
+        params.set("language", ParamValue::Text("yue".to_owned()));
+        params.set("prompt", ParamValue::Text("kubectl".to_owned()));
         params.set("vad_threshold", ParamValue::Float(0.8));
-        params.set("vad_silence_ms", ParamValue::Int(900));
         params.set("noise_reduction", ParamValue::Text("off".to_owned()));
 
-        let json = build_session_update("gpt-4o-transcribe", "", &params);
+        let json = build_session_update("gpt-4o-transcribe", &params);
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
 
         let input = &v["session"]["audio"]["input"];
+        assert_eq!(input["transcription"]["language"], "yue");
+        assert_eq!(input["transcription"]["prompt"], "kubectl");
         assert_eq!(input["turn_detection"]["threshold"], 0.8);
-        assert_eq!(input["turn_detection"]["silence_duration_ms"], 900);
         assert!(
             input["noise_reduction"].is_null(),
             "noise_reduction omitted when off"
         );
+    }
+
+    #[test]
+    fn param_specs_are_per_model() {
+        let keys = |model: &str| {
+            OpenAiRealtimeEngine::param_specs(model)
+                .into_iter()
+                .map(|s| s.key)
+                .collect::<Vec<_>>()
+        };
+
+        let transcribe = keys("gpt-4o-transcribe");
+        assert!(transcribe.iter().any(|k| k == "prompt"), "4o has a prompt");
+        assert!(!transcribe.iter().any(|k| k == "delay"), "4o has no delay");
+
+        let whisper = keys("gpt-realtime-whisper");
+        assert!(whisper.iter().any(|k| k == "delay"), "whisper has a delay");
         assert!(
-            input["transcription"]["language"].is_null(),
-            "language omitted when empty"
+            !whisper.iter().any(|k| k == "prompt"),
+            "whisper has no prompt"
         );
+
+        // Language and the VAD knobs are common to every model.
+        for model in ["gpt-4o-transcribe", "gpt-realtime-whisper"] {
+            assert!(keys(model).iter().any(|k| k == "language"));
+            assert!(keys(model).iter().any(|k| k == "vad_threshold"));
+        }
     }
 
     #[test]

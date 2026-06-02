@@ -70,7 +70,7 @@
             value={values[s.key]}
             onchange={(e) => set(s.key, e.currentTarget.value)}
           >
-            {#each s.options as opt (opt)}<option value={opt}>{opt}</option>{/each}
+            {#each s.options as opt (opt.value)}<option value={opt.value}>{opt.label}</option>{/each}
           </select>
         {:else}
           <input
