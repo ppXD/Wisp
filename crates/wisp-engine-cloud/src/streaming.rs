@@ -10,13 +10,18 @@
 //! round-trip), which is exactly what the Live loop already tolerates: render the growing text,
 //! commit on the endpoint the server's VAD reports.
 //!
-//! Protocol (OpenAI GA Realtime, verified against `openapi.yaml`): connect to
-//! `wss://api.openai.com/v1/realtime?intent=transcription` with just the bearer token (the old
-//! `OpenAI-Beta: realtime=v1` header selects the retired beta shape, now rejected), send a
-//! `session.update` configuring a `transcription` session (model + server VAD nested under
-//! `session.audio.input`), stream `input_audio_buffer.append` frames, and read
-//! `conversation.item.input_audio_transcription.delta` (partial) and `.completed` (final). Input is
-//! 16-bit PCM, **24 kHz**, mono, little-endian — so we resample the pipeline's 16 kHz.
+//! Protocol (OpenAI GA Realtime, verified against `openapi.yaml`): connect with just the bearer
+//! token (the old `OpenAI-Beta: realtime=v1` header selects the retired beta shape, now rejected),
+//! `session.update`-configure, then stream `input_audio_buffer.append` frames. The model picks one of
+//! three [`SessionKind`]s:
+//! - **Transcription** (`gpt-4o-transcribe…`): `?intent=transcription`, dedicated ASR, server VAD,
+//!   `conversation.item.input_audio_transcription.delta`/`.completed`.
+//! - **Model** (`gpt-realtime…`): `?model=…`, text output steered by free-form `instructions`
+//!   (transcribe or translate), `response.output_text.delta`/`.done`.
+//! - **Translation** (`gpt-realtime-translate`): `?intent=translation`, a target output language,
+//!   append-only `session.output_transcript.delta` (finalised on a gap — it has no per-turn done).
+//!
+//! Input is 16-bit PCM, **24 kHz**, mono, little-endian — so we resample the pipeline's 16 kHz.
 
 use std::io::ErrorKind;
 use std::net::TcpStream;
@@ -24,7 +29,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::Arc;
 use std::thread::JoinHandle;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tungstenite::client::IntoClientRequest;
 use tungstenite::http::{header::AUTHORIZATION, HeaderValue};
@@ -54,6 +59,11 @@ speech to English. Output only the translation, nothing else.\"";
 /// per-session query (`?intent=transcription` for ASR, `?model=…` for a model session) is appended.
 const DEFAULT_REALTIME_URL: &str = "wss://api.openai.com/v1/realtime";
 
+/// How long without a translation delta before the in-progress translated line is committed. The
+/// translation session streams append-only text with no per-utterance boundary, so we finalise on
+/// this gap (the input is server-VAD-segmented, so deltas arrive in bursts with pauses between).
+const TRANSLATION_FINALIZE_GAP: Duration = Duration::from_millis(1200);
+
 /// Which Realtime session shape a model speaks — each has a different config and event set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SessionKind {
@@ -62,11 +72,16 @@ enum SessionKind {
     /// A general realtime model with text output (`gpt-realtime…`): `?model=…`, instructions-driven,
     /// `response.output_text.*` events.
     Model,
+    /// Dedicated speech translation (`gpt-realtime-translate`): `?intent=translation`, a target output
+    /// language, append-only `session.output_transcript.delta` events (no per-utterance done).
+    Translation,
 }
 
 /// The session shape `model` uses.
 fn session_kind(model: &str) -> SessionKind {
-    if model.starts_with("gpt-realtime") {
+    if model == "gpt-realtime-translate" {
+        SessionKind::Translation
+    } else if model.starts_with("gpt-realtime") {
         SessionKind::Model
     } else {
         SessionKind::Transcription
@@ -79,6 +94,7 @@ fn realtime_url(model: &str, kind: SessionKind) -> String {
         .unwrap_or_else(|_| DEFAULT_REALTIME_URL.to_owned());
     match kind {
         SessionKind::Transcription => format!("{base}?intent=transcription"),
+        SessionKind::Translation => format!("{base}?intent=translation"),
         SessionKind::Model => format!("{base}?model={model}"),
     }
 }
@@ -101,6 +117,10 @@ pub struct OpenAiRealtimeEngine {
     worker: Option<JoinHandle<()>>,
     /// The in-progress utterance's accumulated partial text.
     hypothesis: String,
+    /// True for a translation session (no per-utterance done) — finalise on a delta gap instead.
+    finalize_on_gap: bool,
+    /// When the last delta arrived, for the translation session's gap-based finalisation.
+    last_delta: Option<Instant>,
     /// Reports errors to the app so they surface in the UI instead of failing silently.
     on_error: ErrorSink,
 }
@@ -115,6 +135,46 @@ impl OpenAiRealtimeEngine {
     /// is steered by free-form `instructions`; a transcription session takes a `language` + `prompt`.
     /// Both share the server-VAD endpointing + noise-reduction knobs.
     pub fn param_specs(model: &str) -> Vec<ParamSpec> {
+        let noise = || {
+            ParamSpec::enumerated(
+                "noise_reduction",
+                "Noise reduction",
+                "Server-side denoise before transcription.",
+                &[
+                    ("off", "Off"),
+                    ("near_field", "Near-field (headset)"),
+                    ("far_field", "Far-field (room mic)"),
+                ],
+                "near_field",
+            )
+        };
+
+        // A translation session takes just a target language — it segments and endpoints internally.
+        if session_kind(model) == SessionKind::Translation {
+            return vec![
+                ParamSpec::enumerated(
+                    "target_language",
+                    "Translate to",
+                    "The language to translate the speech into.",
+                    &[
+                        ("en", "English"),
+                        ("yue", "Cantonese"),
+                        ("zh", "Chinese (Mandarin)"),
+                        ("ja", "Japanese"),
+                        ("ko", "Korean"),
+                        ("es", "Spanish"),
+                        ("fr", "French"),
+                        ("de", "German"),
+                    ],
+                    "en",
+                )
+                .basic(),
+                noise(),
+            ];
+        }
+
+        // A model session is steered by free-form instructions; a transcription session takes a
+        // language + hints. Both share the server-VAD endpointing knobs + noise reduction.
         let mut specs = match session_kind(model) {
             SessionKind::Model => vec![ParamSpec::textarea(
                 "instructions",
@@ -124,7 +184,7 @@ impl OpenAiRealtimeEngine {
                 DEFAULT_TRANSCRIBE_INSTRUCTIONS,
             )
             .basic()],
-            SessionKind::Transcription => vec![
+            _ => vec![
                 ParamSpec::enumerated(
                     "language",
                     "Language",
@@ -178,18 +238,8 @@ impl OpenAiRealtimeEngine {
                 1000,
                 300,
             ),
-            ParamSpec::enumerated(
-                "noise_reduction",
-                "Noise reduction",
-                "Server-side denoise before transcription.",
-                &[
-                    ("off", "Off"),
-                    ("near_field", "Near-field (headset)"),
-                    ("far_field", "Far-field (room mic)"),
-                ],
-                "near_field",
-            ),
         ]);
+        specs.push(noise());
 
         specs
     }
@@ -218,6 +268,7 @@ impl OpenAiRealtimeEngine {
         let config = match kind {
             SessionKind::Transcription => build_transcription_update(model, params),
             SessionKind::Model => build_model_update(params),
+            SessionKind::Translation => build_translation_update(model, params),
         };
         ws.send(Message::text(config))
             .map_err(|e| engine_err("session config", e))?;
@@ -236,6 +287,8 @@ impl OpenAiRealtimeEngine {
             stop,
             worker: Some(worker),
             hypothesis: String::new(),
+            finalize_on_gap: kind == SessionKind::Translation,
+            last_delta: None,
             on_error,
         })
     }
@@ -249,7 +302,10 @@ impl OpenAiRealtimeEngine {
 
         while let Ok(event) = self.event_rx.try_recv() {
             match event {
-                ServerEvent::Delta(delta) => self.hypothesis.push_str(&delta),
+                ServerEvent::Delta(delta) => {
+                    self.hypothesis.push_str(&delta);
+                    self.last_delta = Some(Instant::now());
+                }
                 ServerEvent::Completed(transcript) => {
                     final_text = Some(transcript);
                     endpoint = true;
@@ -292,10 +348,29 @@ impl StreamingAsrEngine for OpenAiRealtimeEngine {
             let _ = self.audio_tx.send(to_pcm16(samples, sample_rate));
         }
 
-        self.drain_events().unwrap_or_else(|| StreamingResult {
+        if let Some(result) = self.drain_events() {
+            return result;
+        }
+
+        // Translation has no per-utterance done event: commit the accumulated line once its deltas
+        // have paused (the input is server-VAD-segmented, so a pause means the utterance ended).
+        if self.finalize_on_gap
+            && !self.hypothesis.is_empty()
+            && self
+                .last_delta
+                .is_some_and(|t| t.elapsed() >= TRANSLATION_FINALIZE_GAP)
+        {
+            self.last_delta = None;
+            return StreamingResult {
+                text: std::mem::take(&mut self.hypothesis),
+                is_endpoint: true,
+            };
+        }
+
+        StreamingResult {
             text: self.hypothesis.clone(),
             is_endpoint: false,
-        })
+        }
     }
 
     fn reset(&mut self) {
@@ -474,6 +549,36 @@ fn build_model_update(params: &ParamValues) -> String {
     .to_string()
 }
 
+/// The `session.update` for a translation session: the input is transcribed by gpt-realtime-whisper
+/// and translated to the target `language`; the translated text streams as `session.output_transcript`
+/// deltas. The session handles its own turn detection, so no server-VAD knobs.
+fn build_translation_update(model: &str, params: &ParamValues) -> String {
+    let target = params.text("target_language", "en");
+
+    let noise = params.text("noise_reduction", "near_field");
+    let noise_reduction = if noise == "off" {
+        serde_json::Value::Null
+    } else {
+        serde_json::json!({ "type": noise })
+    };
+
+    serde_json::json!({
+        "type": "session.update",
+        "session": {
+            "type": "translation",
+            "model": model,
+            "audio": {
+                "input": {
+                    "transcription": { "model": "gpt-realtime-whisper" },
+                    "noise_reduction": noise_reduction
+                },
+                "output": { "language": target }
+            }
+        }
+    })
+    .to_string()
+}
+
 /// An `input_audio_buffer.append` frame carrying base64 PCM16 audio.
 fn build_audio_append(pcm16_le: &[u8]) -> String {
     serde_json::json!({
@@ -526,6 +631,8 @@ fn parse_server_event(json: &str) -> ServerEvent {
         // Model session (text output).
         "response.output_text.delta" => ServerEvent::Delta(event.delta),
         "response.output_text.done" => ServerEvent::Completed(event.text),
+        // Translation session: the translated output (we ignore the input transcript + output audio).
+        "session.output_transcript.delta" => ServerEvent::Delta(event.delta),
         "error" => ServerEvent::Error(message()),
         _ => ServerEvent::Other,
     }
@@ -697,6 +804,43 @@ mod tests {
         assert_eq!(
             parse_server_event(done),
             ServerEvent::Completed("Hello.".to_owned())
+        );
+    }
+
+    #[test]
+    fn translation_session_targets_a_language_and_parses_output_transcript() {
+        use wisp_core::params::ParamValue;
+
+        // A translation model exposes a target language, not instructions or server-VAD knobs.
+        let keys = OpenAiRealtimeEngine::param_specs("gpt-realtime-translate")
+            .into_iter()
+            .map(|s| s.key)
+            .collect::<Vec<_>>();
+        assert!(keys.iter().any(|k| k == "target_language"));
+        assert!(
+            !keys.iter().any(|k| k == "vad_threshold"),
+            "no server-VAD knobs"
+        );
+
+        let mut params =
+            ParamValues::from_specs(&OpenAiRealtimeEngine::param_specs("gpt-realtime-translate"));
+        params.set("target_language", ParamValue::Text("es".to_owned()));
+        let v: serde_json::Value =
+            serde_json::from_str(&build_translation_update("gpt-realtime-translate", &params))
+                .unwrap();
+        assert_eq!(v["session"]["type"], "translation");
+        assert_eq!(v["session"]["model"], "gpt-realtime-translate");
+        assert_eq!(v["session"]["audio"]["output"]["language"], "es");
+        assert_eq!(
+            v["session"]["audio"]["input"]["transcription"]["model"],
+            "gpt-realtime-whisper"
+        );
+
+        // The translated output streams as session.output_transcript deltas.
+        let delta = r#"{"type":"session.output_transcript.delta","delta":"Hola"}"#;
+        assert_eq!(
+            parse_server_event(delta),
+            ServerEvent::Delta("Hola".to_owned())
         );
     }
 

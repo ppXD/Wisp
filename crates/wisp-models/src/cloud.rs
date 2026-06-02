@@ -82,6 +82,14 @@ fn openai() -> CloudProvider {
                 false,
                 "Reasoning realtime model — transcribe or translate via Instructions.",
             ),
+            model(
+                "gpt-realtime-translate",
+                "GPT Realtime Translate",
+                true,
+                false,
+                "Dedicated live speech translation — pick a target language, get streaming \
+                 translated text.",
+            ),
         ],
     }
 }
