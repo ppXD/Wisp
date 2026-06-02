@@ -317,9 +317,9 @@ enum LiveEngine {
 
 /// The advanced parameter specs a cloud `provider` exposes for live streaming, or none if it can't
 /// stream. A new streaming provider declares its knobs here and the UI renders them unchanged.
-fn streaming_param_specs(provider: &CloudProvider) -> Vec<ParamSpec> {
+fn streaming_param_specs(provider: &CloudProvider, model: &str) -> Vec<ParamSpec> {
     match provider.protocol {
-        CloudProtocol::OpenAi => OpenAiRealtimeEngine::param_specs(),
+        CloudProtocol::OpenAi => OpenAiRealtimeEngine::param_specs(model),
         _ => vec![],
     }
 }
@@ -479,13 +479,9 @@ fn spawn_session(
                 });
 
             let engine: Box<dyn StreamingAsrEngine> = match protocol {
-                CloudProtocol::OpenAi => Box::new(OpenAiRealtimeEngine::new(
-                    model,
-                    key,
-                    &settings.language,
-                    params,
-                    on_error,
-                )?),
+                CloudProtocol::OpenAi => {
+                    Box::new(OpenAiRealtimeEngine::new(model, key, params, on_error)?)
+                }
                 other => {
                     return Err(WispError::Engine(format!(
                         "live cloud streaming isn't supported for {other:?} yet — use it in File mode"
@@ -1015,20 +1011,37 @@ struct ParamSpecDto {
     min: f64,
     max: f64,
     step: f64,
-    options: Vec<String>,
+    options: Vec<EnumOptionDto>,
     /// Smart default as raw JSON (number/bool/string) — the control's initial value.
     default: serde_json::Value,
     advanced: bool,
 }
 
+/// One dropdown choice: the wire `value` and its display `label`.
+#[derive(Serialize)]
+struct EnumOptionDto {
+    value: String,
+    label: String,
+}
+
 /// Flattens a [`ParamSpec`] into its UI DTO.
 fn param_spec_dto(spec: &ParamSpec) -> ParamSpecDto {
-    let (kind, min, max, step, options) = match &spec.kind {
-        ParamKind::Float { min, max, step } => ("float", *min, *max, *step, vec![]),
-        ParamKind::Int { min, max } => ("int", *min as f64, *max as f64, 1.0, vec![]),
-        ParamKind::Bool => ("bool", 0.0, 0.0, 0.0, vec![]),
-        ParamKind::Enum(opts) => ("enum", 0.0, 0.0, 0.0, opts.clone()),
-        ParamKind::Text => ("text", 0.0, 0.0, 0.0, vec![]),
+    let options = match &spec.kind {
+        ParamKind::Enum(opts) => opts
+            .iter()
+            .map(|o| EnumOptionDto {
+                value: o.value.clone(),
+                label: o.label.clone(),
+            })
+            .collect(),
+        _ => vec![],
+    };
+    let (kind, min, max, step) = match &spec.kind {
+        ParamKind::Float { min, max, step } => ("float", *min, *max, *step),
+        ParamKind::Int { min, max } => ("int", *min as f64, *max as f64, 1.0),
+        ParamKind::Bool => ("bool", 0.0, 0.0, 0.0),
+        ParamKind::Enum(_) => ("enum", 0.0, 0.0, 0.0),
+        ParamKind::Text => ("text", 0.0, 0.0, 0.0),
     };
 
     ParamSpecDto {
@@ -1058,10 +1071,10 @@ fn param_value_json(value: &ParamValue) -> serde_json::Value {
 /// The advanced live-streaming parameter specs a cloud `provider` exposes, for the generic settings
 /// panel. Empty when the provider can't stream (so the panel simply shows nothing).
 #[tauri::command]
-fn streaming_params(provider: String) -> Result<Vec<ParamSpecDto>, String> {
+fn streaming_params(provider: String, model: String) -> Result<Vec<ParamSpecDto>, String> {
     let provider = cloud_provider_by_id(&provider)
         .ok_or_else(|| format!("unknown cloud provider {provider}"))?;
-    Ok(streaming_param_specs(&provider)
+    Ok(streaming_param_specs(&provider, &model)
         .iter()
         .map(param_spec_dto)
         .collect())
@@ -1578,7 +1591,7 @@ fn resolve_live_engine(state: &AppState, options: &LiveOptions) -> Result<LiveEn
 
     let provider = cloud_provider_by_id(&provider_id)
         .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?;
-    let params = build_param_values(&streaming_param_specs(&provider), &options.params);
+    let params = build_param_values(&streaming_param_specs(&provider, &model), &options.params);
 
     Ok(LiveEngine::CloudStreaming {
         protocol: provider.protocol,

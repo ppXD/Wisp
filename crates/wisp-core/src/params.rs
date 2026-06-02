@@ -8,6 +8,13 @@
 
 use std::collections::BTreeMap;
 
+/// One choice in an [`ParamKind::Enum`]: the wire `value` and its human `label`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EnumOption {
+    pub value: String,
+    pub label: String,
+}
+
 /// The control type and bounds for one tunable parameter — tells a UI how to render it.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParamKind {
@@ -17,8 +24,8 @@ pub enum ParamKind {
     Int { min: i64, max: i64 },
     /// An on/off toggle.
     Bool,
-    /// One of a fixed set of option values (a dropdown).
-    Enum(Vec<String>),
+    /// One of a fixed set of options (a dropdown), each a value + display label.
+    Enum(Vec<EnumOption>),
     /// Free text (a text field).
     Text,
 }
@@ -76,9 +83,21 @@ impl ParamSpec {
         )
     }
 
-    /// A dropdown over `options`, defaulting to `default` (which should be one of them).
-    pub fn enumerated(key: &str, label: &str, help: &str, options: &[&str], default: &str) -> Self {
-        let options = options.iter().map(|o| (*o).to_owned()).collect();
+    /// A dropdown over `options` (each a `(value, label)` pair), defaulting to the `default` value.
+    pub fn enumerated(
+        key: &str,
+        label: &str,
+        help: &str,
+        options: &[(&str, &str)],
+        default: &str,
+    ) -> Self {
+        let options = options
+            .iter()
+            .map(|(value, label)| EnumOption {
+                value: (*value).to_owned(),
+                label: (*label).to_owned(),
+            })
+            .collect();
         Self::new(
             key,
             label,
@@ -196,7 +215,13 @@ mod tests {
         let specs = vec![
             ParamSpec::float("threshold", "Threshold", "", 0.0, 1.0, 0.05, 0.5),
             ParamSpec::int("silence_ms", "Silence", "", 100, 2000, 500),
-            ParamSpec::enumerated("mode", "Mode", "", &["off", "near"], "near"),
+            ParamSpec::enumerated(
+                "mode",
+                "Mode",
+                "",
+                &[("off", "Off"), ("near", "Near")],
+                "near",
+            ),
         ];
         let values = ParamValues::from_specs(&specs);
 

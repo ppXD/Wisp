@@ -588,11 +588,11 @@
   $effect(() => {
     const provider = liveCloudProvider;
     const model = liveCloudModel;
-    if (liveEngine !== "cloud" || !provider) {
+    if (liveEngine !== "cloud" || !provider || !model) {
       liveParamSpecs = [];
       return;
     }
-    streamingParams(provider).then((specs) => {
+    streamingParams(provider, model).then((specs) => {
       liveParamSpecs = specs;
       liveParams = { ...defaultParamValues(specs), ...loadParamValues(provider, model) };
     });
@@ -1138,9 +1138,9 @@
           <circle cx="9.5" cy="5" r="1.6" />
           <circle cx="6" cy="11" r="1.6" />
         </svg>
-        Advanced · audio, language{liveEngine === "cloud" ? "" : ", speakers"}
+        {liveEngine === "cloud" ? "Audio · devices" : "Advanced · audio, language, speakers"}
       </button>
-      <Modal bind:open={liveAdvancedOpen} title="Advanced settings">
+      <Modal bind:open={liveAdvancedOpen} title={liveEngine === "cloud" ? "Audio" : "Advanced settings"}>
           <section class="modal-section">
             <span class="section-title">Audio</span>
             <label class="source-row">
@@ -1188,20 +1188,20 @@
             </p>
           </section>
 
-          <section class="modal-section">
-            <span class="section-title">Transcription</span>
-            <label class="source-row">
-              <span class="source-name">Language</span>
-              <select bind:value={language} onchange={applyLanguage}>
-                <option value="">Auto-detect</option>
-                <option value="yue">Cantonese</option>
-                <option value="zh">Chinese (Mandarin)</option>
-                <option value="en">English</option>
-                <option value="ja">Japanese</option>
-                <option value="ko">Korean</option>
-              </select>
-            </label>
-            {#if liveEngine !== "cloud"}
+          {#if liveEngine !== "cloud"}
+            <section class="modal-section">
+              <span class="section-title">Transcription</span>
+              <label class="source-row">
+                <span class="source-name">Language</span>
+                <select bind:value={language} onchange={applyLanguage}>
+                  <option value="">Auto-detect</option>
+                  <option value="yue">Cantonese</option>
+                  <option value="zh">Chinese (Mandarin)</option>
+                  <option value="en">English</option>
+                  <option value="ja">Japanese</option>
+                  <option value="ko">Korean</option>
+                </select>
+              </label>
               <div class="source-row">
                 <span class="source-name">Mode</span>
                 <div class="seg">
@@ -1231,19 +1231,13 @@
                   placeholder="names, jargon, acronyms…"
                 />
               </div>
-            {/if}
-            <p class="opt-hint">
-              {#if liveEngine === "cloud"}
-                Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
-                Decode mode, hints, and speaker labels are on-device only — cloud uses its own server
-                VAD (see <strong>Advanced parameters</strong>).
-              {:else}
+              <p class="opt-hint">
                 Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
                 <strong>Fast</strong> keeps the lowest latency; <strong>Hints</strong> prime names &amp;
                 jargon.
-              {/if}
-            </p>
-          </section>
+              </p>
+            </section>
+          {/if}
 
           {#if liveEngine !== "cloud"}
           <section class="modal-section">
