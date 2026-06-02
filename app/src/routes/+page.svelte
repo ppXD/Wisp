@@ -1138,7 +1138,7 @@
           <circle cx="9.5" cy="5" r="1.6" />
           <circle cx="6" cy="11" r="1.6" />
         </svg>
-        Advanced · audio, language, speakers
+        Advanced · audio, language{liveEngine === "cloud" ? "" : ", speakers"}
       </button>
       <Modal bind:open={liveAdvancedOpen} title="Advanced settings">
           <section class="modal-section">
@@ -1159,29 +1159,32 @@
                 {#each devices as d (d)}<option value={d}>{d}</option>{/each}
               </select>
             </label>
-            <div class="source-row">
-              <span class="source-name">Reduce noise</span>
-              <div class="seg">
-                <button
-                  class:active={liveDenoiser === null}
-                  onclick={() => {
-                    liveDenoiser = null;
-                    applyDenoise();
-                  }}>Off</button
-                >
-                <button
-                  class:active={liveDenoiser === "rnnoise"}
-                  onclick={() => {
-                    liveDenoiser = "rnnoise";
-                    applyDenoise();
-                  }}>Light</button
-                >
+            {#if liveEngine !== "cloud"}
+              <div class="source-row">
+                <span class="source-name">Reduce noise</span>
+                <div class="seg">
+                  <button
+                    class:active={liveDenoiser === null}
+                    onclick={() => {
+                      liveDenoiser = null;
+                      applyDenoise();
+                    }}>Off</button
+                  >
+                  <button
+                    class:active={liveDenoiser === "rnnoise"}
+                    onclick={() => {
+                      liveDenoiser = "rnnoise";
+                      applyDenoise();
+                    }}>Light</button
+                  >
+                </div>
               </div>
-            </div>
+            {/if}
             <p class="opt-hint">
               Defaults to your mic + all system audio with <strong>echo cancellation</strong>; for
-              system audio only, set Microphone to Off. <strong>Light</strong> is the best fit for
-              live.
+              system audio only, set Microphone to Off.{#if liveEngine !== "cloud"}
+                <strong>Light</strong> is the best fit for live.{:else} Cloud denoises server-side —
+                tune it under <strong>Advanced parameters</strong>.{/if}
             </p>
           </section>
 
@@ -1198,42 +1201,51 @@
                 <option value="ko">Korean</option>
               </select>
             </label>
-            <div class="source-row">
-              <span class="source-name">Mode</span>
-              <div class="seg">
-                <button
-                  class:active={liveAccurate}
-                  onclick={() => {
-                    liveAccurate = true;
-                    applyLiveDecode();
-                  }}>Accurate</button
-                >
-                <button
-                  class:active={!liveAccurate}
-                  onclick={() => {
-                    liveAccurate = false;
-                    applyLiveDecode();
-                  }}>Fast</button
-                >
+            {#if liveEngine !== "cloud"}
+              <div class="source-row">
+                <span class="source-name">Mode</span>
+                <div class="seg">
+                  <button
+                    class:active={liveAccurate}
+                    onclick={() => {
+                      liveAccurate = true;
+                      applyLiveDecode();
+                    }}>Accurate</button
+                  >
+                  <button
+                    class:active={!liveAccurate}
+                    onclick={() => {
+                      liveAccurate = false;
+                      applyLiveDecode();
+                    }}>Fast</button
+                  >
+                </div>
               </div>
-            </div>
-            <div class="field">
-              <span class="field-label">Hints <em>(optional)</em></span>
-              <input
-                class="prompt-input"
-                type="text"
-                bind:value={livePrompt}
-                onchange={applyLiveDecode}
-                placeholder="names, jargon, acronyms…"
-              />
-            </div>
+              <div class="field">
+                <span class="field-label">Hints <em>(optional)</em></span>
+                <input
+                  class="prompt-input"
+                  type="text"
+                  bind:value={livePrompt}
+                  onchange={applyLiveDecode}
+                  placeholder="names, jargon, acronyms…"
+                />
+              </div>
+            {/if}
             <p class="opt-hint">
-              Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
-              <strong>Fast</strong> keeps the lowest latency; <strong>Hints</strong> prime names &amp;
-              jargon.
+              {#if liveEngine === "cloud"}
+                Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
+                Decode mode, hints, and speaker labels are on-device only — cloud uses its own server
+                VAD (see <strong>Advanced parameters</strong>).
+              {:else}
+                Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
+                <strong>Fast</strong> keeps the lowest latency; <strong>Hints</strong> prime names &amp;
+                jargon.
+              {/if}
             </p>
           </section>
 
+          {#if liveEngine !== "cloud"}
           <section class="modal-section">
             <span class="section-title">Speakers</span>
             <label class="opt-toggle">
@@ -1272,6 +1284,7 @@
               similar-sounding voices apart better.
             </p>
           </section>
+          {/if}
       </Modal>
     {/if}
   {:else if mode === "file"}
