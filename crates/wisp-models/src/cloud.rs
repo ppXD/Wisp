@@ -47,6 +47,13 @@ fn openai() -> CloudProvider {
                 "Faster and cheaper than GPT-4o Transcribe, still multilingual; streaming and files.",
             ),
             model(
+                "gpt-realtime-whisper",
+                "GPT Realtime Whisper",
+                true,
+                false,
+                "Realtime-optimised Whisper — lowest-latency live streaming; multilingual.",
+            ),
+            model(
                 "whisper-1",
                 "Whisper",
                 false,
