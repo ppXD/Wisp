@@ -4,7 +4,7 @@
 //! start/stop transcription. A session is spawned per audio source (microphone = "Me", system
 //! loopback = meeting participants), all forwarding transcript segments to the webview.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -17,7 +17,7 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
-    MicSource, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
+    MicSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
@@ -484,14 +484,25 @@ struct LiveSettings {
     accurate: bool,
 }
 
+/// The mono rate the assist mix runs at — OpenAI Realtime's native input, so the engine passes it
+/// through without a second resample. Both tapped streams are converted to it before summing.
+const ASSIST_MIX_RATE: u32 = 24_000;
+
 /// The live audio for the realtime AI assist (option B): the same post-processed streams the
-/// transcription gets (mic after AEC + system), summed into one mono stream. `primary` drives the
-/// cadence (`recv`, blocking); `secondary` is mixed in best-effort (`try_recv` — its tee drops oldest
-/// when the assist isn't reading, so it never stalls or backs up the capture). The realtime engine
-/// resamples this to the provider's native rate, so the assist hears the whole conversation cleanly.
+/// transcription gets (mic after AEC + system), summed into one mono [`ASSIST_MIX_RATE`] stream.
+///
+/// The two taps arrive at *different* rates (the AEC mic at 16 kHz, the raw system at the capture
+/// rate, e.g. 48 kHz) and in differently-sized frames, so each is resampled to the common rate first;
+/// the secondary is accumulated in a small jitter buffer and mixed sample-aligned (never decimated, no
+/// rate-mismatched sum). `primary` drives the cadence (`recv`, blocking) — its drop-oldest tee means an
+/// idle assist never stalls or backs up the capture.
 struct MixSource {
     primary: FrameReceiver,
+    primary_rs: Resampler,
     secondary: Option<FrameReceiver>,
+    secondary_rs: Resampler,
+    /// Resampled secondary samples waiting to be mixed (bounded; oldest dropped past the cap).
+    secondary_buf: VecDeque<f32>,
     info: AudioSourceInfo,
 }
 
@@ -501,20 +512,33 @@ impl AudioSource for MixSource {
     }
 
     fn next_frame(&mut self) -> wisp_core::error::Result<Option<AudioFrame>> {
-        let Some(mut frame) = self.primary.recv() else {
+        let Some(frame) = self.primary.recv() else {
             return Ok(None);
         };
+        let timestamp = frame.timestamp;
+        let mut mono = self.primary_rs.process(&frame);
 
         if let Some(sec) = &self.secondary {
-            if let Some(other) = sec.try_recv() {
-                let n = frame.samples.len().min(other.samples.len());
-                for i in 0..n {
-                    frame.samples[i] = (frame.samples[i] + other.samples[i]).clamp(-1.0, 1.0);
+            // Drain every buffered secondary frame (resampled to the mix rate) — never decimate it —
+            // capping the jitter buffer so a slightly-faster stream can't grow it without bound.
+            while let Some(other) = sec.try_recv() {
+                let resampled = self.secondary_rs.process(&other);
+                self.secondary_buf.extend(resampled);
+            }
+            let cap = ASSIST_MIX_RATE as usize / 2; // ~0.5 s
+            while self.secondary_buf.len() > cap {
+                self.secondary_buf.pop_front();
+            }
+
+            // Mix in time order, as many secondary samples as this frame holds.
+            for sample in mono.iter_mut() {
+                if let Some(other) = self.secondary_buf.pop_front() {
+                    *sample = (*sample + other).clamp(-1.0, 1.0);
                 }
             }
         }
 
-        Ok(Some(frame))
+        Ok(Some(AudioFrame::new(mono, ASSIST_MIX_RATE, 1, timestamp)))
     }
 }
 
@@ -2673,7 +2697,10 @@ fn store_assist_mix(
 
         Some(Box::new(MixSource {
             primary,
+            primary_rs: Resampler::new(ASSIST_MIX_RATE),
             secondary,
+            secondary_rs: Resampler::new(ASSIST_MIX_RATE),
+            secondary_buf: VecDeque::new(),
             info,
         }))
     };
@@ -2715,8 +2742,20 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     // next frame and exits cleanly (closing its WebSocket). The global Stop ends the assist with the
     // session; the returned mix source is dropped here (no restart once the session is gone). Drop the
     // finals channel up front so the sink stops routing into a worker that's about to be joined.
+    // Drop the assist taps + parked mix BEFORE joining the assist worker: the worker blocks on its
+    // MixSource `recv`, fed by these tap tees, so closing them lets it observe end-of-stream and exit
+    // even if the capture device has wedged — otherwise the join below could hang on a recv nothing
+    // satisfies. (Stop routing finals first so the sink doesn't push into a dying worker.)
     *state
         .assist_finals_tx
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = None;
+    *state
+        .assist_tees
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = Vec::new();
+    *state
+        .assist_audio
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = None;
 
@@ -2724,25 +2763,13 @@ fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
         let _ = worker.stop_join();
     }
 
-    // Tear down the system-audio tee FIRST — before joining. Dropping it stops the pump + capture and
-    // closes the channels feeding the system-audio session's source, so a blocking `recv` on a silent
-    // system stream returns `None` and its capture loop exits. Joining before this would deadlock:
-    // the capture loop would block on a recv that the still-alive tee never satisfies.
+    // Tear down the system-audio tee — dropping it stops the pump + capture and closes the channels
+    // feeding the system session's source, so a blocking `recv` returns `None` and the capture loop
+    // exits. Joining the live sessions before this would deadlock on a recv the dead tee never feeds.
     *state
         .tee
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = None;
-
-    // Drop the assist mix + its tee handles alongside the live tee: the realtime assist taps off the
-    // same capture, so its branches must die when the session does (otherwise a stale mix lingers).
-    *state
-        .assist_audio
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = None;
-    *state
-        .assist_tees
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = Vec::new();
 
     let mut last_error = None;
     for session in sessions {
