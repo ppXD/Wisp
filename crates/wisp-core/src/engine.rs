@@ -132,13 +132,28 @@ pub trait AsrEngine: Send {
 }
 
 /// One incremental result from a [`StreamingAsrEngine`].
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct StreamingResult {
     /// The current hypothesis for the in-progress utterance (grows as more audio arrives).
     pub text: String,
     /// True when an utterance boundary was just reached: treat `text` as final. The engine resets
     /// internally, so the next call begins a fresh utterance.
     pub is_endpoint: bool,
+    /// An optional parallel rendering of the same utterance from a secondary pass — e.g. a cloud
+    /// model session's instruction-steered output (a translation) running alongside the verbatim
+    /// transcript in `text`. `None` for engines that produce a single stream.
+    pub aux: Option<String>,
+}
+
+impl StreamingResult {
+    /// A single-stream result (no `aux`) — the common case for engines with one output.
+    pub fn new(text: impl Into<String>, is_endpoint: bool) -> Self {
+        Self {
+            text: text.into(),
+            is_endpoint,
+            aux: None,
+        }
+    }
 }
 
 /// A *streaming* speech-to-text engine.
@@ -148,13 +163,31 @@ pub struct StreamingResult {
 /// milliseconds, detecting utterance endpoints itself. That removes the segmentation latency, so the
 /// pipeline drives it directly, chunk by chunk, instead of waiting for the speaker to pause.
 pub trait StreamingAsrEngine: Send {
-    /// Feeds a chunk of 16 kHz mono `f32` audio and returns the updated hypothesis, with
-    /// `is_endpoint` set when an utterance boundary was reached (the engine then resets for the
-    /// next utterance).
+    /// Feeds a chunk of mono `f32` audio at [`input_sample_rate`](Self::input_sample_rate) and returns
+    /// the updated hypothesis, with `is_endpoint` set when an utterance boundary was reached (the
+    /// engine then resets for the next utterance).
     fn accept_waveform(&mut self, sample_rate: u32, samples: &[f32]) -> StreamingResult;
+
+    /// The mono sample rate this engine wants its audio at. The default is 16 kHz — the on-device ASR
+    /// rate; the pipeline resamples each frame to this before calling
+    /// [`accept_waveform`](Self::accept_waveform). A cloud engine that accepts richer audio overrides
+    /// it (e.g. 24 kHz) so the pipeline feeds native high-rate audio instead of 16 kHz-upsampled.
+    fn input_sample_rate(&self) -> u32 {
+        16_000
+    }
 
     /// Drops any in-progress hypothesis and starts a fresh utterance (e.g. on session restart).
     fn reset(&mut self);
+
+    /// Injects an authoritative text item into the session's context — e.g. the app's diarized,
+    /// speaker-attributed transcript final — for engines that can be steered with text alongside audio.
+    /// Default: no-op (most engines only consume audio).
+    fn inject_text(&mut self, _text: &str) {}
+
+    /// Requests the engine produce a response now, for instruction-steered sessions whose replies are
+    /// triggered explicitly (a controlled-cadence assist) rather than automatically per turn. Default:
+    /// no-op.
+    fn request_response(&mut self) {}
 }
 
 #[cfg(test)]
@@ -228,6 +261,15 @@ mod tests {
         engine.configure_streaming("Acme, Inc.", true);
         let result = engine.transcribe(&[0.0; 16], 16_000).unwrap();
         assert_eq!(result.segments.len(), 1);
+    }
+
+    #[test]
+    fn streaming_result_new_has_no_aux_stream() {
+        let r = StreamingResult::new("hello", true);
+        assert_eq!(r.text, "hello");
+        assert!(r.is_endpoint);
+        assert!(r.aux.is_none(), "single-stream result carries no aux");
+        assert_eq!(StreamingResult::default(), StreamingResult::new("", false));
     }
 
     #[test]

@@ -143,7 +143,7 @@ impl StreamingAsrEngine for StreamingTransducerEngine {
             if is_endpoint {
                 sherpa_rs_sys::SherpaOnnxOnlineStreamReset(self.recognizer, self.stream);
             }
-            StreamingResult { text, is_endpoint }
+            StreamingResult::new(text, is_endpoint)
         }
     }
 
