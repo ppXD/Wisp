@@ -289,9 +289,9 @@ fn run_capture(
     Ok(())
 }
 
-/// Streaming capture+recognition loop for [`Session::spawn_streaming`]: pull frames, convert each to
-/// 16 kHz mono (optionally denoised), feed it to `engine`, and forward the growing hypothesis as
-/// `Partial`/`Final` segments until `stop` is set or the source ends.
+/// Streaming capture+recognition loop for [`Session::spawn_streaming`]: pull frames, resample each to
+/// the engine's own input rate as mono (optionally denoised), feed it to `engine`, and forward the
+/// growing hypothesis as `Partial`/`Final` segments until `stop` is set or the source ends.
 ///
 /// All partials of one utterance share an id with the `Final` that closes it, so the UI updates a
 /// single row in place; the engine's own endpoint detection commits the utterance and advances to a
