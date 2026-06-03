@@ -17,7 +17,7 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
-    MicSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
+    MeetingMixer, MicSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
@@ -503,6 +503,8 @@ struct MixSource {
     secondary_rs: Resampler,
     /// Resampled secondary samples waiting to be mixed (bounded; oldest dropped past the cap).
     secondary_buf: VecDeque<f32>,
+    /// Soft-knee + depth-capped-ducking mixer (no clip distortion, both speakers stay intelligible).
+    mixer: MeetingMixer,
     info: AudioSourceInfo,
 }
 
@@ -530,12 +532,12 @@ impl AudioSource for MixSource {
                 self.secondary_buf.pop_front();
             }
 
-            // Mix in time order, as many secondary samples as this frame holds.
-            for sample in mono.iter_mut() {
-                if let Some(other) = self.secondary_buf.pop_front() {
-                    *sample = (*sample + other).clamp(-1.0, 1.0);
-                }
-            }
+            // Mix in time order, as many secondary samples as this frame holds — soft-limited so a loud
+            // mic+system sum never clips, with light depth-capped ducking so the dominant talker stays
+            // clear while the other side is never lost.
+            let take = mono.len().min(self.secondary_buf.len());
+            let secondary: Vec<f32> = self.secondary_buf.drain(..take).collect();
+            self.mixer.mix(&mut mono, &secondary);
         }
 
         Ok(Some(AudioFrame::new(mono, ASSIST_MIX_RATE, 1, timestamp)))
@@ -2701,6 +2703,7 @@ fn store_assist_mix(
             secondary,
             secondary_rs: Resampler::new(ASSIST_MIX_RATE),
             secondary_buf: VecDeque::new(),
+            mixer: MeetingMixer::new(),
             info,
         }))
     };
@@ -3002,22 +3005,17 @@ fn start_assist_realtime_blocking(
         let _ = app_err.emit(ASSIST_ERROR_EVENT, msg.to_owned());
     });
 
-    let engine = match build_assist_engine(
-        &model,
-        &key,
-        &instructions,
-        &ParamValues::new(),
-        on_error,
-    ) {
-        Ok(engine) => engine,
-        Err(e) => {
-            *state
-                .assist_audio
-                .lock()
-                .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
-            return Err(e.to_string());
-        }
-    };
+    let engine =
+        match build_assist_engine(&model, &key, &instructions, &ParamValues::new(), on_error) {
+            Ok(engine) => engine,
+            Err(e) => {
+                *state
+                    .assist_audio
+                    .lock()
+                    .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
+                return Err(e.to_string());
+            }
+        };
 
     // Open the finals channel so the live sink starts feeding the assist its diarized anchors.
     let (finals_tx, finals_rx) = std::sync::mpsc::channel::<String>();
