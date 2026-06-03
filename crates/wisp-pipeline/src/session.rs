@@ -109,17 +109,16 @@ impl Session {
         // never wastes work on a provisional partial that a newer partial or its final supersedes.
         let transcribe_handle = thread::spawn(move || {
             while let Ok(first) = job_rx.recv() {
-                // On an explicit stop, abandon any queued backlog for a snappy shutdown — a slow
-                // engine with a long backlog would otherwise stall the join (and freeze stop).
-                if stop_for_transcribe.load(Ordering::Relaxed) {
-                    break;
-                }
                 let mut batch = vec![first];
                 while let Ok(next) = job_rx.try_recv() {
                     batch.push(next);
                 }
                 let (finals, partial) = coalesce(batch);
 
+                // Finals are the authoritative transcript — always transcribe them, even on stop. The
+                // capture thread flushes the trailing utterance as a Final on stop; dropping it (and any
+                // backlog of real finals a slow engine fell behind on) would silently lose the last
+                // sentence(s) of the recording.
                 for (id, utterance) in finals {
                     match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Final) {
                         Ok(Some(segment)) => sink(TranscriptEvent::Segment(segment)),
@@ -127,6 +126,14 @@ impl Session {
                         Err(e) => eprintln!("wisp: transcription error: {e}"),
                     }
                 }
+
+                // On stop, skip the provisional partial — a final supersedes it and decoding it would
+                // only slow the shutdown — and stop pulling new work: drain the queued finals above,
+                // then exit when the capture thread drops the sender.
+                if stop_for_transcribe.load(Ordering::Relaxed) {
+                    continue;
+                }
+
                 if let Some((id, utterance)) = partial {
                     let started = Instant::now();
                     match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Partial) {
@@ -483,6 +490,74 @@ mod tests {
         // Endless yields silence forever; stop() must break the loop and join cleanly.
         let session = Session::spawn(pipeline(vec![]), Box::new(Endless), sink);
         session.stop().unwrap();
+    }
+
+    #[test]
+    fn spawn_live_stop_keeps_the_flushed_trailing_final() {
+        // The user stops mid/just-after a sentence: the capture thread flushes that buffered utterance
+        // as a Final on stop. The transcribe loop must still decode it — dropping it would silently lose
+        // the last sentence of every recording. (This segmenter never finalizes mid-stream and exposes
+        // no partial, so the *only* job is the flushed Final, isolating the stop path.)
+        struct BufferingSegmenter;
+        impl Segmenter for BufferingSegmenter {
+            fn push(&mut self, _m: &[f32], _t: Duration, _d: Duration) -> Vec<Utterance> {
+                Vec::new()
+            }
+            fn flush(&mut self) -> Vec<Utterance> {
+                vec![Utterance {
+                    audio: vec![0.3; 1_600],
+                    start: Duration::ZERO,
+                }]
+            }
+            fn partial(&self) -> Option<Utterance> {
+                None
+            }
+        }
+
+        struct Endless;
+        impl AudioSource for Endless {
+            fn info(&self) -> AudioSourceInfo {
+                AudioSourceInfo {
+                    kind: AudioSourceKind::Microphone,
+                    name: "endless".to_owned(),
+                }
+            }
+            fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
+                Ok(Some(AudioFrame::new(
+                    vec![0.0; 160],
+                    16_000,
+                    1,
+                    Duration::ZERO,
+                )))
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+
+        let session = Session::spawn_live(
+            Box::new(BufferingSegmenter),
+            transcriber(vec![canned("the trailing sentence")]),
+            Box::new(Endless),
+            sink,
+            None,
+        );
+        session.stop().unwrap();
+
+        let texts: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::Segment(s) => Some(s.text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["the trailing sentence".to_owned()],
+            "the utterance flushed on stop must still be transcribed, not dropped"
+        );
     }
 
     fn segmenter() -> Box<dyn Segmenter> {

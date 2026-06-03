@@ -623,6 +623,11 @@
   const liveTranscriptText = $derived(
     segments
       .filter((s) => s.isFinal)
+      // Chronological by start time, not finalization order: mic and system are independent pipelines,
+      // so a late-finalizing earlier utterance must still land in its real place — both so the LLM reads
+      // turns in order and so the assist's summary-buffer sees a stable, append-only prefix to index into.
+      .slice()
+      .sort((a, b) => a.startMs - b.startMs)
       .map((s) => `[${fmtTime(s.startMs)}] ${assistWho(s)}: ${s.text}`)
       .join("\n"),
   );
@@ -1835,7 +1840,7 @@
   /* Brand lockup — top-left, opposite the toolbar; tabs stay centered between them. */
   .brand {
     position: absolute;
-    top: 18px;
+    top: 23px;
     left: 20px;
     z-index: 10;
     display: flex;
