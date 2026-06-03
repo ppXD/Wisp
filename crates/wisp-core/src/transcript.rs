@@ -62,6 +62,10 @@ pub struct TranscriptSegment {
     pub confidence: Option<f32>,
     /// Word-level timings from alignment, when the engine produced them; empty otherwise.
     pub words: Vec<Word>,
+    /// A parallel rendering of this segment from a secondary pass — e.g. a cloud model session's
+    /// instruction-steered output (a translation) alongside the verbatim `text`. `None` for the
+    /// usual single-stream engines.
+    pub aux_text: Option<String>,
 }
 
 impl TranscriptSegment {
@@ -85,7 +89,14 @@ impl TranscriptSegment {
             speaker: None,
             confidence: None,
             words: Vec::new(),
+            aux_text: None,
         }
+    }
+
+    /// Attaches a parallel secondary rendering (e.g. a translation) to this segment.
+    pub fn with_aux_text(mut self, aux: Option<String>) -> Self {
+        self.aux_text = aux;
+        self
     }
 
     /// Duration spanned by the segment (saturating at zero if `end < start`).
@@ -130,6 +141,17 @@ mod tests {
     #[test]
     fn duration_is_difference() {
         assert_eq!(seg().duration(), Duration::from_millis(500));
+    }
+
+    #[test]
+    fn aux_text_defaults_to_none_and_is_set_by_builder() {
+        assert!(
+            seg().aux_text.is_none(),
+            "new segments have no aux rendering"
+        );
+        let translated = seg().with_aux_text(Some("bonjour".to_owned()));
+        assert_eq!(translated.aux_text.as_deref(), Some("bonjour"));
+        assert_eq!(translated.text, "hello", "primary text is untouched");
     }
 
     #[test]

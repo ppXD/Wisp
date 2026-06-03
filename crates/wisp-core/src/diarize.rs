@@ -156,6 +156,9 @@ fn run_segment(
         speaker,
         confidence,
         words,
+        // A secondary rendering (translation) is utterance-level, not per-speaker-run, so sub-segments
+        // split out by word-level diarization don't carry one.
+        aux_text: None,
     }
 }
 

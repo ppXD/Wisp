@@ -18,8 +18,7 @@ pub mod wav;
 
 pub use denoise::RnnoiseDenoiser;
 pub use dsp::{
-    chunk_into_frames, resample_linear, to_mono_16k, Resampler16k, FRAME_CHUNK_MS,
-    TARGET_SAMPLE_RATE,
+    chunk_into_frames, resample_linear, to_mono_16k, Resampler, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 pub use echo::EchoCancellingSource;
 #[cfg(feature = "file")]

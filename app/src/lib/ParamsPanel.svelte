@@ -181,6 +181,18 @@
     border-color: var(--accent);
   }
 
+  /* Same chevron as every other dropdown (replaces the OS arrow). */
+  .select {
+    appearance: none;
+    -webkit-appearance: none;
+    background-color: var(--surface);
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6' viewBox='0 0 9 6' fill='none' stroke='%2378736a' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l3.5 3.5L8 1'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 10px center;
+    padding-right: 26px;
+    cursor: pointer;
+  }
+
   .area {
     resize: vertical;
     min-height: 64px;

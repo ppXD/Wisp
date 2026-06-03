@@ -20,8 +20,9 @@ use wisp_audio::{
     MicSource, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
-use wisp_core::audio::AudioSource;
-use wisp_core::cloud::{CloudModel, CloudProtocol, CloudProvider};
+use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
+use wisp_core::channel::FrameReceiver;
+use wisp_core::cloud::{CloudAuth, CloudModel, CloudProtocol, CloudProvider, StreamingProtocol};
 use wisp_core::dedup::CrossStreamEchoFilter;
 use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
@@ -31,7 +32,11 @@ use wisp_core::export::{format_transcript, ExportFormat};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
-use wisp_engine_cloud::{CloudEngine, OpenAiRealtimeEngine};
+use wisp_engine_cloud::{
+    batch_param_specs as cloud_batch_param_specs, build_assist_engine, build_realtime_engine,
+    chat_completion, chat_completion_stream, streaming_param_specs as cloud_streaming_param_specs,
+    ChatRequest, CloudEngine,
+};
 use wisp_engine_sherpa::{
     GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
     StreamingTransducerEngine, WhisperEngine,
@@ -57,6 +62,18 @@ const SEGMENT_EVENT: &str = "transcript://segment";
 
 /// Event channel the UI listens on for a live cloud-streaming error (so a failure isn't silent).
 const LIVE_ERROR_EVENT: &str = "live://error";
+
+/// Event channel the UI listens on for realtime AI-assist responses — one finalised reply per turn,
+/// payload is the response text. A reply that streamed in via [`ASSIST_DELTA_EVENT`] is closed by this.
+const ASSIST_TEXT_EVENT: &str = "assist://text";
+
+/// Event channel for an incremental chunk of the in-progress assist reply (payload is the new text to
+/// append) — so a reply streams into the feed as it generates instead of popping in whole at the end.
+const ASSIST_DELTA_EVENT: &str = "assist://delta";
+
+/// Event channel for a realtime AI-assist error (bad key/model, server error, dropped socket) — kept
+/// separate from [`LIVE_ERROR_EVENT`] so the assist pane shows its own failures, not the transcript's.
+const ASSIST_ERROR_EVENT: &str = "assist://error";
 
 /// Event channel the UI listens on for model-download progress.
 const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
@@ -103,6 +120,19 @@ struct AppState {
     live_accurate: Mutex<bool>,
     /// The system-audio fan-out, present only while mic + system run together (AEC active).
     tee: Mutex<Option<Tee>>,
+    /// Fan-out tees feeding the realtime AI assist its copy of each transcription stream — kept alive
+    /// for the session's duration (dropping them closes the assist branches).
+    assist_tees: Mutex<Vec<Tee>>,
+    /// The mixed live audio (mic + system) for the realtime assist, available while a live session
+    /// runs; the assist's realtime engine consumes it when started. `None` between sessions.
+    assist_audio: Mutex<Option<Box<dyn AudioSource>>>,
+    /// The running realtime AI-assist worker (its stop flag + thread), or `None` when assist is idle.
+    /// The worker owns the mix source while running and hands it back on stop, so assist can restart.
+    assist_worker: Mutex<Option<AssistWorker>>,
+    /// While the realtime assist runs, the channel the live session pushes each diarized final into, so
+    /// the assist injects authoritative, speaker-attributed text alongside the audio it hears. `None`
+    /// when no assist is running (the live sink then skips the routing).
+    assist_finals_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Segments from the most recent file transcription, kept for export.
     file_segments: Mutex<Vec<TranscriptSegment>>,
     /// File where the active model id is persisted, so the choice survives a restart.
@@ -117,6 +147,11 @@ struct AppState {
     cloud_custom_models: Mutex<Vec<CloudCustomModel>>,
     /// File the custom cloud model ids persist to — local app data only.
     cloud_custom_models_path: PathBuf,
+    /// User-defined OpenAI-compatible cloud endpoints (base URL + protocol + model). Persisted to
+    /// `cloud_custom_endpoints_path`; each endpoint's API key lives in `cloud_keys` under its id.
+    cloud_custom_endpoints: Mutex<Vec<CustomCloudEndpoint>>,
+    /// File the custom endpoints persist to — local app data only.
+    cloud_custom_endpoints_path: PathBuf,
     /// User-imported custom models (their files live under `custom_models_dir/<id>/`).
     custom_models: Mutex<Vec<CustomModel>>,
     /// Directory holding each imported model's files, and the registry JSON beside it.
@@ -134,6 +169,8 @@ struct SegmentDto {
     source: String,
     speaker: Option<u32>,
     is_final: bool,
+    /// A parallel rendering of this segment (a cloud model session's translation), when present.
+    aux_text: Option<String>,
 }
 
 impl From<&TranscriptSegment> for SegmentDto {
@@ -146,6 +183,7 @@ impl From<&TranscriptSegment> for SegmentDto {
             source: format!("{:?}", segment.source),
             speaker: segment.speaker.map(|s| s.0),
             is_final: matches!(segment.status, SegmentStatus::Final),
+            aux_text: segment.aux_text.clone(),
         }
     }
 }
@@ -216,6 +254,10 @@ struct FileTranscribeOptions {
     cloud_provider: Option<String>,
     /// Cloud model id, when `engine` is `"cloud"`.
     cloud_model: Option<String>,
+    /// Advanced cloud parameter values (vendor knobs like temperature) from the settings panel, keyed
+    /// by spec key. Absent/empty for on-device engines.
+    #[serde(default)]
+    params: HashMap<String, serde_json::Value>,
 }
 
 /// Builds the ASR engine for a downloaded model. `language` is a code (`zh`/`yue`/`en`/…) or empty
@@ -300,15 +342,24 @@ fn build_streaming_engine(
     Ok(Box::new(engine))
 }
 
-/// Which engine a live session runs: an on-device model, or a cloud realtime-streaming provider.
-/// Resolved once when a session starts and shared by every captured stream (mic + system).
+/// Which engine a live session runs: an on-device model, a cloud realtime-streaming provider, or a
+/// cloud batch model driven segment-by-segment. Resolved once when a session starts and shared by
+/// every captured stream (mic + system).
 enum LiveEngine {
     Local {
         descriptor: ModelDescriptor,
         dir: PathBuf,
     },
     CloudStreaming {
-        protocol: CloudProtocol,
+        streaming: StreamingProtocol,
+        model: String,
+        key: String,
+        params: ParamValues,
+    },
+    /// A batch model (built-in or a custom endpoint) run live by segment-batch: the local VAD cuts
+    /// each utterance and the cloud transcribes it whole — finalize-only, no mid-sentence partials.
+    CloudBatch {
+        provider: CloudProvider,
         model: String,
         key: String,
         params: ParamValues,
@@ -316,22 +367,34 @@ enum LiveEngine {
 }
 
 /// The advanced parameter specs a cloud `provider` exposes for live streaming, or none if it can't
-/// stream. A new streaming provider declares its knobs here and the UI renders them unchanged.
+/// stream. Dispatches to the engine crate's per-protocol specs.
 fn streaming_param_specs(provider: &CloudProvider, model: &str) -> Vec<ParamSpec> {
-    match provider.protocol {
-        CloudProtocol::OpenAi => OpenAiRealtimeEngine::param_specs(model),
-        _ => vec![],
+    match provider.streaming {
+        Some(sp) => cloud_streaming_param_specs(sp, model),
+        None => vec![],
     }
+}
+
+/// The advanced parameter specs a cloud `provider` exposes for File (batch) transcription. Dispatches
+/// to the engine crate's per-protocol specs.
+fn batch_param_specs(provider: &CloudProvider, model: &str) -> Vec<ParamSpec> {
+    cloud_batch_param_specs(provider.protocol, model)
 }
 
 /// Builds a [`ParamValues`] from an engine's `specs` (smart defaults) overlaid with the user's raw
 /// JSON `overrides`. Each override is coerced to its spec's kind; unknown keys and wrong types are
 /// ignored, so a stale or malformed override never breaks a session.
-fn build_param_values(specs: &[ParamSpec], overrides: &HashMap<String, serde_json::Value>) -> ParamValues {
+fn build_param_values(
+    specs: &[ParamSpec],
+    overrides: &HashMap<String, serde_json::Value>,
+) -> ParamValues {
     let mut values = ParamValues::from_specs(specs);
 
     for spec in specs {
-        if let Some(value) = overrides.get(&spec.key).and_then(|raw| coerce_param(raw, &spec.kind)) {
+        if let Some(value) = overrides
+            .get(&spec.key)
+            .and_then(|raw| coerce_param(raw, &spec.kind))
+        {
             values.set(&spec.key, value);
         }
     }
@@ -421,6 +484,64 @@ struct LiveSettings {
     accurate: bool,
 }
 
+/// The live audio for the realtime AI assist (option B): the same post-processed streams the
+/// transcription gets (mic after AEC + system), summed into one mono stream. `primary` drives the
+/// cadence (`recv`, blocking); `secondary` is mixed in best-effort (`try_recv` — its tee drops oldest
+/// when the assist isn't reading, so it never stalls or backs up the capture). The realtime engine
+/// resamples this to the provider's native rate, so the assist hears the whole conversation cleanly.
+struct MixSource {
+    primary: FrameReceiver,
+    secondary: Option<FrameReceiver>,
+    info: AudioSourceInfo,
+}
+
+impl AudioSource for MixSource {
+    fn info(&self) -> AudioSourceInfo {
+        self.info.clone()
+    }
+
+    fn next_frame(&mut self) -> wisp_core::error::Result<Option<AudioFrame>> {
+        let Some(mut frame) = self.primary.recv() else {
+            return Ok(None);
+        };
+
+        if let Some(sec) = &self.secondary {
+            if let Some(other) = sec.try_recv() {
+                let n = frame.samples.len().min(other.samples.len());
+                for i in 0..n {
+                    frame.samples[i] = (frame.samples[i] + other.samples[i]).clamp(-1.0, 1.0);
+                }
+            }
+        }
+
+        Ok(Some(frame))
+    }
+}
+
+/// Tees a processed transcription `source` so the assist can hear the same audio: returns the source
+/// for transcription (a [`ChannelSource`] over one branch) and stashes the other branch + the tee
+/// handle. The tee is drop-oldest, so an unread assist branch never stalls or backs up the capture.
+///
+/// When `want` is false (no real-time assist armed for this session) the source is returned untouched —
+/// no tee, no pump thread — so an ordinary live session's audio path is byte-for-byte the original.
+fn tap_for_assist(
+    source: Box<dyn AudioSource>,
+    want: bool,
+    branches: &mut Vec<FrameReceiver>,
+    tees: &mut Vec<Tee>,
+) -> Box<dyn AudioSource> {
+    if !want {
+        return source;
+    }
+
+    let info = source.info();
+    let (handle, main_rx, assist_rx) = tee(source);
+
+    tees.push(handle);
+    branches.push(assist_rx);
+    Box::new(ChannelSource::new(main_rx, info))
+}
+
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
 /// forwarding them to the webview.
 ///
@@ -458,6 +579,11 @@ fn spawn_session(
             };
             if emit {
                 let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
+                // Feed each admitted final into the realtime assist (if one is running) as authoritative,
+                // speaker-attributed text — the diarized anchor the model trusts over its own ASR.
+                if matches!(segment.status, SegmentStatus::Final) {
+                    route_assist_final(&emitter, &segment);
+                }
             }
         }
     });
@@ -467,7 +593,7 @@ fn spawn_session(
         // directly — no local segmenter, diarizer, or RNNoise (the cloud's noise_reduction param
         // handles denoise; doubling it up would hurt).
         LiveEngine::CloudStreaming {
-            protocol,
+            streaming,
             model,
             key,
             params,
@@ -475,22 +601,42 @@ fn spawn_session(
             // Surface session errors (bad key/model, server error, dropped connection) to the UI so
             // a cloud failure is never silent. Runs off the audio thread.
             let app_err = app.clone();
-            let on_error: Box<dyn Fn(&str) + Send> =
-                Box::new(move |msg: &str| {
-                    let _ = app_err.emit(LIVE_ERROR_EVENT, msg.to_owned());
-                });
+            let on_error: Box<dyn Fn(&str) + Send> = Box::new(move |msg: &str| {
+                let _ = app_err.emit(LIVE_ERROR_EVENT, msg.to_owned());
+            });
 
-            let engine: Box<dyn StreamingAsrEngine> = match protocol {
-                CloudProtocol::OpenAi => {
-                    Box::new(OpenAiRealtimeEngine::new(model, key, params, on_error)?)
-                }
-                other => {
-                    return Err(WispError::Engine(format!(
-                        "live cloud streaming isn't supported for {other:?} yet — use it in File mode"
-                    )))
-                }
-            };
+            let engine = build_realtime_engine(*streaming, model, key, params, on_error)?;
             return Ok(Session::spawn_streaming(engine, source, sink, None, kind));
+        }
+        // A batch model (built-in or custom endpoint) run live: the local VAD cuts each utterance
+        // and the cloud transcribes it whole. CloudEngine implements AsrEngine, so it drops into the
+        // same decoupled live path as local batch models — capture stays real-time while slow calls
+        // drain on their own thread. Finalize-only (no mid-sentence partials); a failed call (bad
+        // key/model/URL) surfaces to the UI instead of silently producing nothing.
+        LiveEngine::CloudBatch {
+            provider,
+            model,
+            key,
+            params,
+        } => {
+            let app_err = app.clone();
+            let on_error: Box<dyn Fn(&str) + Send> = Box::new(move |msg: &str| {
+                let _ = app_err.emit(LIVE_ERROR_EVENT, msg.to_owned());
+            });
+
+            let engine =
+                CloudEngine::new(provider, model, key, &settings.language, params.clone())?
+                    .with_error_sink(on_error);
+            let segmenter = build_segmenter(app, kind);
+            let transcriber = Transcriber::new(Box::new(engine), kind);
+
+            return Ok(Session::spawn_live(
+                segmenter,
+                transcriber,
+                source,
+                sink,
+                denoiser,
+            ));
         }
         LiveEngine::Local { descriptor, dir } => (descriptor, dir),
     };
@@ -763,6 +909,10 @@ struct CloudModelDto {
     streaming: bool,
     batch: bool,
     description: String,
+    /// The provider's recommended default for its capability — the picker pre-selects it.
+    recommended: bool,
+    /// The model returns speaker labels itself — the UI hides local diarization when it's picked.
+    diarizes: bool,
     /// User-added (not in the built-in catalog) — the UI tags it and offers removal.
     custom: bool,
 }
@@ -779,6 +929,15 @@ struct CloudProviderDto {
     key_hint: Option<String>,
     /// The provider's "API keys" console page, for the "Get a key" link.
     keys_url: String,
+    /// User-added custom endpoint (not a built-in catalog provider) — the UI offers edit + removal.
+    custom: bool,
+    /// Base URL and normalized protocol (`"openai"`/`"chat"`/`"gemini"`) — used to pre-fill the edit
+    /// form for custom endpoints. Harmless for catalog providers (not secret).
+    base_url: String,
+    protocol: String,
+    /// AI notes/assist tuning — populated for custom endpoints (so the edit form pre-fills it),
+    /// default for catalog providers.
+    assist: AssistParams,
     models: Vec<CloudModelDto>,
 }
 
@@ -839,36 +998,65 @@ fn list_cloud_providers(state: State<'_, AppState>) -> Result<Vec<CloudProviderD
         .cloud_custom_models
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
+    let endpoints = state
+        .cloud_custom_endpoints
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
 
-    let providers = cloud_catalog()
+    let mut providers: Vec<CloudProviderDto> = cloud_catalog()
         .into_iter()
-        .map(|p| {
-            let key_hint = keys.get(&p.id).and_then(|k| mask_key(k));
-            let pid = p.id.clone();
-            let p = with_custom_models(p, &customs);
-
-            CloudProviderDto {
-                key_set: key_hint.is_some(),
-                key_hint,
-                keys_url: p.keys_url,
-                id: p.id,
-                name: p.display_name,
-                models: p
-                    .models
-                    .into_iter()
-                    .map(|m| CloudModelDto {
-                        custom: customs.iter().any(|c| c.provider == pid && c.id.trim() == m.id),
-                        id: m.id,
-                        name: m.display_name,
-                        streaming: m.streaming,
-                        batch: m.batch,
-                        description: m.description,
-                    })
-                    .collect(),
-            }
-        })
+        .map(|p| provider_to_dto(with_custom_models(p, &customs), &keys, &customs, false))
         .collect();
+    providers.extend(endpoints.iter().map(|e| {
+        let mut dto = provider_to_dto(e.to_provider(), &keys, &customs, true);
+        dto.assist = e.assist.clone();
+        dto
+    }));
     Ok(providers)
+}
+
+/// Builds the DTO for one provider: its masked-key state plus each model, flagged custom or not.
+fn provider_to_dto(
+    p: CloudProvider,
+    keys: &HashMap<String, String>,
+    customs: &[CloudCustomModel],
+    custom: bool,
+) -> CloudProviderDto {
+    let key_hint = keys.get(&p.id).and_then(|k| mask_key(k));
+    let pid = p.id.clone();
+    let protocol = match p.protocol {
+        CloudProtocol::OpenAiChatAudio => "chat",
+        CloudProtocol::Gemini => "gemini",
+        _ => "openai",
+    }
+    .to_owned();
+    CloudProviderDto {
+        key_set: key_hint.is_some(),
+        key_hint,
+        keys_url: p.keys_url,
+        custom,
+        base_url: p.base_url,
+        protocol,
+        assist: AssistParams::default(),
+        models: p
+            .models
+            .into_iter()
+            .map(|m| CloudModelDto {
+                custom: customs
+                    .iter()
+                    .any(|c| c.provider == pid && c.id.trim() == m.id),
+                id: m.id,
+                name: m.display_name,
+                streaming: m.streaming,
+                batch: m.batch,
+                description: m.description,
+                recommended: m.recommended,
+                diarizes: m.diarizes,
+            })
+            .collect(),
+        id: p.id,
+        name: p.display_name,
+    }
 }
 
 /// Stores (or, with an empty `key`, clears) the API key for `provider`, on this device only.
@@ -931,6 +1119,158 @@ fn save_cloud_custom_models(path: &Path, models: &[CloudCustomModel]) {
     }
 }
 
+/// The AI notes/assist tuning a custom endpoint carries (its chat model's knobs). All optional —
+/// an empty/`None` field falls back to a built-in default and is never sent to the provider. Used
+/// only by [`run_llm_task`]; transcription has its own per-model parameter panel.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AssistParams {
+    /// Sampling temperature for the chat model (default 0.3 when unset).
+    #[serde(default)]
+    temperature: Option<f64>,
+    /// Cap on the reply length, in tokens (omitted from the request when unset).
+    #[serde(default)]
+    max_tokens: Option<u32>,
+    /// The model's context window, in tokens. When set and a transcript would exceed it, the assist
+    /// runs map-reduce (summarize chunks, then combine) instead of one over-long request.
+    #[serde(default)]
+    context_tokens: Option<u32>,
+    /// Nucleus sampling cutoff (omitted from the request when unset).
+    #[serde(default)]
+    top_p: Option<f64>,
+    /// A standing instruction prepended to every assist task on this endpoint (persona, language,
+    /// style). Empty for none.
+    #[serde(default)]
+    system_prompt: String,
+}
+
+/// A user-defined OpenAI-compatible cloud endpoint: a base URL, the API shape it speaks, one model
+/// id, and its assist tuning. The API key is stored separately in `cloud_keys` under `id`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct CustomCloudEndpoint {
+    /// Stable slug used as the provider id and key handle, e.g. `"custom-my-gateway"`.
+    id: String,
+    /// Display name shown in the picker.
+    name: String,
+    /// Base URL, e.g. `http://host:40000/v1` (a trailing slash is trimmed by the engine).
+    base_url: String,
+    /// `"chat"` selects the `/chat/completions` audio shape; anything else = `/audio/transcriptions`.
+    protocol: String,
+    /// Wire model id sent to the API.
+    model: String,
+    /// AI notes/assist tuning (defaults when absent, so older saved files load unchanged).
+    #[serde(default)]
+    assist: AssistParams,
+}
+
+/// The payload the add/update endpoint commands accept — the editable fields of a custom endpoint,
+/// as one object so the command stays within a sane parameter count.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EndpointInput {
+    name: String,
+    base_url: String,
+    protocol: String,
+    model: String,
+    #[serde(default)]
+    assist: AssistParams,
+}
+
+impl CustomCloudEndpoint {
+    /// The wire protocol this endpoint speaks (defaults to the transcription shape).
+    fn cloud_protocol(&self) -> CloudProtocol {
+        match self.protocol.as_str() {
+            "chat" => CloudProtocol::OpenAiChatAudio,
+            _ => CloudProtocol::OpenAi,
+        }
+    }
+
+    /// The vendor-agnostic [`CloudProvider`] this endpoint maps to — one file-only model.
+    fn to_provider(&self) -> CloudProvider {
+        CloudProvider {
+            id: self.id.clone(),
+            display_name: self.name.clone(),
+            protocol: self.cloud_protocol(),
+            base_url: self.base_url.clone(),
+            keys_url: String::new(),
+            auth: CloudAuth::bearer(),
+            streaming: None,
+            models: vec![CloudModel {
+                id: self.model.clone(),
+                display_name: self.model.clone(),
+                streaming: false,
+                batch: true,
+                languages: vec![],
+                description: "Custom OpenAI-compatible endpoint.".to_owned(),
+                recommended: true,
+                diarizes: false,
+            }],
+        }
+    }
+}
+
+/// Loads the user's custom endpoints; an absent or unreadable file yields none.
+fn load_cloud_endpoints(path: &Path) -> Vec<CustomCloudEndpoint> {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// Persists `endpoints` to `path` (local app data only). Best-effort — a write failure is logged.
+fn save_cloud_endpoints(path: &Path, endpoints: &[CustomCloudEndpoint]) {
+    match serde_json::to_string_pretty(endpoints) {
+        Ok(json) => {
+            if let Err(e) = fs::write(path, json) {
+                eprintln!("wisp: could not persist custom cloud endpoints: {e}");
+            }
+        }
+        Err(e) => eprintln!("wisp: could not serialize custom cloud endpoints: {e}"),
+    }
+}
+
+/// Resolves a provider id — the built-in catalog first, then the user's custom endpoints.
+fn resolve_cloud_provider(id: &str, endpoints: &[CustomCloudEndpoint]) -> Option<CloudProvider> {
+    cloud_provider_by_id(id).or_else(|| {
+        endpoints
+            .iter()
+            .find(|e| e.id == id)
+            .map(|e| e.to_provider())
+    })
+}
+
+/// A filesystem/url-safe slug for a custom endpoint id, unique against the catalog and `existing`
+/// endpoints. Falls back to `"custom-endpoint"` for an all-symbol name, then disambiguates with `-N`.
+fn unique_endpoint_id(name: &str, existing: &[CustomCloudEndpoint]) -> String {
+    let mut slug = String::new();
+    let mut prev_dash = false;
+    for ch in name.trim().to_lowercase().chars() {
+        if ch.is_ascii_alphanumeric() {
+            slug.push(ch);
+            prev_dash = false;
+        } else if !prev_dash {
+            slug.push('-');
+            prev_dash = true;
+        }
+    }
+    let base = format!("custom-{}", slug.trim_matches('-'));
+    let base = if base == "custom-" {
+        "custom-endpoint".to_owned()
+    } else {
+        base
+    };
+
+    let taken =
+        |id: &str| cloud_provider_by_id(id).is_some() || existing.iter().any(|e| e.id == id);
+    if !taken(&base) {
+        return base;
+    }
+    (2..)
+        .map(|n| format!("{base}-{n}"))
+        .find(|id| !taken(id))
+        .unwrap()
+}
+
 /// `provider` with the user's matching custom ids appended as batch-only models, so the picker and
 /// the engine both see them. Blank ids and ones already in the catalog are skipped (no duplicates).
 fn with_custom_models(mut provider: CloudProvider, customs: &[CloudCustomModel]) -> CloudProvider {
@@ -945,11 +1285,17 @@ fn with_custom_models(mut provider: CloudProvider, customs: &[CloudCustomModel])
 
         provider.models.push(CloudModel {
             id: id.to_owned(),
-            display_name: if name.is_empty() { id.to_owned() } else { name.to_owned() },
+            display_name: if name.is_empty() {
+                id.to_owned()
+            } else {
+                name.to_owned()
+            },
             streaming: false,
             batch: true,
             languages: vec![],
             description: "Custom model — added by you.".to_owned(),
+            recommended: false,
+            diarizes: false,
         });
     }
     provider
@@ -958,7 +1304,12 @@ fn with_custom_models(mut provider: CloudProvider, customs: &[CloudCustomModel])
 /// Adds a custom cloud model id for `provider`, so it appears in the picker and is usable at once.
 /// Rejects an unknown provider, a blank id, or an id that already exists (catalog or custom).
 #[tauri::command]
-fn add_cloud_custom_model(state: State<'_, AppState>, provider: String, model_id: String, name: String) -> Result<(), String> {
+fn add_cloud_custom_model(
+    state: State<'_, AppState>,
+    provider: String,
+    model_id: String,
+    name: String,
+) -> Result<(), String> {
     let base = cloud_provider_by_id(&provider)
         .ok_or_else(|| format!("unknown cloud provider {provider}"))?;
 
@@ -987,7 +1338,11 @@ fn add_cloud_custom_model(state: State<'_, AppState>, provider: String, model_id
 
 /// Removes a previously added custom cloud model id; a no-op if it wasn't present.
 #[tauri::command]
-fn remove_cloud_custom_model(state: State<'_, AppState>, provider: String, model_id: String) -> Result<(), String> {
+fn remove_cloud_custom_model(
+    state: State<'_, AppState>,
+    provider: String,
+    model_id: String,
+) -> Result<(), String> {
     let id = model_id.trim();
 
     let mut customs = state
@@ -997,6 +1352,122 @@ fn remove_cloud_custom_model(state: State<'_, AppState>, provider: String, model
 
     customs.retain(|c| !(c.provider == provider && c.id == id));
     save_cloud_custom_models(&state.cloud_custom_models_path, &customs);
+    Ok(())
+}
+
+/// Adds a custom OpenAI-compatible endpoint and returns its generated id (used as the provider id and
+/// the key handle). Validates a non-blank name, an `http(s)` base URL, and a model id; the API key is
+/// saved separately via `set_cloud_key` under the returned id.
+#[tauri::command]
+fn add_cloud_endpoint(state: State<'_, AppState>, input: EndpointInput) -> Result<String, String> {
+    let (name, base_url, protocol, model) =
+        clean_endpoint_fields(&input.name, &input.base_url, &input.protocol, &input.model)?;
+
+    let mut endpoints = state
+        .cloud_custom_endpoints
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
+    let id = unique_endpoint_id(&name, &endpoints);
+    endpoints.push(CustomCloudEndpoint {
+        id: id.clone(),
+        name,
+        base_url,
+        protocol,
+        model,
+        assist: normalize_assist(input.assist),
+    });
+    save_cloud_endpoints(&state.cloud_custom_endpoints_path, &endpoints);
+    Ok(id)
+}
+
+/// Clamps assist params to sane ranges (and drops zero token caps to "unset") so a hand-edited or
+/// stale value can never reach the provider as something invalid.
+fn normalize_assist(mut assist: AssistParams) -> AssistParams {
+    assist.temperature = assist.temperature.map(|t| t.clamp(0.0, 2.0));
+    assist.top_p = assist.top_p.map(|p| p.clamp(0.0, 1.0));
+    assist.max_tokens = assist.max_tokens.filter(|&n| n > 0);
+    assist.context_tokens = assist.context_tokens.filter(|&n| n > 0);
+    assist.system_prompt = assist.system_prompt.trim().to_owned();
+    assist
+}
+
+/// Trims + validates a custom endpoint's fields, returning `(name, base_url, protocol, model)` or an
+/// error message. `protocol` is normalized to `"chat"` or `"openai"`.
+fn clean_endpoint_fields(
+    name: &str,
+    base_url: &str,
+    protocol: &str,
+    model: &str,
+) -> Result<(String, String, String, String), String> {
+    let name = name.trim();
+    let base_url = base_url.trim().trim_end_matches('/');
+    let model = model.trim();
+
+    if name.is_empty() || base_url.is_empty() || model.is_empty() {
+        return Err("name, base URL, and model id are all required".to_owned());
+    }
+    if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+        return Err("base URL must start with http:// or https://".to_owned());
+    }
+
+    let protocol = if protocol == "chat" { "chat" } else { "openai" }.to_owned();
+    Ok((
+        name.to_owned(),
+        base_url.to_owned(),
+        protocol,
+        model.to_owned(),
+    ))
+}
+
+/// Updates an existing custom endpoint in place, keeping its id and stored key. Errors if the id is
+/// unknown or a field is invalid.
+#[tauri::command]
+fn update_cloud_endpoint(
+    state: State<'_, AppState>,
+    id: String,
+    input: EndpointInput,
+) -> Result<(), String> {
+    let (name, base_url, protocol, model) =
+        clean_endpoint_fields(&input.name, &input.base_url, &input.protocol, &input.model)?;
+
+    let mut endpoints = state
+        .cloud_custom_endpoints
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let ep = endpoints
+        .iter_mut()
+        .find(|e| e.id == id)
+        .ok_or_else(|| format!("unknown endpoint {id}"))?;
+
+    ep.name = name;
+    ep.base_url = base_url;
+    ep.protocol = protocol;
+    ep.model = model;
+    ep.assist = normalize_assist(input.assist);
+    save_cloud_endpoints(&state.cloud_custom_endpoints_path, &endpoints);
+    Ok(())
+}
+
+/// Removes a custom endpoint and its stored key; a no-op if it wasn't present.
+#[tauri::command]
+fn remove_cloud_endpoint(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    {
+        let mut endpoints = state
+            .cloud_custom_endpoints
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?;
+        endpoints.retain(|e| e.id != id);
+        save_cloud_endpoints(&state.cloud_custom_endpoints_path, &endpoints);
+    }
+
+    let mut keys = state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    if keys.remove(&id).is_some() {
+        save_cloud_keys(&state.cloud_keys_path, &keys);
+    }
     Ok(())
 }
 
@@ -1081,6 +1552,290 @@ fn streaming_params(provider: String, model: String) -> Result<Vec<ParamSpecDto>
         .iter()
         .map(param_spec_dto)
         .collect())
+}
+
+/// The advanced File (batch) parameter specs a cloud `provider` exposes for `model`, for the generic
+/// settings panel. Empty when the provider/model has no extra knobs.
+#[tauri::command]
+fn batch_params(
+    state: State<'_, AppState>,
+    provider: String,
+    model: String,
+) -> Result<Vec<ParamSpecDto>, String> {
+    let endpoints = state
+        .cloud_custom_endpoints
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let provider = resolve_cloud_provider(&provider, &endpoints)
+        .ok_or_else(|| format!("unknown cloud provider {provider}"))?;
+    Ok(batch_param_specs(&provider, &model)
+        .iter()
+        .map(param_spec_dto)
+        .collect())
+}
+
+/// Runs a one-shot LLM task (summary, action items, or a custom prompt) over `transcript` using the
+/// chat model of cloud `provider` — typically a user's custom OpenAI-compatible endpoint (their
+/// gateway, a local Ollama, …). Runs off the main thread (the call is a slow HTTP round-trip).
+#[tauri::command]
+async fn run_llm_task(
+    app: AppHandle,
+    provider: String,
+    model: String,
+    system_prompt: String,
+    transcript: String,
+) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_llm_task_blocking(app, &provider, &model, &system_prompt, &transcript)
+    })
+    .await
+    .map_err(|e| format!("LLM task failed: {e}"))?
+}
+
+/// The blocking body of [`run_llm_task`]: resolve the provider (catalog or custom endpoint) and its
+/// key, then call the chat model with the task's system prompt and the transcript.
+fn run_llm_task_blocking(
+    app: AppHandle,
+    provider_id: &str,
+    model: &str,
+    system_prompt: &str,
+    transcript: &str,
+) -> Result<String, String> {
+    if transcript.trim().is_empty() {
+        return Err("there's no transcript to work on yet".to_owned());
+    }
+
+    let state = app.state::<AppState>();
+    let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
+
+    // Prepend the endpoint's standing instruction (persona / language / style) to the task prompt.
+    let system = combine_system(&assist.system_prompt, system_prompt);
+
+    run_assist(&provider, model, &key, &system, transcript, &assist)
+}
+
+/// Resolves the cloud `provider` (catalog or custom endpoint), its on-device key, and its assist tuning
+/// — the common preamble for every assist call. A catalog provider uses default tuning; a custom
+/// endpoint carries its own (temperature, context size, system prompt, …).
+fn resolve_assist_target(
+    state: &AppState,
+    provider_id: &str,
+) -> Result<(CloudProvider, String, AssistParams), String> {
+    let endpoints = state
+        .cloud_custom_endpoints
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
+    let provider = resolve_cloud_provider(provider_id, &endpoints)
+        .ok_or_else(|| format!("unknown provider {provider_id}"))?;
+
+    let key = state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .get(provider_id)
+        .filter(|k| !k.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| format!("no API key saved for {provider_id}"))?;
+
+    let assist = endpoints
+        .iter()
+        .find(|e| e.id == provider_id)
+        .map(|e| e.assist.clone())
+        .unwrap_or_default();
+
+    Ok((provider, key, assist))
+}
+
+/// Streams a chat assist task into the feed: resolve the provider, then run a single chat call with
+/// `stream: true`, emitting each chunk as [`ASSIST_DELTA_EVENT`] and the full reply as
+/// [`ASSIST_TEXT_EVENT`]. A transcript too long for one call falls back to (non-streamed) map-reduce and
+/// emits the combined result whole. Off the main thread — the call is a slow streamed round-trip.
+#[tauri::command]
+async fn run_assist_stream(
+    app: AppHandle,
+    provider: String,
+    model: String,
+    system_prompt: String,
+    transcript: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        run_assist_stream_blocking(app, &provider, &model, &system_prompt, &transcript)
+    })
+    .await
+    .map_err(|e| format!("assist stream task failed: {e}"))?
+}
+
+fn run_assist_stream_blocking(
+    app: AppHandle,
+    provider_id: &str,
+    model: &str,
+    system_prompt: &str,
+    transcript: &str,
+) -> Result<(), String> {
+    if transcript.trim().is_empty() {
+        return Err("there's no transcript to work on yet".to_owned());
+    }
+
+    let state = app.state::<AppState>();
+    let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
+    let system = combine_system(&assist.system_prompt, system_prompt);
+
+    // A transcript that fits one call streams token-by-token; one too long map-reduces (each chunk
+    // whole, no per-token stream) and the combined result is emitted as the single final reply.
+    let text = match input_char_budget(assist.context_tokens) {
+        Some(budget) if transcript.chars().count() > budget => {
+            map_reduce_assist(&provider, model, &key, &system, transcript, &assist, budget)?
+        }
+        _ => {
+            let app_delta = app.clone();
+            let req = ChatRequest {
+                system: &system,
+                user: transcript,
+                temperature: assist.temperature.unwrap_or(0.3),
+                max_tokens: assist.max_tokens,
+                top_p: assist.top_p,
+            };
+            chat_completion_stream(&provider, model, &key, &req, |chunk| {
+                let _ = app_delta.emit(ASSIST_DELTA_EVENT, chunk.to_owned());
+            })
+            .map_err(|e| e.to_string())?
+        }
+    };
+
+    let _ = app.emit(ASSIST_TEXT_EVENT, text.trim().to_owned());
+    Ok(())
+}
+
+/// Approximate characters per token — used only to decide when a transcript needs map-reduce. A
+/// rough cross-language middle (English ~4, CJK ~1–2); 3 errs toward chunking, which is the safe way
+/// to be wrong (an extra round-trip beats overflowing the model's context).
+const ASSIST_CHARS_PER_TOKEN: usize = 3;
+
+/// The character budget for one assist request given a context window in tokens, or `None` when no
+/// window is set (0 counts as unset). Reserves ~40% of the window for the system prompt and reply.
+fn input_char_budget(context_tokens: Option<u32>) -> Option<usize> {
+    context_tokens
+        .filter(|&t| t > 0)
+        .map(|t| (t as usize * ASSIST_CHARS_PER_TOKEN * 3) / 5)
+}
+
+/// Splits `text` into chunks of at most `budget` characters, breaking only at line boundaries (one
+/// transcript turn per line) so an utterance is never cut mid-sentence. A single over-long line
+/// becomes its own chunk.
+fn chunk_by_chars(text: &str, budget: usize) -> Vec<String> {
+    let mut chunks = Vec::new();
+    let mut cur = String::new();
+
+    for line in text.lines() {
+        if !cur.is_empty() && cur.chars().count() + 1 + line.chars().count() > budget {
+            chunks.push(std::mem::take(&mut cur));
+        }
+        if !cur.is_empty() {
+            cur.push('\n');
+        }
+        cur.push_str(line);
+    }
+
+    if !cur.is_empty() {
+        chunks.push(cur);
+    }
+    chunks
+}
+
+/// Prepends an endpoint's standing instruction to a task's system prompt (blank-safe).
+fn combine_system(standing: &str, task: &str) -> String {
+    let standing = standing.trim();
+
+    if standing.is_empty() {
+        task.to_owned()
+    } else {
+        format!("{standing}\n\n{task}")
+    }
+}
+
+/// Runs an assist task, transparently map-reducing when `context_tokens` is set and the transcript
+/// would overflow it: split into chunks, run the task on each, then combine the partial results.
+fn run_assist(
+    provider: &CloudProvider,
+    model: &str,
+    key: &str,
+    system: &str,
+    transcript: &str,
+    assist: &AssistParams,
+) -> Result<String, String> {
+    match input_char_budget(assist.context_tokens) {
+        Some(budget) if transcript.chars().count() > budget => {
+            map_reduce_assist(provider, model, key, system, transcript, assist, budget)
+        }
+        _ => chat_once(provider, model, key, system, transcript, assist),
+    }
+}
+
+/// One chat-completion call with the endpoint's tuning (temperature default 0.3, optional max tokens
+/// / top_p).
+fn chat_once(
+    provider: &CloudProvider,
+    model: &str,
+    key: &str,
+    system: &str,
+    user: &str,
+    assist: &AssistParams,
+) -> Result<String, String> {
+    chat_completion(
+        provider,
+        model,
+        key,
+        &ChatRequest {
+            system,
+            user,
+            temperature: assist.temperature.unwrap_or(0.3),
+            max_tokens: assist.max_tokens,
+            top_p: assist.top_p,
+        },
+    )
+    .map_err(|e| e.to_string())
+}
+
+/// Map-reduce for a transcript that exceeds the context window: run the task on each chunk (map),
+/// then combine the partials under the original instruction (reduce). Covers the whole transcript
+/// rather than truncating it.
+fn map_reduce_assist(
+    provider: &CloudProvider,
+    model: &str,
+    key: &str,
+    system: &str,
+    transcript: &str,
+    assist: &AssistParams,
+    budget: usize,
+) -> Result<String, String> {
+    let chunks = chunk_by_chars(transcript, budget);
+
+    let mut partials = Vec::with_capacity(chunks.len());
+    for (i, chunk) in chunks.iter().enumerate() {
+        let part = chat_once(provider, model, key, system, chunk, assist)?;
+        partials.push(format!(
+            "=== Part {}/{} ===\n{}",
+            i + 1,
+            chunks.len(),
+            part.trim()
+        ));
+    }
+
+    let reduce_system = format!(
+        "Below are results from running the same instruction on consecutive parts of one long \
+         transcript. Combine them into a single coherent result that follows this instruction, \
+         merging duplicates and keeping it faithful:\n\n{system}"
+    );
+
+    chat_once(
+        provider,
+        model,
+        key,
+        &reduce_system,
+        &partials.join("\n\n"),
+        assist,
+    )
 }
 
 /// A user-imported model. Its files live under `custom_models_dir/<id>/`; `kind` selects the engine
@@ -1561,10 +2316,27 @@ struct LiveOptions {
     /// Advanced parameter overrides keyed by `ParamSpec::key` (raw JSON, coerced per spec).
     #[serde(default)]
     params: HashMap<String, serde_json::Value>,
+    /// Whether to tap the live audio for the realtime AI assist. The frontend sets it only when a
+    /// real-time assist model is armed, so an ordinary session that never uses the assist pays nothing
+    /// (no extra tee pump threads): the live audio path is then byte-for-byte the original.
+    #[serde(default)]
+    assist: bool,
 }
 
 /// Resolves the engine a live session will run from `options` + app state: an on-device model, or a
 /// cloud realtime provider/model with its key (from local storage) and merged parameter overrides.
+/// The realtime streaming protocol a cloud live session should use, or `None` to fall back to
+/// segment-batch. Realtime needs both a streaming-capable provider and a realtime-capable model; a
+/// batch-only model (e.g. a custom endpoint) returns `None` and runs segment-batch instead.
+fn cloud_live_protocol(provider: &CloudProvider, model_id: &str) -> Option<StreamingProtocol> {
+    let model_streams = provider
+        .model(model_id)
+        .map(|m| m.streaming)
+        .unwrap_or(false);
+
+    provider.streaming.filter(|_| model_streams)
+}
+
 fn resolve_live_engine(state: &AppState, options: &LiveOptions) -> Result<LiveEngine, String> {
     if options.engine.as_deref() != Some("cloud") {
         let active = state
@@ -1581,7 +2353,10 @@ fn resolve_live_engine(state: &AppState, options: &LiveOptions) -> Result<LiveEn
         .cloud_provider
         .clone()
         .ok_or("no cloud provider selected")?;
-    let model = options.cloud_model.clone().ok_or("no cloud model selected")?;
+    let model = options
+        .cloud_model
+        .clone()
+        .ok_or("no cloud model selected")?;
 
     let key = state
         .cloud_keys
@@ -1592,12 +2367,42 @@ fn resolve_live_engine(state: &AppState, options: &LiveOptions) -> Result<LiveEn
         .cloned()
         .ok_or_else(|| format!("no API key saved for {provider_id}"))?;
 
-    let provider = cloud_provider_by_id(&provider_id)
-        .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?;
-    let params = build_param_values(&streaming_param_specs(&provider, &model), &options.params);
+    // Resolve from the catalog OR the user's custom endpoints (the same lookup File uses), then merge
+    // any custom model ids — so a custom endpoint / model selected in the picker is found here too.
+    let provider = {
+        let endpoints = state
+            .cloud_custom_endpoints
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?;
+        resolve_cloud_provider(&provider_id, &endpoints)
+            .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?
+    };
+    let provider = {
+        let customs = state
+            .cloud_custom_models
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?;
+        with_custom_models(provider, &customs)
+    };
 
-    Ok(LiveEngine::CloudStreaming {
-        protocol: provider.protocol,
+    // Realtime when the provider speaks a streaming socket and the model is realtime-capable;
+    // otherwise segment-batch — the local VAD cuts utterances and the cloud transcribes each whole,
+    // which lets any batch model (including custom endpoints) run live (finalize-only).
+    if let Some(streaming) = cloud_live_protocol(&provider, &model) {
+        let params = build_param_values(&streaming_param_specs(&provider, &model), &options.params);
+
+        return Ok(LiveEngine::CloudStreaming {
+            streaming,
+            model,
+            key,
+            params,
+        });
+    }
+
+    let params = build_param_values(&batch_param_specs(&provider, &model), &options.params);
+
+    Ok(LiveEngine::CloudBatch {
+        provider,
         model,
         key,
         params,
@@ -1607,7 +2412,19 @@ fn resolve_live_engine(state: &AppState, options: &LiveOptions) -> Result<LiveEn
 /// Starts a live session. Returns an optional non-fatal notice (e.g. system audio was unavailable
 /// so it fell back to mic-only) for the UI to surface; `None` means everything started as requested.
 #[tauri::command]
-fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOptions) -> Result<Option<String>, String> {
+async fn start_session(app: AppHandle, options: LiveOptions) -> Result<Option<String>, String> {
+    // The cloud engine connects its WebSocket synchronously (a ~1-2s blocking handshake), and a
+    // sync Tauri command runs on the main thread — which would freeze the UI (the Start spinner
+    // can't even animate). Run the whole start on a blocking worker so the UI stays smooth.
+    tauri::async_runtime::spawn_blocking(move || start_session_blocking(app, options))
+        .await
+        .map_err(|e| format!("session start task failed: {e}"))?
+}
+
+/// The blocking body of [`start_session`], run off the main thread: it builds the engine(s) —
+/// connecting the cloud WebSocket — and spawns the capture/transcription session.
+fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option<String>, String> {
+    let state = app.state::<AppState>();
     let mut sessions = state
         .sessions
         .lock()
@@ -1713,6 +2530,10 @@ fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOption
         None => None,
     };
 
+    // Tap each processed transcription stream so the realtime assist can hear the same audio (mixed).
+    let mut assist_branches: Vec<FrameReceiver> = Vec::new();
+    let mut assist_tees: Vec<Tee> = Vec::new();
+
     match (mic_source, system_source) {
         // Both on → the mic re-hears the system audio on speakers (echo). Tee the system capture
         // into the meeting pipeline and the AEC far-end reference, and clean the mic against it.
@@ -1730,6 +2551,12 @@ fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOption
                 reference_rx,
                 echo_canceller(),
             ));
+            let aec_mic = tap_for_assist(
+                aec_mic,
+                options.assist,
+                &mut assist_branches,
+                &mut assist_tees,
+            );
             sessions.push(
                 spawn_session(
                     &app,
@@ -1744,6 +2571,12 @@ fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOption
 
             let meeting: Box<dyn AudioSource> =
                 Box::new(ChannelSource::new(meeting_rx, system_info));
+            let meeting = tap_for_assist(
+                meeting,
+                options.assist,
+                &mut assist_branches,
+                &mut assist_tees,
+            );
             sessions.push(
                 spawn_session(
                     &app,
@@ -1764,6 +2597,7 @@ fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOption
 
         // Mic only → no playback to echo; capture it directly.
         (Some(mic), None) => {
+            let mic = tap_for_assist(mic, options.assist, &mut assist_branches, &mut assist_tees);
             sessions.push(
                 spawn_session(
                     &app,
@@ -1779,6 +2613,12 @@ fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOption
 
         // System only → clean digital capture, no echo path; transcribe it directly.
         (None, Some(system)) => {
+            let system = tap_for_assist(
+                system,
+                options.assist,
+                &mut assist_branches,
+                &mut assist_tees,
+            );
             sessions.push(
                 spawn_session(
                     &app,
@@ -1800,17 +2640,109 @@ fn start_session(app: AppHandle, state: State<'_, AppState>, options: LiveOption
             }));
         }
     }
+
+    // Mirror the live audio (post-AEC mic + system) into a single mono source the realtime AI
+    // assist can subscribe to on demand. The tee is drop-oldest, so an idle assist branch never
+    // backs up transcription; the mix is built lazily here and consumed by `start_assist_realtime`.
+    store_assist_mix(&state, assist_branches, assist_tees)?;
+
     Ok(degraded_notice)
 }
 
+/// Combines the tapped live branches into one mono [`MixSource`] and parks it (plus the tee handles
+/// that keep the taps alive) on [`AppState`] for the realtime assist to pick up. With no branches
+/// (no source started) it clears any stale mix instead.
+fn store_assist_mix(
+    state: &AppState,
+    mut branches: Vec<FrameReceiver>,
+    tees: Vec<Tee>,
+) -> Result<(), String> {
+    let mix: Option<Box<dyn AudioSource>> = if branches.is_empty() {
+        None
+    } else {
+        let primary = branches.remove(0);
+        let secondary = if branches.is_empty() {
+            None
+        } else {
+            Some(branches.remove(0))
+        };
+        let info = AudioSourceInfo {
+            kind: AudioSourceKind::Microphone,
+            name: "Assist mix".to_owned(),
+        };
+
+        Some(Box::new(MixSource {
+            primary,
+            secondary,
+            info,
+        }))
+    };
+
+    *state
+        .assist_audio
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = mix;
+    *state
+        .assist_tees
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = tees;
+
+    Ok(())
+}
+
+/// Stops the live session off the main thread — joining the capture/transcription threads (which can
+/// take a moment to drain) on the UI thread would freeze the app, so run it on a blocking worker.
 #[tauri::command]
-fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
+async fn stop_session(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || stop_session_blocking(app))
+        .await
+        .map_err(|e| format!("session stop task failed: {e}"))?
+}
+
+/// The blocking body of [`stop_session`]: signal each session to stop, join its threads, and tear
+/// down the system-audio tee.
+fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
     let sessions = std::mem::take(
         &mut *state
             .sessions
             .lock()
             .map_err(|_| "state lock poisoned".to_owned())?,
     );
+
+    // Stop the realtime assist FIRST, while audio still flows — its loop sees the stop flag on the
+    // next frame and exits cleanly (closing its WebSocket). The global Stop ends the assist with the
+    // session; the returned mix source is dropped here (no restart once the session is gone). Drop the
+    // finals channel up front so the sink stops routing into a worker that's about to be joined.
+    *state
+        .assist_finals_tx
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = None;
+
+    if let Some(worker) = take_assist_worker(&state)? {
+        let _ = worker.stop_join();
+    }
+
+    // Tear down the system-audio tee FIRST — before joining. Dropping it stops the pump + capture and
+    // closes the channels feeding the system-audio session's source, so a blocking `recv` on a silent
+    // system stream returns `None` and its capture loop exits. Joining before this would deadlock:
+    // the capture loop would block on a recv that the still-alive tee never satisfies.
+    *state
+        .tee
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = None;
+
+    // Drop the assist mix + its tee handles alongside the live tee: the realtime assist taps off the
+    // same capture, so its branches must die when the session does (otherwise a stale mix lingers).
+    *state
+        .assist_audio
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = None;
+    *state
+        .assist_tees
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = Vec::new();
 
     let mut last_error = None;
     for session in sessions {
@@ -1819,17 +2751,344 @@ fn stop_session(state: State<'_, AppState>) -> Result<(), String> {
         }
     }
 
-    // Tear down the system-audio tee (present only when AEC was active): dropping it stops the
-    // pump thread and the underlying capture.
-    *state
-        .tee
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = None;
-
     match last_error {
         Some(e) => Err(e),
         None => Ok(()),
     }
+}
+
+/// How often the realtime assist may volunteer an ambient reply, when there's new speech since the
+/// last one — so it rides along the conversation without firing on every utterance (noisy + costly).
+const ASSIST_THROTTLE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// If a triggered reply never completes within this long (stalled stream), stop waiting on it so the
+/// cadence resumes — a safety valve, not the normal path (replies finish in a second or two).
+const ASSIST_RESPONSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// A running realtime AI-assist worker: the stop flag its loop polls, a one-shot flag the UI sets to
+/// pull a reply on demand, and the thread handle — which *returns the mix source* on join, so the
+/// assist can be stopped and restarted within one live session without re-tapping the capture.
+struct AssistWorker {
+    stop: Arc<std::sync::atomic::AtomicBool>,
+    hint: Arc<std::sync::atomic::AtomicBool>,
+    handle: std::thread::JoinHandle<Box<dyn AudioSource>>,
+}
+
+impl AssistWorker {
+    /// Signals the loop to stop, joins the thread, and hands back the mix source it owned — `None`
+    /// only if the thread panicked (then the source is gone with it).
+    fn stop_join(self) -> Option<Box<dyn AudioSource>> {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        self.handle.join().ok()
+    }
+}
+
+/// One line of authoritative, speaker-attributed text for the realtime assist — the mic is "Me", the
+/// system side is "Them" plus the live diarizer's 1-based speaker number when known. Mirrors the
+/// frontend's on-screen attribution so the injected anchor reads the same way the user sees it.
+fn assist_final_text(segment: &TranscriptSegment) -> String {
+    let who = match segment.source {
+        AudioSourceKind::Microphone => "Me".to_owned(),
+        AudioSourceKind::System => match segment.speaker {
+            Some(id) => format!("Them (Speaker {})", id.0 + 1),
+            None => "Them".to_owned(),
+        },
+        _ => "Speaker".to_owned(),
+    };
+
+    format!("{who}: {}", segment.text)
+}
+
+/// Routes one diarized final into the running realtime assist, if any — best-effort (a closed channel
+/// just means the assist stopped). Called from the live sink for every admitted final.
+fn route_assist_final(app: &AppHandle, segment: &TranscriptSegment) {
+    let state = app.state::<AppState>();
+    let Ok(guard) = state.assist_finals_tx.lock() else {
+        return;
+    };
+
+    if let Some(tx) = guard.as_ref() {
+        let _ = tx.send(assist_final_text(segment));
+    }
+}
+
+/// The standing instruction prepended to the user's assist prompt: frames the realtime model as a
+/// meeting copilot that hears a "Me"/"Them" mix and is fed authoritative diarized text, and pins the
+/// spoken `language` when one is set (so the model doesn't mis-hear CJK from the audio alone).
+fn assist_preamble(language: &str) -> String {
+    let base = "You are a real-time meeting copilot. You hear a live mix of the local user (\"Me\") and \
+remote participants (\"Them\"). Authoritative, speaker-attributed transcript lines are also injected as \
+text — trust them over anything you mishear from the audio. Be concise and only answer when asked.";
+
+    let language = language.trim();
+    if language.is_empty() {
+        base.to_owned()
+    } else {
+        format!("{base} The primary spoken language is \"{language}\".")
+    }
+}
+
+/// Takes the running assist worker out of state, if any — the caller stops + joins it.
+fn take_assist_worker(state: &AppState) -> Result<Option<AssistWorker>, String> {
+    Ok(state
+        .assist_worker
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .take())
+}
+
+/// The on-device API key for cloud `provider`, or an error naming the provider if none is saved.
+fn cloud_key(state: &AppState, provider: &str) -> Result<String, String> {
+    state
+        .cloud_keys
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .get(provider)
+        .filter(|k| !k.trim().is_empty())
+        .cloned()
+        .ok_or_else(|| format!("no API key saved for {provider}"))
+}
+
+/// The realtime assist loop — the hybrid, controlled-cadence engine room. Each iteration:
+/// 1. injects any new diarized finals as authoritative text context (`engine.inject_text`),
+/// 2. feeds one audio frame (prosody + low latency) and drains any in-flight reply,
+/// 3. decides whether to trigger a reply now — on a manual pull, or throttled when there's new speech.
+///
+/// Replies fire on `response.create` (the session is configured `create_response:false`), so the
+/// model answers on this cadence instead of every utterance. Exits when stopped or when the capture
+/// closes (the live session ended), returning the source so the assist can restart.
+fn spawn_assist_worker(
+    app: AppHandle,
+    mut engine: Box<dyn StreamingAsrEngine>,
+    mut source: Box<dyn AudioSource>,
+    finals_rx: std::sync::mpsc::Receiver<String>,
+) -> AssistWorker {
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let stop = Arc::new(AtomicBool::new(false));
+    let hint = Arc::new(AtomicBool::new(false));
+    let stop_worker = Arc::clone(&stop);
+    let hint_worker = Arc::clone(&hint);
+
+    let handle = std::thread::spawn(move || {
+        let mut last_trigger = std::time::Instant::now();
+        let mut new_speech = false; // a final arrived since the last reply → worth a throttled reply
+        let mut awaiting = false; // a reply is in flight (don't stack another)
+        let mut awaiting_since = std::time::Instant::now();
+        let mut streamed = 0usize; // chars of the in-progress reply already streamed to the UI
+
+        while !stop_worker.load(Ordering::Relaxed) {
+            // 1. Inject every authoritative final waiting — the diarized anchor the model trusts.
+            while let Ok(text) = finals_rx.try_recv() {
+                engine.inject_text(&text);
+                new_speech = true;
+            }
+
+            // 2. Feed audio + drain any reply. Continuous capture means a frame is always close behind,
+            // so the stop flag is honoured within one frame; `None` = the live tee was dropped → stop.
+            let frame = match source.next_frame() {
+                Ok(Some(frame)) => frame,
+                Ok(None) => break,
+                Err(_) => break,
+            };
+            let result = engine.accept_waveform(frame.sample_rate, &frame.samples);
+            if result.is_endpoint {
+                let text = result.text.trim();
+                if !text.is_empty() {
+                    let _ = app.emit(ASSIST_TEXT_EVENT, text.to_owned());
+                }
+                streamed = 0; // the reply closed; the next one starts a fresh stream
+                awaiting = false; // the reply completed
+            } else {
+                // Stream the in-progress reply as it grows: emit only the new suffix (char-safe for CJK),
+                // so the feed fills token-by-token instead of waiting for the whole reply.
+                let total = result.text.chars().count();
+                if total > streamed {
+                    let delta: String = result.text.chars().skip(streamed).collect();
+                    let _ = app.emit(ASSIST_DELTA_EVENT, delta);
+                    streamed = total;
+                }
+            }
+
+            // A stalled reply must not wedge the cadence forever.
+            if awaiting && awaiting_since.elapsed() >= ASSIST_RESPONSE_TIMEOUT {
+                awaiting = false;
+            }
+
+            // 3. Trigger a reply only when idle: a manual pull always fires; otherwise throttle, and
+            // only when there's been new speech since the last one (never reply to silence).
+            if !awaiting {
+                let manual = hint_worker.swap(false, Ordering::Relaxed);
+                let throttled = new_speech && last_trigger.elapsed() >= ASSIST_THROTTLE;
+                if manual || throttled {
+                    engine.request_response();
+                    last_trigger = std::time::Instant::now();
+                    awaiting = true;
+                    awaiting_since = last_trigger;
+                    new_speech = false;
+                }
+            }
+        }
+
+        source
+    });
+
+    AssistWorker { stop, hint, handle }
+}
+
+/// Starts the realtime AI assist over the live session's audio. Off the main thread — the WebSocket
+/// handshake blocks ~1-2s, which would freeze the UI (the Connecting spinner can't animate).
+#[tauri::command]
+async fn start_assist_realtime(
+    app: AppHandle,
+    provider: String,
+    model: String,
+    instructions: String,
+) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        start_assist_realtime_blocking(app, provider, model, instructions)
+    })
+    .await
+    .map_err(|e| format!("assist start task failed: {e}"))?
+}
+
+/// Connects an OpenAI realtime `model` that listens to the same mic+system mix as transcription and
+/// answers each turn under `instructions` (the user's assist prompt). Requires a live session (for the
+/// audio to tap) and that the assist isn't already running. Surfaces a missing key / bad model / failed
+/// handshake as an error; on a build failure the mix source is restored so a retry can run.
+fn start_assist_realtime_blocking(
+    app: AppHandle,
+    provider: String,
+    model: String,
+    instructions: String,
+) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    if assist_worker_running(&state)? {
+        return Err("the realtime assist is already running".to_owned());
+    }
+
+    // Realtime assist speaks OpenAI's `response.output_text` protocol; other providers' live APIs
+    // differ, so they aren't wired yet (a chat model runs the polling assist instead).
+    if provider != "openai" {
+        return Err("realtime assist currently supports OpenAI realtime models".to_owned());
+    }
+
+    let key = cloud_key(&state, &provider)?;
+
+    // Frame the prompt as a meeting copilot and pin the spoken language (the transcription language),
+    // so the model reasons over "Me"/"Them" and doesn't mis-hear CJK from the audio alone.
+    let language = state
+        .language
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+    let full_instructions = combine_system(&assist_preamble(&language), &instructions);
+
+    let source = state
+        .assist_audio
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .take()
+        .ok_or("start a live session before the realtime assist")?;
+
+    let app_err = app.clone();
+    let on_error: Box<dyn Fn(&str) + Send> = Box::new(move |msg: &str| {
+        let _ = app_err.emit(ASSIST_ERROR_EVENT, msg.to_owned());
+    });
+
+    let engine = match build_assist_engine(
+        &model,
+        &key,
+        &full_instructions,
+        &ParamValues::new(),
+        on_error,
+    ) {
+        Ok(engine) => engine,
+        Err(e) => {
+            *state
+                .assist_audio
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
+            return Err(e.to_string());
+        }
+    };
+
+    // Open the finals channel so the live sink starts feeding the assist its diarized anchors.
+    let (finals_tx, finals_rx) = std::sync::mpsc::channel::<String>();
+    *state
+        .assist_finals_tx
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = Some(finals_tx);
+
+    let worker = spawn_assist_worker(app.clone(), engine, source, finals_rx);
+    *state
+        .assist_worker
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = Some(worker);
+
+    Ok(())
+}
+
+/// Pulls a realtime-assist reply on demand — the "give me a hint now" button. Sets the worker's
+/// one-shot flag, which its loop consumes on the next frame. No-op error if the assist isn't running.
+#[tauri::command]
+fn assist_hint_now(state: State<'_, AppState>) -> Result<(), String> {
+    let guard = state
+        .assist_worker
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
+    match guard.as_ref() {
+        Some(worker) => {
+            worker
+                .hint
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(())
+        }
+        None => Err("the realtime assist isn't running".to_owned()),
+    }
+}
+
+/// Whether an assist worker is currently running (a peek that doesn't take it).
+fn assist_worker_running(state: &AppState) -> Result<bool, String> {
+    Ok(state
+        .assist_worker
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .is_some())
+}
+
+/// Stops the realtime AI assist and restores the mix source so it can be started again within the same
+/// live session. No-op when the assist isn't running. Off the main thread — the join may take a moment.
+#[tauri::command]
+async fn stop_assist_realtime(app: AppHandle) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || stop_assist_realtime_blocking(app))
+        .await
+        .map_err(|e| format!("assist stop task failed: {e}"))?
+}
+
+fn stop_assist_realtime_blocking(app: AppHandle) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    // Stop the live sink from routing finals before joining the worker (it's about to be gone).
+    *state
+        .assist_finals_tx
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())? = None;
+
+    if let Some(worker) = take_assist_worker(&state)? {
+        // Restore the source so the assist can restart while the session is still live (a session-level
+        // Stop clears it separately).
+        if let Some(source) = worker.stop_join() {
+            *state
+                .assist_audio
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
+        }
+    }
+
+    Ok(())
 }
 
 /// The transcription backend chosen for a file: the active on-device model, or a cloud
@@ -1845,6 +3104,7 @@ enum FileEngine {
         provider: CloudProvider,
         model: String,
         key: String,
+        params: ParamValues,
     },
 }
 
@@ -1890,8 +3150,14 @@ async fn transcribe_file(
 
             // Resolve the provider with the user's custom model ids merged in, so a custom id
             // selected in the picker is found by the engine just like a built-in one.
-            let provider = cloud_provider_by_id(&provider_id)
-                .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?;
+            let provider = {
+                let endpoints = state
+                    .cloud_custom_endpoints
+                    .lock()
+                    .map_err(|_| "state lock poisoned".to_owned())?;
+                resolve_cloud_provider(&provider_id, &endpoints)
+                    .ok_or_else(|| format!("unknown cloud provider {provider_id}"))?
+            };
             let provider = {
                 let customs = state
                     .cloud_custom_models
@@ -1900,10 +3166,17 @@ async fn transcribe_file(
                 with_custom_models(provider, &customs)
             };
 
+            // Resolve the vendor knobs (temperature, …) from the settings panel, and fold the shared
+            // File biasing prompt into the same bag so the engine applies it to the cloud request.
+            let mut params =
+                build_param_values(&batch_param_specs(&provider, &model), &options.params);
+            params.set("prompt", ParamValue::Text(options.prompt.clone()));
+
             FileEngine::Cloud {
                 provider,
                 model,
                 key,
+                params,
             }
         }
         _ => {
@@ -1999,7 +3272,14 @@ async fn transcribe_file(
                     provider,
                     model,
                     key,
-                } => Box::new(CloudEngine::new(provider, model, key, &language)?),
+                    params,
+                } => Box::new(CloudEngine::new(
+                    provider,
+                    model,
+                    key,
+                    &language,
+                    params.clone(),
+                )?),
             };
 
             // Forward 0–100 decode progress to the UI, de-duplicated so we emit only on change.
@@ -2163,6 +3443,8 @@ pub fn run() {
             let cloud_keys = load_cloud_keys(&cloud_keys_path);
             let cloud_custom_models_path = data_dir.join("cloud-custom-models.json");
             let cloud_custom_models = load_cloud_custom_models(&cloud_custom_models_path);
+            let cloud_custom_endpoints_path = data_dir.join("cloud-custom-endpoints.json");
+            let cloud_custom_endpoints = load_cloud_endpoints(&cloud_custom_endpoints_path);
             let custom_models_dir = data_dir.join("custom-models");
             let _ = fs::create_dir_all(&custom_models_dir);
             let custom_models = load_custom_models(&custom_models_dir);
@@ -2203,12 +3485,18 @@ pub fn run() {
                 live_prompt: Mutex::new(String::new()),
                 live_accurate: Mutex::new(false),
                 tee: Mutex::new(None),
+                assist_tees: Mutex::new(Vec::new()),
+                assist_audio: Mutex::new(None),
+                assist_worker: Mutex::new(None),
+                assist_finals_tx: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
                 active_model_path,
                 cloud_keys: Mutex::new(cloud_keys),
                 cloud_keys_path,
                 cloud_custom_models: Mutex::new(cloud_custom_models),
                 cloud_custom_models_path,
+                cloud_custom_endpoints: Mutex::new(cloud_custom_endpoints),
+                cloud_custom_endpoints_path,
                 custom_models: Mutex::new(custom_models),
                 custom_models_dir,
             });
@@ -2223,7 +3511,13 @@ pub fn run() {
             cloud_key_set,
             add_cloud_custom_model,
             remove_cloud_custom_model,
+            add_cloud_endpoint,
+            update_cloud_endpoint,
+            remove_cloud_endpoint,
             streaming_params,
+            batch_params,
+            run_llm_task,
+            run_assist_stream,
             download_model,
             import_custom_model,
             download_coreml,
@@ -2244,6 +3538,9 @@ pub fn run() {
             set_devices,
             start_session,
             stop_session,
+            start_assist_realtime,
+            stop_assist_realtime,
+            assist_hint_now,
             transcribe_file,
             export_transcript
         ])
@@ -2258,6 +3555,101 @@ mod tests {
     /// A unique temp path per test, so parallel runs don't collide on the shared temp dir.
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("wisp-cloud-keys-{}-{tag}.json", std::process::id()))
+    }
+
+    #[test]
+    fn cloud_live_protocol_realtime_only_when_provider_and_model_both_stream() {
+        let model = |id: &str, streaming: bool, batch: bool| CloudModel {
+            id: id.to_owned(),
+            display_name: id.to_owned(),
+            streaming,
+            batch,
+            languages: vec![],
+            description: String::new(),
+            recommended: true,
+            diarizes: false,
+        };
+        let provider = |streaming, models| CloudProvider {
+            id: "p".to_owned(),
+            display_name: "P".to_owned(),
+            protocol: CloudProtocol::OpenAi,
+            base_url: "https://x/v1".to_owned(),
+            keys_url: String::new(),
+            auth: CloudAuth::bearer(),
+            streaming,
+            models,
+        };
+
+        // Realtime provider + realtime-capable model → use the socket.
+        let rt = provider(
+            Some(StreamingProtocol::OpenAiRealtime),
+            vec![model("rt", true, false)],
+        );
+        assert_eq!(
+            cloud_live_protocol(&rt, "rt"),
+            Some(StreamingProtocol::OpenAiRealtime)
+        );
+
+        // Realtime provider but a batch-only model → segment-batch (None).
+        let mixed = provider(
+            Some(StreamingProtocol::OpenAiRealtime),
+            vec![model("b", false, true)],
+        );
+        assert_eq!(cloud_live_protocol(&mixed, "b"), None);
+
+        // Unknown model id → no realtime.
+        assert_eq!(cloud_live_protocol(&rt, "ghost"), None);
+
+        // The real custom-endpoint construction is batch-only, so it always runs segment-batch.
+        let custom = CustomCloudEndpoint {
+            id: "custom-x".to_owned(),
+            name: "X".to_owned(),
+            base_url: "http://h:1/v1".to_owned(),
+            protocol: "openai".to_owned(),
+            model: "metis".to_owned(),
+            assist: AssistParams::default(),
+        }
+        .to_provider();
+        assert_eq!(cloud_live_protocol(&custom, "metis"), None);
+    }
+
+    #[test]
+    fn assist_helpers_budget_chunk_combine_and_normalize() {
+        // No window (or 0) disables map-reduce; a window reserves headroom (3 chars/token × 3/5).
+        assert_eq!(input_char_budget(None), None);
+        assert_eq!(input_char_budget(Some(0)), None);
+        assert_eq!(input_char_budget(Some(1000)), Some(1800));
+
+        // Chunking breaks only at line boundaries, stays under budget, and never drops content.
+        let text = "aaaa\nbbbb\ncccc\ndddd";
+        let chunks = chunk_by_chars(text, 9);
+        assert!(chunks.iter().all(|c| c.chars().count() <= 9));
+        assert_eq!(chunks.join("\n"), text);
+
+        // A single over-long line becomes its own chunk rather than being split mid-line.
+        let long = "x".repeat(50);
+        assert_eq!(chunk_by_chars(&long, 10).len(), 1);
+
+        // The standing instruction is prepended, blank-safe.
+        assert_eq!(combine_system("  ", "task"), "task");
+        assert_eq!(
+            combine_system("Reply in Cantonese.", "Summarize."),
+            "Reply in Cantonese.\n\nSummarize."
+        );
+
+        // Normalize clamps ranges and drops zero token caps to "unset".
+        let n = normalize_assist(AssistParams {
+            temperature: Some(5.0),
+            max_tokens: Some(0),
+            context_tokens: Some(8000),
+            top_p: Some(-1.0),
+            system_prompt: "  hi  ".to_owned(),
+        });
+        assert_eq!(n.temperature, Some(2.0));
+        assert_eq!(n.top_p, Some(0.0));
+        assert_eq!(n.max_tokens, None);
+        assert_eq!(n.context_tokens, Some(8000));
+        assert_eq!(n.system_prompt, "hi");
     }
 
     #[test]
@@ -2336,12 +3728,24 @@ mod tests {
         ];
 
         let merged = with_custom_models(base, &customs);
-        assert_eq!(merged.models.len(), original + 1, "only the one new id is added");
+        assert_eq!(
+            merged.models.len(),
+            original + 1,
+            "only the one new id is added"
+        );
 
-        let added = merged.model("gpt-4o-transcribe-next").expect("custom id present");
-        assert!(added.batch && !added.streaming, "custom cloud models are file-only");
+        let added = merged
+            .model("gpt-4o-transcribe-next")
+            .expect("custom id present");
+        assert!(
+            added.batch && !added.streaming,
+            "custom cloud models are file-only"
+        );
         assert_eq!(added.display_name, "Next");
-        assert!(merged.model("other").is_none(), "other provider's id not merged");
+        assert!(
+            merged.model("other").is_none(),
+            "other provider's id not merged"
+        );
     }
 
     #[test]
@@ -2350,7 +3754,10 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("cloud-custom-models.json");
 
-        assert!(load_cloud_custom_models(&path).is_empty(), "absent file → none");
+        assert!(
+            load_cloud_custom_models(&path).is_empty(),
+            "absent file → none"
+        );
 
         let models = vec![CloudCustomModel {
             provider: "google".to_owned(),
@@ -2361,6 +3768,118 @@ mod tests {
         assert_eq!(load_cloud_custom_models(&path), models);
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn custom_endpoint_protocol_and_provider_mapping() {
+        let mk = |protocol: &str| CustomCloudEndpoint {
+            id: "custom-gw".to_owned(),
+            name: "My Gateway".to_owned(),
+            base_url: "http://host:40000/v1".to_owned(),
+            protocol: protocol.to_owned(),
+            model: "metis-coder".to_owned(),
+            assist: AssistParams::default(),
+        };
+        assert_eq!(mk("chat").cloud_protocol(), CloudProtocol::OpenAiChatAudio);
+        assert_eq!(mk("openai").cloud_protocol(), CloudProtocol::OpenAi);
+        assert_eq!(
+            mk("whatever").cloud_protocol(),
+            CloudProtocol::OpenAi,
+            "unknown protocol → transcription shape"
+        );
+
+        let p = mk("chat").to_provider();
+        assert_eq!(p.id, "custom-gw");
+        assert_eq!(p.base_url, "http://host:40000/v1");
+        assert!(p.streaming.is_none(), "custom endpoints are file-only");
+        let m = p.model("metis-coder").expect("its single model");
+        assert!(m.batch && !m.streaming && !m.diarizes);
+    }
+
+    #[test]
+    fn resolve_cloud_provider_checks_catalog_then_endpoints() {
+        let endpoints = vec![CustomCloudEndpoint {
+            id: "custom-gw".to_owned(),
+            name: "GW".to_owned(),
+            base_url: "https://gw/v1".to_owned(),
+            protocol: "openai".to_owned(),
+            model: "m".to_owned(),
+            assist: AssistParams::default(),
+        }];
+        assert_eq!(
+            resolve_cloud_provider("openai", &endpoints).unwrap().id,
+            "openai"
+        );
+        assert_eq!(
+            resolve_cloud_provider("custom-gw", &endpoints)
+                .unwrap()
+                .base_url,
+            "https://gw/v1"
+        );
+        assert!(resolve_cloud_provider("nope", &endpoints).is_none());
+    }
+
+    #[test]
+    fn unique_endpoint_id_slugifies_and_disambiguates() {
+        assert_eq!(unique_endpoint_id("My Gateway!", &[]), "custom-my-gateway");
+
+        let existing = vec![CustomCloudEndpoint {
+            id: "custom-gw".to_owned(),
+            name: "GW".to_owned(),
+            base_url: "https://x".to_owned(),
+            protocol: "openai".to_owned(),
+            model: "m".to_owned(),
+            assist: AssistParams::default(),
+        }];
+        assert_eq!(unique_endpoint_id("GW", &existing), "custom-gw-2");
+        assert_eq!(unique_endpoint_id("!!!", &[]), "custom-endpoint");
+    }
+
+    #[test]
+    fn custom_endpoints_round_trip_through_the_registry() {
+        let dir = std::env::temp_dir().join(format!("wisp-cloud-eps-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("cloud-custom-endpoints.json");
+
+        assert!(load_cloud_endpoints(&path).is_empty(), "absent file → none");
+
+        let endpoints = vec![CustomCloudEndpoint {
+            id: "custom-gw".to_owned(),
+            name: "GW".to_owned(),
+            base_url: "http://host:40000".to_owned(),
+            protocol: "chat".to_owned(),
+            model: "metis-coder".to_owned(),
+            assist: AssistParams::default(),
+        }];
+        save_cloud_endpoints(&path, &endpoints);
+        assert_eq!(load_cloud_endpoints(&path), endpoints);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_endpoint_fields_validates_and_normalizes() {
+        // Trims fields, normalizes the protocol, and strips a trailing slash from the URL.
+        let (name, url, proto, model) =
+            clean_endpoint_fields("  My GW ", "http://host:40000/v1/ ", "chat", " m ").unwrap();
+        assert_eq!(
+            (name.as_str(), url.as_str(), proto.as_str(), model.as_str()),
+            ("My GW", "http://host:40000/v1", "chat", "m")
+        );
+
+        // Unknown protocol defaults to the transcription shape.
+        assert_eq!(
+            clean_endpoint_fields("n", "https://x", "weird", "m")
+                .unwrap()
+                .2,
+            "openai"
+        );
+
+        // Blank fields and a non-http(s) URL are rejected.
+        assert!(clean_endpoint_fields("", "https://x", "openai", "m").is_err());
+        assert!(clean_endpoint_fields("n", "  ", "openai", "m").is_err());
+        assert!(clean_endpoint_fields("n", "https://x", "openai", "").is_err());
+        assert!(clean_endpoint_fields("n", "ftp://x", "openai", "m").is_err());
     }
 
     #[test]

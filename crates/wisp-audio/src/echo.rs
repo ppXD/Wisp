@@ -9,7 +9,7 @@ use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
 use wisp_core::channel::FrameReceiver;
 use wisp_core::error::Result;
 
-use crate::dsp::{Resampler16k, TARGET_SAMPLE_RATE};
+use crate::dsp::{Resampler, TARGET_SAMPLE_RATE};
 
 /// An [`AudioSource`] that echo-cancels a microphone against a far-end reference stream.
 ///
@@ -24,8 +24,8 @@ pub struct EchoCancellingSource {
     info: AudioSourceInfo,
     /// Anti-aliased resamplers to 16 kHz. The mic capture and the far-end reference are independent
     /// streams, so each keeps its own filter state.
-    capture_resampler: Resampler16k,
-    ref_resampler: Resampler16k,
+    capture_resampler: Resampler,
+    ref_resampler: Resampler,
 }
 
 impl EchoCancellingSource {
@@ -41,8 +41,8 @@ impl EchoCancellingSource {
             reference,
             canceller,
             info,
-            capture_resampler: Resampler16k::new(),
-            ref_resampler: Resampler16k::new(),
+            capture_resampler: Resampler::new(TARGET_SAMPLE_RATE),
+            ref_resampler: Resampler::new(TARGET_SAMPLE_RATE),
         }
     }
 

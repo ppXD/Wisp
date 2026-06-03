@@ -4,11 +4,11 @@
 //! shape (here OpenAI and Groq) differ only by `base_url` and their model list, so one adapter
 //! serves both — the point of the vendor-agnostic [`CloudProvider`] design.
 
-use wisp_core::cloud::{CloudAuth, CloudModel, CloudProtocol, CloudProvider};
+use wisp_core::cloud::{CloudAuth, CloudModel, CloudProtocol, CloudProvider, StreamingProtocol};
 
 /// Built-in cloud providers. Each is opt-in and requires the user's API key.
 pub fn cloud_catalog() -> Vec<CloudProvider> {
-    vec![openai(), groq(), google(), qwen()]
+    vec![openai(), speechmatics(), groq(), google(), qwen()]
 }
 
 /// A multilingual cloud model (empty `languages` = auto-detect).
@@ -20,6 +20,8 @@ fn model(id: &str, name: &str, streaming: bool, batch: bool, description: &str) 
         batch,
         languages: vec![],
         description: description.to_owned(),
+        recommended: false,
+        diarizes: false,
     }
 }
 
@@ -31,6 +33,7 @@ fn openai() -> CloudProvider {
         base_url: "https://api.openai.com/v1".to_owned(),
         keys_url: "https://platform.openai.com/api-keys".to_owned(),
         auth: CloudAuth::bearer(),
+        streaming: Some(StreamingProtocol::OpenAiRealtime),
         models: vec![
             model(
                 "gpt-4o-transcribe",
@@ -38,7 +41,8 @@ fn openai() -> CloudProvider {
                 true,
                 true,
                 "Highest-accuracy multilingual transcription; live streaming and files.",
-            ),
+            )
+            .recommended(),
             model(
                 "gpt-4o-mini-transcribe",
                 "GPT-4o mini Transcribe",
@@ -52,7 +56,8 @@ fn openai() -> CloudProvider {
                 false,
                 true,
                 "GPT-4o transcription with speaker labels — File only (realtime can't diarise).",
-            ),
+            )
+            .diarizes(),
             model(
                 "whisper-1",
                 "Whisper",
@@ -94,6 +99,38 @@ fn openai() -> CloudProvider {
     }
 }
 
+fn speechmatics() -> CloudProvider {
+    CloudProvider {
+        id: "speechmatics".to_owned(),
+        display_name: "Speechmatics".to_owned(),
+        // Realtime-only here; the batch protocol field is an unused placeholder (no File models).
+        protocol: CloudProtocol::OpenAi,
+        base_url: "wss://eu.rt.speechmatics.com/v2".to_owned(),
+        keys_url: "https://portal.speechmatics.com/manage-access/".to_owned(),
+        auth: CloudAuth::bearer(),
+        streaming: Some(StreamingProtocol::Speechmatics),
+        // The "model" id is the Speechmatics operating point, sent in `StartRecognition`.
+        models: vec![
+            model(
+                "enhanced",
+                "Speechmatics (enhanced)",
+                true,
+                false,
+                "Low-latency multilingual realtime — strong Cantonese/Chinese. Most accurate operating \
+                 point.",
+            )
+            .recommended(),
+            model(
+                "standard",
+                "Speechmatics (standard)",
+                true,
+                false,
+                "Faster, lighter realtime operating point.",
+            ),
+        ],
+    }
+}
+
 fn groq() -> CloudProvider {
     CloudProvider {
         id: "groq".to_owned(),
@@ -102,6 +139,7 @@ fn groq() -> CloudProvider {
         base_url: "https://api.groq.com/openai/v1".to_owned(),
         keys_url: "https://console.groq.com/keys".to_owned(),
         auth: CloudAuth::bearer(),
+        streaming: None, // Groq Whisper is batch-only (no realtime WS)
         models: vec![
             model(
                 "whisper-large-v3",
@@ -117,6 +155,13 @@ fn groq() -> CloudProvider {
                 true,
                 "Faster large-v3 turbo on Groq — files, multilingual.",
             ),
+            model(
+                "distil-whisper-large-v3-en",
+                "Distil-Whisper large-v3 (English)",
+                false,
+                true,
+                "Distilled large-v3 — English-only, ~6× faster on Groq. Files.",
+            ),
         ],
     }
 }
@@ -131,7 +176,25 @@ fn google() -> CloudProvider {
         // Gemini authenticates with a `?key=` query parameter, so this header config is unused; it's
         // here only because `CloudAuth` is required. (Bearer is the harmless default.)
         auth: CloudAuth::bearer(),
+        streaming: Some(StreamingProtocol::GeminiLive),
         models: vec![
+            // ── Live (realtime BidiGenerateContent) models ──
+            model(
+                "gemini-3.1-flash-live-preview",
+                "Gemini 3.1 Flash Live",
+                true,
+                false,
+                "Newest Gemini Live — lowest latency, strong multilingual realtime transcription.",
+            )
+            .recommended(),
+            model(
+                "gemini-2.5-flash-native-audio-preview-12-2025",
+                "Gemini 2.5 Flash (native audio)",
+                true,
+                false,
+                "Native-audio Live model — high-quality realtime transcription.",
+            ),
+            // ── File (batch) models ──
             model(
                 "gemini-2.5-flash",
                 "Gemini 2.5 Flash",
@@ -139,6 +202,20 @@ fn google() -> CloudProvider {
                 true,
                 "Fast multimodal model — transcribes audio with strong multilingual (incl. CJK) \
                  accuracy.",
+            ),
+            model(
+                "gemini-2.5-pro",
+                "Gemini 2.5 Pro",
+                false,
+                true,
+                "Most accurate Gemini — best for hard audio or nuanced multilingual transcription.",
+            ),
+            model(
+                "gemini-2.5-flash-lite",
+                "Gemini 2.5 Flash-Lite",
+                false,
+                true,
+                "Cheapest, fastest 2.5 — quick everyday transcription.",
             ),
             model(
                 "gemini-2.0-flash",
@@ -168,6 +245,7 @@ fn qwen() -> CloudProvider {
         base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1".to_owned(),
         keys_url: "https://modelstudio.console.alibabacloud.com/".to_owned(),
         auth: CloudAuth::bearer(),
+        streaming: None, // DashScope realtime adapter not wired yet — file-only for now
         models: vec![model(
             "qwen3-asr-flash",
             "Qwen3-ASR Flash",
@@ -237,5 +315,29 @@ mod tests {
             !whisper.streaming && whisper.batch,
             "whisper-1 is files-only"
         );
+    }
+
+    #[test]
+    fn openais_recommended_streaming_model_is_the_dedicated_transcriber() {
+        // The Live picker pre-selects the recommended streaming model. It must be the gap-free
+        // dedicated transcriber (gpt-4o-transcribe) — never a conversational model session, which can
+        // drop utterances under rapid speech. Exactly one streaming model is recommended.
+        let openai = cloud_catalog()
+            .into_iter()
+            .find(|p| p.id == "openai")
+            .expect("openai is seeded");
+
+        let recommended: Vec<_> = openai
+            .models
+            .iter()
+            .filter(|m| m.streaming && m.recommended)
+            .collect();
+
+        assert_eq!(
+            recommended.len(),
+            1,
+            "exactly one recommended streaming model"
+        );
+        assert_eq!(recommended[0].id, "gpt-4o-transcribe");
     }
 }

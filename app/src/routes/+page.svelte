@@ -6,17 +6,20 @@
   import { getCurrentWebview } from "@tauri-apps/api/webview";
   import { open, save } from "@tauri-apps/plugin-dialog";
   import { onDestroy, onMount } from "svelte";
-  import { slide, fly } from "svelte/transition";
+  import { fly } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
   import CloudPicker from "$lib/CloudPicker.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
-  import ApiKeyManager from "$lib/ApiKeyManager.svelte";
+  import AiNotes from "$lib/AiNotes.svelte";
+  import EndpointsManager from "$lib/EndpointsManager.svelte";
   import {
     refreshCloud,
     cloudReady,
     cloudProvider,
-    openKeyModal,
+    cloudState,
+    openEndpointsModal,
     streamingParams,
+    batchParams,
     defaultParamValues,
     loadParamValues,
     saveParamValues,
@@ -32,6 +35,8 @@
     source: string;
     speaker: number | null;
     isFinal: boolean;
+    /** A parallel rendering (a cloud model session's translation), shown under the verbatim text. */
+    auxText?: string | null;
   };
 
   type ModelInfo = {
@@ -51,6 +56,12 @@
   };
 
   let running = $state(false);
+  // True while a session is connecting (the cloud WebSocket handshake blocks ~1-2s) — drives the
+  // Start button's disabled + spinner state so the click feels responsive instead of frozen.
+  let starting = $state(false);
+  // True while a session is tearing down (joining the capture/socket threads) — same smooth
+  // disabled + spinner treatment on the Stop button.
+  let stopping = $state(false);
   let error = $state("");
   // Non-fatal notice from a started session (e.g. system audio unavailable → mic-only).
   let liveNotice = $state("");
@@ -430,6 +441,7 @@
       error = "Download the speaker model first.";
       return;
     }
+    starting = true;
     try {
       // Local-only prep (the cloud engine self-segments and denoises server-side); the device and
       // language selections apply to both.
@@ -448,6 +460,9 @@
           cloudProvider: liveEngine === "cloud" ? liveCloudProvider : null,
           cloudModel: liveEngine === "cloud" ? liveCloudModel : null,
           params: liveEngine === "cloud" ? liveParams : {},
+          // Tap the live audio for the realtime assist only when one is armed (AiNotes sets this when a
+          // real-time assist model is selected) — otherwise the audio path stays untouched.
+          assist: localStorage.getItem("wisp.assistArmed") === "1",
         },
       });
       liveNotice = notice ?? "";
@@ -461,14 +476,19 @@
       // showing the error.
       await syncRunning();
       error = running ? "" : String(e);
+    } finally {
+      starting = false;
     }
   }
 
   async function stop() {
+    stopping = true;
     try {
       await invoke("stop_session");
     } catch (e) {
       error = String(e);
+    } finally {
+      stopping = false;
     }
     running = false;
     liveNotice = "";
@@ -585,6 +605,47 @@
   let liveParams = $state<Record<string, ParamValue>>({});
   let liveParamsOpen = $state(false);
 
+  // Live AI assist: a right-side drawer running the same LLM tasks over the live transcript (finals
+  // only), on demand. Auto-rolling refresh is a later refinement.
+  let liveAssistOpen = $state(false);
+  let liveBodyEl = $state<HTMLElement | null>(null);
+  const ASSIST_MIN = 320;
+  const TRANSCRIPT_MIN = 360;
+  let assistWidth = $state(Math.max(ASSIST_MIN, Number(localStorage.getItem("wisp.assistWidth")) || 440));
+  // The transcript handed to the AI assist (not the on-screen one) — formatted conversationally so the
+  // model reasons about turns: mic = "Me", system = "Them", plus the live diarizer's speaker number on
+  // the meeting side (where multiple remote participants matter; mic is always you).
+  const assistWho = (s: Segment): string => {
+    if (s.source === "Microphone") return "Me";
+    if (s.source === "System") return s.speaker !== null ? `Them (Speaker ${s.speaker + 1})` : "Them";
+    return sourceLabel(s.source);
+  };
+  const liveTranscriptText = $derived(
+    segments
+      .filter((s) => s.isFinal)
+      .map((s) => `[${fmtTime(s.startMs)}] ${assistWho(s)}: ${s.text}`)
+      .join("\n"),
+  );
+
+  // Drag the splitter to resize the assist panel: pulling left widens it. Clamped so neither side
+  // gets too thin; the chosen width persists. The whole pane grows with the window (.app widens).
+  function startAssistResize(e: MouseEvent) {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = assistWidth;
+    const maxW = liveBodyEl ? Math.max(ASSIST_MIN, liveBodyEl.clientWidth - TRANSCRIPT_MIN) : 9999;
+    const onMove = (ev: MouseEvent) => {
+      assistWidth = Math.min(maxW, Math.max(ASSIST_MIN, startW - (ev.clientX - startX)));
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      localStorage.setItem("wisp.assistWidth", String(Math.round(assistWidth)));
+    };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }
+
   $effect(() => {
     const provider = liveCloudProvider;
     const model = liveCloudModel;
@@ -592,7 +653,10 @@
       liveParamSpecs = [];
       return;
     }
-    streamingParams(provider, model).then((specs) => {
+    // A realtime model exposes its streaming knobs; a batch model run segment-batch in Live exposes
+    // the batch knobs (temperature, …). Pick by what the selected model can do.
+    const streams = cloudProvider(provider)?.models.find((m) => m.id === model)?.streaming ?? false;
+    (streams ? streamingParams(provider, model) : batchParams(provider, model)).then((specs) => {
       liveParamSpecs = specs;
       liveParams = { ...defaultParamValues(specs), ...loadParamValues(provider, model) };
     });
@@ -607,6 +671,34 @@
   const fileProv = $derived(cloudProvider(fileCloudProvider));
   const fileCloudReady = $derived(cloudReady(fileCloudProvider, fileCloudModel, "batch"));
   const fileMod = $derived(fileProv?.models.find((m) => m.id === fileCloudModel));
+  // A cloud model that returns its own speaker labels — local diarization must not run on top of it.
+  const fileModelSelfDiarizes = $derived(fileEngine === "cloud" && !!fileMod?.diarizes);
+
+  // File (batch) advanced parameters for the selected cloud provider/model — same machinery as live,
+  // namespaced "file" so a model used in both surfaces keeps separate values.
+  let fileParamSpecs = $state<ParamSpec[]>([]);
+  let fileParams = $state<Record<string, ParamValue>>({});
+  let fileParamsOpen = $state(false);
+
+  $effect(() => {
+    const provider = fileCloudProvider;
+    const model = fileCloudModel;
+    if (fileEngine !== "cloud" || !provider || !model) {
+      fileParamSpecs = [];
+      return;
+    }
+    batchParams(provider, model).then((specs) => {
+      fileParamSpecs = specs;
+      fileParams = { ...defaultParamValues(specs), ...loadParamValues(provider, model, "file") };
+    });
+  });
+
+  $effect(() => {
+    if (fileEngine === "cloud" && fileCloudProvider && fileParamSpecs.length) {
+      saveParamValues(fileCloudProvider, fileCloudModel, fileParams, "file");
+    }
+  });
+
   // Whether the current File engine is ready to accept a file (local model installed, or cloud set).
   const fileReady = $derived(fileEngine === "cloud" ? fileCloudReady : canStart);
 
@@ -618,6 +710,18 @@
   const SPEAKER_COLORS = ["#c96442", "#3f7e6b", "#6a5acd", "#b58a2e", "#9c4d6b", "#4a7aa8"];
   const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
   const speakerLabel = (n: number) => `Speaker ${n + 1}`;
+
+  // Which File results tab is showing, and the transcript assembled as plain text for the AI tasks.
+  let fileTab = $state<"transcript" | "ai">("transcript");
+  const fileTranscriptText = $derived(
+    fileParagraphs
+      .map((p) => {
+        const time = fileHasTimestamps ? `[${fmtTime(p.startMs)}] ` : "";
+        const who = p.speaker !== null ? `${speakerLabel(p.speaker)}: ` : "";
+        return `${time}${who}${p.text}`;
+      })
+      .join("\n"),
+  );
   // Short segmented-control label for a diarization model (last "·" segment of its display name).
   const diarizeShortName = (m: ModelInfo) => (m.name.split("·").pop() ?? m.name).trim();
 
@@ -685,7 +789,7 @@
         : `Add your ${fileProv?.name ?? "provider"} API key first.`;
       return;
     }
-    if (diarizeOn && !diarizeChosen?.installed) {
+    if (diarizeOn && !fileModelSelfDiarizes && !diarizeChosen?.installed) {
       error = "Download the speaker model first.";
       return;
     }
@@ -695,6 +799,7 @@
     }
     error = "";
     fileSegments = [];
+    fileTab = "transcript";
     fileProgress = 0;
     fileStage = "";
     fileName = path.split(/[\\/]/).pop() ?? path;
@@ -712,12 +817,13 @@
           timestamps: fileTimestamps,
           accurate: fileAccurate,
           prompt: filePrompt.trim(),
-          diarizeModel: diarizeOn ? diarizeId : null,
+          diarizeModel: diarizeOn && !fileModelSelfDiarizes ? diarizeId : null,
           gateSpeech: fileGate,
           denoiser: fileDenoiser,
           engine: fileEngine,
           cloudProvider: fileEngine === "cloud" ? fileCloudProvider : null,
           cloudModel: fileEngine === "cloud" ? fileCloudModel : null,
+          params: fileEngine === "cloud" ? fileParams : {},
         },
       });
     } catch (e) {
@@ -850,11 +956,32 @@
   });
 </script>
 
-<main class="app">
+<main class="app" class:wide={mode === "live" && liveAssistOpen && (running || segments.length)}>
+  <div class="brand">
+    <span class="brand-name">Wisp</span>
+  </div>
+
   <nav class="tabs">
     <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
     <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
   </nav>
+
+  <div class="toolbar">
+    {#if mode === "live" && (running || segments.length)}
+      <button
+        class="assist-launch"
+        class:on={liveAssistOpen}
+        onclick={() => (liveAssistOpen = !liveAssistOpen)}
+        title="AI Assist — live hints, notes & summary"
+      >
+        <span class="spark">✦</span> Assist
+      </button>
+    {/if}
+    <button class="models-trigger" onclick={() => (cloudState.endpointsOpen = true)} title="Manage AI models & endpoints">
+      ✦ Models
+    </button>
+  </div>
+  <EndpointsManager bind:open={cloudState.endpointsOpen} />
 
   {#snippet modelPicker()}
     {#if models.length}
@@ -871,7 +998,7 @@
         {#if pickerOpen}
           <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
           ></button>
-          <div class="picker-menu" transition:slide={{ duration: 120 }}>
+          <div class="picker-menu" transition:fly={{ y: -6, duration: 120 }}>
             <div class="picker-scroll">
             {#if recommendedModel}
               <div class="picker-section">Recommended</div>
@@ -1043,7 +1170,10 @@
           {/if}
 
           {#if error}
-            <div class="notice error">{error}</div>
+            <div class="notice error">
+              <span class="notice-msg">{error}</span>
+              <button class="notice-x" aria-label="Dismiss" onclick={() => (error = "")}>×</button>
+            </div>
           {/if}
         </div>
       {/if}
@@ -1053,20 +1183,28 @@
           {#if !liveCloudReady}
             <div class="notice">
               <span class="notice-text">
-                <strong>Add your {liveProv?.name ?? "provider"} API key</strong> to stream live cloud
+                <strong>Add your {liveProv?.name ?? "provider"} API key</strong> to run live cloud
                 transcription. Stored on this device only.
               </span>
               <span class="notice-actions">
-                <button class="btn outline sm" onclick={openKeyModal}>API keys</button>
+                <button class="btn outline sm" onclick={openEndpointsModal}>API keys</button>
               </span>
             </div>
           {/if}
 
-          <p class="cloud-live-note">
-            Cloud realtime streams audio continuously to {liveProv?.name ?? "the provider"} — it bills
-            per minute and needs a stable connection.
-            <button class="link-btn" onclick={openKeyModal}>Manage API key</button>
-          </p>
+          {#if liveMod?.streaming}
+            <p class="cloud-live-note">
+              Cloud realtime streams audio continuously to {liveProv?.name ?? "the provider"} — it
+              bills per minute and needs a stable connection.
+              <button class="link-btn" onclick={openEndpointsModal}>Manage API key</button>
+            </p>
+          {:else}
+            <p class="cloud-live-note">
+              {liveProv?.name ?? "The provider"} transcribes each finished sentence — near-live, with no
+              mid-sentence partials, billed per request.
+              <button class="link-btn" onclick={openEndpointsModal}>Manage API key</button>
+            </p>
+          {/if}
 
           {#if liveParamSpecs.length}
             <button class="params-trigger" onclick={() => (liveParamsOpen = true)}>
@@ -1093,33 +1231,78 @@
         </aside>
       {/if}
 
-      <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
+      <!-- Live body: transcript on the left, the AI assist panel docked on the right when open. -->
+      <div class="live-body" bind:this={liveBodyEl}>
+        <div class="transcript-pane">
+          <div class="pane-head">
+            <span class="pane-title">Transcript</span>
+            {#if segments.length}<button class="pane-clear" onclick={clear}>Clear</button>{/if}
+          </div>
+          <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
         {#each segments as seg (seg.source + "-" + seg.id)}
           <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
             <span class="meta">
               <span class="time">{fmtTime(seg.startMs)}</span>
               <span class="who">{sourceLabel(seg.source)}</span>
             </span>
-            <span class="text">{seg.text}</span>
+            <span class="body">
+              <span class="text">{seg.text}</span>
+              {#if seg.auxText}<span class="aux-text">{seg.auxText}</span>{/if}
+            </span>
           </li>
         {:else}
           <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
         {/each}
-      </ul>
+          </ul>
+        </div>
+        {#if liveAssistOpen && (running || segments.length)}
+          <aside class="assist-panel" style:width="{assistWidth}px">
+            <button
+              class="assist-resize"
+              aria-label="Resize assist panel"
+              onmousedown={startAssistResize}
+            ></button>
+            <div class="assist-head">
+              <span class="assist-title">✦ AI Assist</span>
+              <button class="assist-x" aria-label="Close" onclick={() => (liveAssistOpen = false)}
+                >×</button
+              >
+            </div>
+            <div class="assist-body"><AiNotes transcript={liveTranscriptText} live sessionRunning={running} /></div>
+          </aside>
+        {/if}
+      </div>
 
-      <div class="box-foot">
+      <div class="box-foot center">
         {#if running}
-          <button class="btn primary stop" onclick={stop}>Stop</button>
+          <button
+            class="btn primary stop"
+            class:loading={stopping}
+            onclick={stop}
+            disabled={stopping}
+          >
+            {#if stopping}
+              <span class="spinner" aria-hidden="true"></span>Stopping…
+            {:else}
+              Stop
+            {/if}
+          </button>
         {:else}
           <button
             class="btn primary"
+            class:loading={starting}
             onclick={start}
-            disabled={(liveEngine === "cloud" ? !liveCloudReady : !canStart) || downloading !== null}
+            disabled={starting ||
+              (liveEngine === "cloud" ? !liveCloudReady : !canStart) ||
+              downloading !== null}
           >
-            {downloading !== null ? "Downloading…" : "Start"}
+            {#if starting}
+              <span class="spinner" aria-hidden="true"></span>Connecting…
+            {:else}
+              {downloading !== null ? "Downloading…" : "Start"}
+            {/if}
           </button>
         {/if}
-        <button class="btn ghost" onclick={clear} disabled={segments.length === 0}>Clear</button>
       </div>
     </section>
 
@@ -1283,6 +1466,12 @@
     {/if}
   {:else if mode === "file"}
     <section class="box">
+      {#if error}
+        <div class="notice error">
+          <span class="notice-msg">{error}</span>
+          <button class="notice-x" aria-label="Dismiss" onclick={() => (error = "")}>×</button>
+        </div>
+      {/if}
       {#if fileTranscribing || fileSegments.length}
         <div class="box-head">
           <span class="active-model"
@@ -1306,6 +1495,19 @@
             ></div>
           </div>
         {/if}
+
+        {#if fileSegments.length && !fileTranscribing}
+          <div class="seg file-tabs">
+            <button class:active={fileTab === "transcript"} onclick={() => (fileTab = "transcript")}>
+              Transcript
+            </button>
+            <button class:active={fileTab === "ai"} onclick={() => (fileTab = "ai")}>✦ AI Notes</button>
+          </div>
+        {/if}
+
+        {#if fileTab === "ai" && fileSegments.length && !fileTranscribing}
+          <div class="ai-pane"><AiNotes transcript={fileTranscriptText} /></div>
+        {:else}
         <ul class="feed">
           {#each fileParagraphs as para (para.id)}
             <li>
@@ -1322,6 +1524,7 @@
             <li class="empty">Transcribing… large files take a little while.</li>
           {/each}
         </ul>
+        {/if}
         <div class="box-foot">
           <div class="export-group">
             {#if fileSegments.length && !fileTranscribing}
@@ -1361,13 +1564,37 @@
           <div class="cloud-key-row">
             {#if fileProv?.keySet}
               <span class="key-ok">✓ {fileProv.name} key saved on this device</span>
-              <button class="link-btn" onclick={openKeyModal}>Manage keys</button>
+              <button class="link-btn" onclick={openEndpointsModal}>Manage keys</button>
             {:else}
               <span class="key-missing">{fileProv?.name ?? "This provider"} needs your API key</span>
-              <button class="btn outline sm" onclick={openKeyModal}>Add API key</button>
+              <button class="btn outline sm" onclick={openEndpointsModal}>Add API key</button>
             {/if}
           </div>
         {/if}
+
+        {#if fileEngine === "cloud" && fileParamSpecs.length}
+          <button class="params-trigger file-params-trigger" onclick={() => (fileParamsOpen = true)}>
+            <span class="params-ico" aria-hidden="true"></span>Advanced parameters
+          </button>
+        {/if}
+
+        <!-- Advanced parameters as a right-side drawer — same affordance as the live cloud picker. -->
+        {#if fileEngine === "cloud" && fileParamsOpen && fileParamSpecs.length}
+          <button class="drawer-scrim" aria-label="Close" onclick={() => (fileParamsOpen = false)}
+          ></button>
+          <aside class="drawer" transition:fly={{ x: 340, duration: 180 }}>
+            <div class="drawer-head">
+              <span class="drawer-title">{fileProv?.name ?? "Cloud"} parameters</span>
+              <button class="drawer-x" aria-label="Close" onclick={() => (fileParamsOpen = false)}
+                >×</button
+              >
+            </div>
+            <div class="drawer-body">
+              <ParamsPanel specs={fileParamSpecs} bind:values={fileParams} />
+            </div>
+          </aside>
+        {/if}
+
         {#if fileEngine === "local" && chosenModel && !chosenModel.installed}
           <div class="box-aux">
             {#if downloading === chosenModel.id && downloadProgress}
@@ -1433,7 +1660,7 @@
             <circle cx="9.5" cy="5" r="1.6" />
             <circle cx="6" cy="11" r="1.6" />
           </svg>
-          Options · accuracy, hints, speakers
+          {fileEngine === "cloud" ? "Options · hints, speakers" : "Options · accuracy, hints, speakers"}
         </button>
         <Modal bind:open={fileOptionsOpen} title="Options">
           <section class="modal-section">
@@ -1475,13 +1702,16 @@
 
           <section class="modal-section">
             <span class="section-title">Transcription</span>
-            <div class="opt-row">
-              <span class="opt-label">Mode</span>
-              <div class="seg">
-                <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
-                <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+            {#if fileEngine !== "cloud"}
+              <!-- Beam vs greedy is a local-decoder choice; cloud models decode server-side. -->
+              <div class="opt-row">
+                <span class="opt-label">Mode</span>
+                <div class="seg">
+                  <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
+                  <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+                </div>
               </div>
-            </div>
+            {/if}
             <label class="opt-toggle">
               <input type="checkbox" bind:checked={fileTimestamps} />
               <span>Timeline <em>— per-line timestamps for SRT/VTT</em></span>
@@ -1497,18 +1727,25 @@
               />
             </div>
             <p class="opt-hint">
-              <strong>Accurate</strong> weighs several candidate sentences (better wording, slower).
-              <strong>Hints</strong> prime spellings the model might otherwise miss.
+              {#if fileEngine !== "cloud"}<strong>Accurate</strong> weighs several candidate sentences
+                (better wording, slower). {/if}<strong>Hints</strong> prime spellings the model might
+              otherwise miss.
             </p>
           </section>
 
           <section class="modal-section">
             <span class="section-title">Speakers</span>
-            <label class="opt-toggle">
-              <input type="checkbox" bind:checked={diarizeOn} />
-              <span>Identify speakers</span>
-            </label>
-            {#if diarizeOn}
+            {#if fileModelSelfDiarizes}
+              <p class="opt-hint">
+                <strong>{fileMod?.name}</strong> returns speaker labels itself — local diarization is
+                off for this model.
+              </p>
+            {:else}
+              <label class="opt-toggle">
+                <input type="checkbox" bind:checked={diarizeOn} />
+                <span>Identify speakers</span>
+              </label>
+              {#if diarizeOn}
               <div class="opt-row">
                 <span class="opt-label">Model</span>
                 <div class="seg">
@@ -1531,18 +1768,17 @@
                 </button>
               {/if}
             {/if}
-            <p class="opt-hint">
-              Labels each line by who's talking (Speaker 1, 2…). Runs locally after transcribing;
-              downloads a small model the first time.
-            </p>
+              <p class="opt-hint">
+                Labels each line by who's talking (Speaker 1, 2…). Runs locally after transcribing;
+                downloads a small model the first time.
+              </p>
+            {/if}
           </section>
         </Modal>
       {/if}
     </section>
   {/if}
 
-  <!-- One generic key manager for the whole app; opened from anywhere via openKeyModal(). -->
-  <ApiKeyManager />
 </main>
 
 <style>
@@ -1573,14 +1809,142 @@
 
   /* Strict viewport-height column: tabs on top, one content box filling the rest. */
   .app {
-    max-width: 820px;
+    /* Grows with the window up to a readable cap, instead of a fixed 820 that left big side margins. */
+    max-width: min(1200px, 92vw);
     margin: 0 auto;
     padding: 16px 20px 18px;
     height: 100dvh;
     box-sizing: border-box;
+    position: relative;
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  /* Global entry to manage AI models & endpoints — top-right, away from the centered tabs. */
+  .toolbar {
+    position: absolute;
+    top: 18px;
+    right: 22px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* Brand lockup — top-left, opposite the toolbar; tabs stay centered between them. */
+  .brand {
+    position: absolute;
+    top: 18px;
+    left: 20px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    pointer-events: none;
+    user-select: none;
+  }
+
+  .brand-name {
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.4px;
+    color: var(--text);
+  }
+
+  .models-trigger {
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 6px 12px;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s;
+  }
+
+  .models-trigger:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  /* The "smart" AI Assist launcher — a vibrant, gently shimmering gradient pill that appears top-right
+     once a live session starts, so it reads as intelligent and is reachable the moment you press Start. */
+  .assist-launch {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 600;
+    color: #fff;
+    background: linear-gradient(120deg, #8b5cf6, #ec4899, #f97316, #ec4899, #8b5cf6);
+    background-size: 240% 100%;
+    border: none;
+    border-radius: 999px;
+    padding: 7px 16px;
+    cursor: pointer;
+    box-shadow: 0 4px 16px -3px rgba(168, 85, 247, 0.5);
+    animation: assist-shimmer 7s ease infinite;
+    transition:
+      transform 0.15s,
+      box-shadow 0.15s,
+      filter 0.15s;
+  }
+
+  @keyframes assist-shimmer {
+    0%,
+    100% {
+      background-position: 0% 50%;
+    }
+    50% {
+      background-position: 100% 50%;
+    }
+  }
+
+  .assist-launch:hover {
+    transform: translateY(-1px);
+    box-shadow: 0 7px 22px -3px rgba(168, 85, 247, 0.6);
+    filter: brightness(1.06);
+  }
+
+  .assist-launch.on {
+    box-shadow:
+      0 0 0 2px color-mix(in srgb, #a855f7 55%, transparent),
+      0 4px 16px -3px rgba(168, 85, 247, 0.5);
+  }
+
+  .assist-launch .spark {
+    font-size: 14px;
+    animation: spark-twinkle 2.4s ease-in-out infinite;
+  }
+
+  @keyframes spark-twinkle {
+    0%,
+    100% {
+      opacity: 1;
+      transform: scale(1);
+    }
+    50% {
+      opacity: 0.72;
+      transform: scale(0.9);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .assist-launch,
+    .assist-launch .spark {
+      animation: none;
+    }
+  }
+
+  /* Live with the assist panel open needs room for both columns — use more of the window (capped so
+     it never gets absurd on ultra-wide displays). Both grow as the window grows. */
+  .app.wide {
+    max-width: min(1680px, 96vw);
   }
 
   /* Top row — the three tabs. */
@@ -1798,6 +2162,11 @@
     border-top: 1px solid var(--border);
   }
 
+  /* Live: the lone session control (Start ⇄ Stop) sits centered, same spot. */
+  .box-foot.center {
+    justify-content: center;
+  }
+
   /* Custom Claude-style model dropdown. */
   .picker {
     position: relative;
@@ -1847,16 +2216,18 @@
 
   .picker-caret {
     flex: none;
-    width: 7px;
+    width: 11px;
     height: 7px;
-    border-right: 1.5px solid var(--muted);
-    border-bottom: 1.5px solid var(--muted);
-    transform: rotate(45deg);
+    background-color: var(--muted);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 1.5L5.5 5.5L9.5 1.5'/%3E%3C/svg%3E")
+      no-repeat center;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 1.5L5.5 5.5L9.5 1.5'/%3E%3C/svg%3E")
+      no-repeat center;
     transition: transform 0.15s;
   }
 
   .picker-trigger.open .picker-caret {
-    transform: rotate(-135deg);
+    transform: rotate(180deg);
   }
 
   .picker-backdrop {
@@ -2059,6 +2430,36 @@
     background: var(--stop);
   }
 
+  /* Connecting state: keep the button looking engaged (dimmed, not fully greyed) with a spinner, so
+     the click feels responsive while the session connects. */
+  .btn.primary.loading {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+  }
+
+  .btn.primary.loading:disabled {
+    opacity: 0.72;
+    cursor: progress;
+  }
+
+  .spinner {
+    width: 13px;
+    height: 13px;
+    flex: none;
+    border: 2px solid rgba(255, 255, 255, 0.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
   .btn.outline {
     background: transparent;
     border-color: var(--accent);
@@ -2214,7 +2615,31 @@
     background: color-mix(in srgb, var(--stop) 9%, var(--bg));
     border-color: color-mix(in srgb, var(--stop) 35%, var(--border));
     color: var(--stop);
-    display: block;
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+  }
+
+  .notice-msg {
+    flex: 1;
+    min-width: 0;
+    word-break: break-word;
+  }
+
+  .notice-x {
+    flex: none;
+    font-size: 17px;
+    line-height: 1;
+    color: var(--stop);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0 2px;
+    opacity: 0.65;
+  }
+
+  .notice-x:hover {
+    opacity: 1;
   }
 
   /* Advanced panel sits below the content box; collapsed by default so it costs ~no height. */
@@ -2257,6 +2682,135 @@
   /* The File trigger sits inside the drop-zone box, so it needs the same inset the panel had. */
   .file-options-trigger {
     margin: 0 14px 14px;
+  }
+
+  /* Transcript ↔ AI Notes tabs + the scrolling AI pane in the File results view. */
+  .file-tabs {
+    align-self: flex-start;
+    margin: 12px 14px 0;
+  }
+
+  .ai-pane {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Live: transcript + AI assist side by side — the panel docks on the right, never overlays. */
+  .live-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+  }
+
+  .transcript-pane {
+    flex: 1 1 auto;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+
+  .pane-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    padding: 10px 14px 6px;
+  }
+
+  .pane-title {
+    font-size: 11px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--muted);
+  }
+
+  .pane-clear {
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+
+  .pane-clear:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .assist-panel {
+    position: relative;
+    flex: none;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+  }
+
+  /* Drag strip on the panel's left edge — pull left to widen, right to narrow. */
+  .assist-resize {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: -3px;
+    width: 7px;
+    padding: 0;
+    border: none;
+    background: transparent;
+    cursor: col-resize;
+    z-index: 5;
+  }
+
+  .assist-resize:hover {
+    background: color-mix(in srgb, var(--accent) 22%, transparent);
+  }
+
+  .assist-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .assist-title {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text);
+  }
+
+  .assist-x {
+    font-size: 18px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    cursor: pointer;
+    padding: 0 4px;
+  }
+
+  .assist-x:hover {
+    color: var(--text);
+  }
+
+  .assist-body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  /* Inset to align with the key row and drop zone — the shared .params-trigger has no margin (which
+     suits the live box-aux it normally sits in, but floats flush-left here). */
+  .file-params-trigger {
+    margin: 12px 14px 0;
   }
 
   /* Each modal groups related controls into a titled card so the scopes read as distinct areas. */
@@ -2398,6 +2952,22 @@
     flex: 1;
     min-width: 0;
     overflow-wrap: anywhere;
+  }
+
+  /* Stacks the verbatim text and its optional parallel rendering (a translation) in one column. */
+  .feed li .body {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  /* The secondary rendering (a cloud model session's translation), under the verbatim line. */
+  .aux-text {
+    overflow-wrap: anywhere;
+    color: var(--accent);
+    font-size: 0.92em;
   }
 
   .feed li.empty {
