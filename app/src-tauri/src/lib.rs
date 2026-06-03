@@ -2839,22 +2839,6 @@ fn route_assist_final(app: &AppHandle, segment: &TranscriptSegment) {
     }
 }
 
-/// The standing instruction prepended to the user's assist prompt: frames the realtime model as a
-/// meeting copilot that hears a "Me"/"Them" mix and is fed authoritative diarized text, and pins the
-/// spoken `language` when one is set (so the model doesn't mis-hear CJK from the audio alone).
-fn assist_preamble(language: &str) -> String {
-    let base = "You are a real-time meeting copilot. You hear a live mix of the local user (\"Me\") and \
-remote participants (\"Them\"). Authoritative, speaker-attributed transcript lines are also injected as \
-text — trust them over anything you mishear from the audio. Be concise and only answer when asked.";
-
-    let language = language.trim();
-    if language.is_empty() {
-        base.to_owned()
-    } else {
-        format!("{base} The primary spoken language is \"{language}\".")
-    }
-}
-
 /// Takes the running assist worker out of state, if any — the caller stops + joins it.
 fn take_assist_worker(state: &AppState) -> Result<Option<AssistWorker>, String> {
     Ok(state
@@ -3003,15 +2987,9 @@ fn start_assist_realtime_blocking(
 
     let key = cloud_key(&state, &provider)?;
 
-    // Frame the prompt as a meeting copilot and pin the spoken language (the transcription language),
-    // so the model reasons over "Me"/"Them" and doesn't mis-hear CJK from the audio alone.
-    let language = state
-        .language
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?
-        .clone();
-    let full_instructions = combine_system(&assist_preamble(&language), &instructions);
-
+    // The model's full instruction is exactly what the user sees + edits in the assist prompt — no
+    // hidden backend preamble. (The frontend's realtime prompt carries the grounding/anti-conversational
+    // rules, visibly, so every detail is the user's to read and tune.)
     let source = state
         .assist_audio
         .lock()
@@ -3027,7 +3005,7 @@ fn start_assist_realtime_blocking(
     let engine = match build_assist_engine(
         &model,
         &key,
-        &full_instructions,
+        &instructions,
         &ParamValues::new(),
         on_error,
     ) {
