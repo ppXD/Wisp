@@ -138,9 +138,37 @@ Notes, in the spoken language. If there are no decisions, say so. No preamble.",
     { icon: "✎", label: "Blank", prompt: "" },
   ];
 
-  const PROMPT_KEY = "wisp.assistPrompt";
-  let prompt = $state(localStorage.getItem(PROMPT_KEY) ?? TEMPLATES[0].prompt);
-  $effect(() => localStorage.setItem(PROMPT_KEY, prompt));
+  // The realtime prompt ships with the full grounding rules visible + editable right here — there is NO
+  // hidden backend instruction. A realtime voice model defaults to chatting (it will greet you and
+  // invent smalltalk), so this hard wall has to live where you can read and tune every word of it.
+  const REALTIME_DEFAULT =
+    "You are a silent meeting-notes tool, not a chat assistant. The people speaking (\"Me\" and \"Them\") \
+are talking to each other, NOT to you — never greet them, reply to them, answer their questions, or \
+continue their conversation. Use ONLY the transcript lines you are given; never invent, guess, or pad. \
+If nothing meaningful has been said yet, reply with just \"—\".\n\nTask: from the conversation so far, \
+give 2-4 very short, useful live notes — a key point, a decision, an open question, or a fact worth \
+checking. Bullet list, in the spoken language, no preamble.";
+
+  // Chat and realtime keep separate prompts (the grounded realtime wall vs. a plain chat task), each
+  // persisted under its own key, so switching model kind never clobbers the other.
+  const CHAT_PROMPT_KEY = "wisp.assistPrompt";
+  const RT_PROMPT_KEY = "wisp.assistPromptRealtime";
+  const promptKey = $derived(selectedKind === "realtime" ? RT_PROMPT_KEY : CHAT_PROMPT_KEY);
+  const promptDefault = $derived(selectedKind === "realtime" ? REALTIME_DEFAULT : TEMPLATES[0].prompt);
+
+  let prompt = $state("");
+  let loadedPromptKey = $state("");
+  // Load that kind's saved prompt when the kind changes (also populates it on mount); persist edits
+  // under the active key, but not during a key swap, so the two prompts never cross-contaminate.
+  $effect(() => {
+    if (promptKey !== loadedPromptKey) {
+      loadedPromptKey = promptKey;
+      prompt = localStorage.getItem(promptKey) ?? promptDefault;
+    }
+  });
+  $effect(() => {
+    if (promptKey === loadedPromptKey) localStorage.setItem(promptKey, prompt);
+  });
 
   let modelOpen = $state(false);
   let templatesOpen = $state(false);
