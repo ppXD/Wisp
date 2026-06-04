@@ -220,6 +220,7 @@ mod tests {
             display_name: "OpenAI".to_owned(),
             protocol: CloudProtocol::OpenAi,
             base_url: "https://api.example.com/v1/".to_owned(), // trailing slash, to test trimming
+            keys_url: "https://example.com/keys".to_owned(),
             auth: CloudAuth::bearer(),
             models: vec![
                 CloudModel {

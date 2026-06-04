@@ -8,6 +8,9 @@
   import { onDestroy, onMount } from "svelte";
   import { slide } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
+  import CloudPicker from "$lib/CloudPicker.svelte";
+  import ApiKeyManager from "$lib/ApiKeyManager.svelte";
+  import { refreshCloud, cloudReady, cloudProvider, openKeyModal } from "$lib/cloud.svelte";
 
   type Segment = {
     id: number;
@@ -31,20 +34,6 @@
     coremlAvailable: boolean;
     coremlInstalled: boolean;
     coremlSizeBytes: number;
-  };
-
-  type CloudModel = {
-    id: string;
-    name: string;
-    streaming: boolean;
-    batch: boolean;
-    description: string;
-  };
-  type CloudProvider = {
-    id: string;
-    name: string;
-    keySet: boolean;
-    models: CloudModel[];
   };
 
   let running = $state(false);
@@ -80,7 +69,6 @@
   let unlisten: UnlistenFn | undefined;
 
   const activeModel = $derived(models.find((m) => m.active));
-  const canStart = $derived(!!activeModel?.installed);
 
   // Which model the picker is showing. Defaults to the active one once models load.
   let chosenId = $state("");
@@ -88,6 +76,10 @@
     if (!chosenId && models.length) chosenId = (models.find((m) => m.active) ?? models[0]).id;
   });
   const chosenModel = $derived(models.find((m) => m.id === chosenId));
+
+  // Ready to start once the *chosen* model is installed. Picking a not-yet-downloaded model must
+  // never silently run a different (previously-active) model — Live and File both gate on this.
+  const canStart = $derived(!!chosenModel?.installed);
 
   async function pickModel(id: string) {
     chosenId = id;
@@ -128,41 +120,6 @@
     } catch (e) {
       error = String(e);
     }
-  }
-
-  async function refreshCloudProviders() {
-    try {
-      cloudProviders = await invoke<CloudProvider[]>("list_cloud_providers");
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  // Save (or, with an empty draft, clear) a provider's API key — stored only on this device.
-  async function saveKey(providerId: string) {
-    const key = (keyDrafts[providerId] ?? "").trim();
-    try {
-      await invoke("set_cloud_key", { provider: providerId, key });
-      keyDrafts[providerId] = "";
-      await refreshCloudProviders();
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  async function clearKey(providerId: string) {
-    try {
-      await invoke("set_cloud_key", { provider: providerId, key: "" });
-      await refreshCloudProviders();
-    } catch (e) {
-      error = String(e);
-    }
-  }
-
-  function chooseCloud(providerId: string, modelId: string) {
-    cloudPickerOpen = false;
-    cloudProviderId = providerId;
-    cloudModelId = modelId;
   }
 
   async function refreshDevices() {
@@ -370,6 +327,8 @@
   async function start() {
     error = "";
     liveNotice = "";
+    // Real-time cloud has no backend yet; the Start button is disabled in cloud mode, but guard too.
+    if (liveEngine === "cloud") return;
     if (liveDiarize && !diarizeChosen?.installed) {
       error = "Download the speaker model first.";
       return;
@@ -430,6 +389,34 @@
 
   // ── File mode ────────────────────────────────────────────────────────────
   let fileSegments = $state<Segment[]>([]);
+  // Engines emit one segment per utterance; a wall of short lines reads poorly. Merge consecutive
+  // segments into paragraphs for display (mirrors wisp-core's group_paragraphs: same rules so the
+  // on-screen view matches the TXT export).
+  type FileParagraph = { id: number; startMs: number; speaker: number | null; text: string };
+  const PARAGRAPH_GAP_MS = 1500;
+  const MAX_PARAGRAPH_CHARS = 240;
+  function joinParagraphText(prev: string, next: string): string {
+    return /^[A-Za-z0-9]/.test(next) ? `${prev} ${next}` : `${prev}${next}`;
+  }
+  function groupParagraphs(segs: Segment[]): FileParagraph[] {
+    const paras: FileParagraph[] = [];
+    let prevEnd = 0;
+    for (const s of segs) {
+      const text = s.text.trim();
+      if (!text) continue;
+      const cur = paras[paras.length - 1];
+      const fits =
+        cur &&
+        cur.speaker === s.speaker &&
+        s.startMs - prevEnd <= PARAGRAPH_GAP_MS &&
+        [...cur.text].length < MAX_PARAGRAPH_CHARS;
+      if (fits) cur.text = joinParagraphText(cur.text, text);
+      else paras.push({ id: s.id, startMs: s.startMs, speaker: s.speaker, text });
+      prevEnd = s.endMs;
+    }
+    return paras;
+  }
+  const fileParagraphs = $derived(groupParagraphs(fileSegments));
   let fileName = $state("");
   let fileTranscribing = $state(false);
   // Decode progress 0–100; 0 means the engine hasn't reported yet (bar shows indeterminate).
@@ -461,30 +448,21 @@
     if (!diarizeId && diarizeModels.length) diarizeId = diarizeModels[0].id;
   });
 
-  // Cloud engine for File: a clear, separate choice from the on-device models. Providers and their
-  // key status load from the backend; the keys themselves live only on this device.
+  // Engine choice per mode: the active on-device model, or a cloud provider/model. The provider
+  // catalog and saved-key flags live in the shared cloud store ($lib/cloud.svelte); these are just
+  // this screen's current selections. Cloud picking/keys are handled by <CloudPicker> + the store.
   let fileEngine = $state<"local" | "cloud">("local");
-  let cloudProviders = $state<CloudProvider[]>([]);
-  let cloudProviderId = $state("");
-  let cloudModelId = $state("");
-  let cloudPickerOpen = $state(false);
-  let keysOpen = $state(false);
-  // Per-provider key input buffers — never persisted here, only handed to set_cloud_key on Save.
-  let keyDrafts = $state<Record<string, string>>({});
-  const cloudProvider = $derived(cloudProviders.find((p) => p.id === cloudProviderId));
-  // Only batch-capable models can transcribe a file.
-  const cloudFileModels = $derived(cloudProvider?.models.filter((m) => m.batch) ?? []);
-  const cloudModel = $derived(cloudFileModels.find((m) => m.id === cloudModelId));
-  const cloudReady = $derived(!!cloudProvider?.keySet && !!cloudModel);
+  let fileCloudProvider = $state("");
+  let fileCloudModel = $state("");
+  let liveEngine = $state<"local" | "cloud">("local");
+  let liveCloudProvider = $state("");
+  let liveCloudModel = $state("");
+
+  const fileProv = $derived(cloudProvider(fileCloudProvider));
+  const fileCloudReady = $derived(cloudReady(fileCloudProvider, fileCloudModel, "batch"));
+  const fileMod = $derived(fileProv?.models.find((m) => m.id === fileCloudModel));
   // Whether the current File engine is ready to accept a file (local model installed, or cloud set).
-  const fileReady = $derived(fileEngine === "cloud" ? cloudReady : canStart);
-  $effect(() => {
-    if (!cloudProviderId && cloudProviders.length) cloudProviderId = cloudProviders[0].id;
-  });
-  $effect(() => {
-    if (cloudFileModels.length && !cloudFileModels.find((m) => m.id === cloudModelId))
-      cloudModelId = cloudFileModels[0].id;
-  });
+  const fileReady = $derived(fileEngine === "cloud" ? fileCloudReady : canStart);
 
   let dragOver = $state(false);
   let fileListeners: UnlistenFn[] = [];
@@ -551,14 +529,14 @@
 
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
-    if (fileEngine === "local" && !canStart) {
-      error = "Download a model in the Live tab first.";
+    if (fileEngine === "local" && !chosenModel?.installed) {
+      error = `Download ${chosenModel?.name ?? "the model"} first.`;
       return;
     }
-    if (fileEngine === "cloud" && !cloudReady) {
-      error = cloudProvider?.keySet
+    if (fileEngine === "cloud" && !fileCloudReady) {
+      error = fileProv?.keySet
         ? "Choose a cloud model."
-        : `Add your ${cloudProvider?.name ?? "provider"} API key first.`;
+        : `Add your ${fileProv?.name ?? "provider"} API key first.`;
       return;
     }
     if (diarizeOn && !diarizeChosen?.installed) {
@@ -587,8 +565,8 @@
           gateSpeech: fileGate,
           denoiser: fileDenoiser,
           engine: fileEngine,
-          cloudProvider: fileEngine === "cloud" ? cloudProviderId : null,
-          cloudModel: fileEngine === "cloud" ? cloudModelId : null,
+          cloudProvider: fileEngine === "cloud" ? fileCloudProvider : null,
+          cloudModel: fileEngine === "cloud" ? fileCloudModel : null,
         },
       });
     } catch (e) {
@@ -603,14 +581,14 @@
   }
 
   async function pickFile() {
-    if (fileEngine === "local" && !canStart) {
-      error = "Download a model in the Live tab first.";
+    if (fileEngine === "local" && !chosenModel?.installed) {
+      error = `Download ${chosenModel?.name ?? "the model"} first.`;
       return;
     }
-    if (fileEngine === "cloud" && !cloudReady) {
-      error = cloudProvider?.keySet
+    if (fileEngine === "cloud" && !fileCloudReady) {
+      error = fileProv?.keySet
         ? "Choose a cloud model."
-        : `Add your ${cloudProvider?.name ?? "provider"} API key first.`;
+        : `Add your ${fileProv?.name ?? "provider"} API key first.`;
       return;
     }
     try {
@@ -691,7 +669,7 @@
 
   onMount(() => {
     refreshModels();
-    refreshCloudProviders();
+    refreshCloud();
     refreshDiarizeModels();
     refreshDenoiseModels();
     refreshDevices();
@@ -762,55 +740,40 @@
     {/if}
   {/snippet}
 
-  {#snippet cloudPicker()}
-    {#if cloudProviders.length}
-      <div class="picker">
-        <button
-          class="picker-trigger"
-          class:open={cloudPickerOpen}
-          onclick={() => (cloudPickerOpen = !cloudPickerOpen)}
-        >
-          <span class="picker-label"
-            >{cloudModel ? `${cloudProvider?.name} · ${cloudModel.name}` : "Select a cloud model"}</span
-          >
-          <span class="picker-caret"></span>
-        </button>
-        {#if cloudPickerOpen}
-          <button class="picker-backdrop" aria-label="Close" onclick={() => (cloudPickerOpen = false)}
-          ></button>
-          <div class="picker-menu" transition:slide={{ duration: 120 }}>
-            {#each cloudProviders as p (p.id)}
-              <div class="picker-section">
-                {p.name}{#if !p.keySet}<span class="picker-tag">key needed</span>{/if}
-              </div>
-              {#each p.models.filter((m) => m.batch) as m (m.id)}
-                <button
-                  class="picker-opt"
-                  class:sel={p.id === cloudProviderId && m.id === cloudModelId}
-                  onclick={() => chooseCloud(p.id, m.id)}
-                >
-                  <span class="picker-opt-name">{m.name}</span>
-                </button>
-              {/each}
-            {/each}
-          </div>
-        {/if}
-      </div>
-    {:else}
-      <span class="muted">Loading providers…</span>
-    {/if}
-  {/snippet}
-
   {#if mode === "live"}
     <section class="box">
       <div class="box-head">
         {#if running}
           <span class="active-model"><span class="live-pip"></span>{activeModel?.name ?? "Model"}</span>
         {:else}
-          {@render modelPicker()}
+          <div class="engine-group">
+            <div class="seg engine-seg">
+              <button class:active={liveEngine === "local"} onclick={() => (liveEngine = "local")}
+                >On-device</button
+              >
+              <button class:active={liveEngine === "cloud"} onclick={() => (liveEngine = "cloud")}
+                >Cloud</button
+              >
+            </div>
+            {#if liveEngine === "local"}
+              {@render modelPicker()}
+            {:else}
+              <CloudPicker
+                bind:providerId={liveCloudProvider}
+                bind:modelId={liveCloudModel}
+                capability="streaming"
+              />
+            {/if}
+          </div>
         {/if}
         <span class="status" class:live={running}>
-          <span class="status-dot"></span>{running ? "listening" : canStart ? "ready" : "no model"}
+          <span class="status-dot"></span>{running
+            ? "listening"
+            : liveEngine === "cloud"
+              ? "coming soon"
+              : canStart
+                ? "ready"
+                : "no model"}
         </span>
       </div>
 
@@ -821,9 +784,9 @@
         </div>
       {/if}
 
-      {#if !running && (needsScreenRecording || needsMicPermission || error || (chosenModel && !chosenModel.installed) || (chosenModel && chosenModel.installed && chosenModel.coremlAvailable))}
+      {#if !running && (error || (liveEngine === "local" && (needsScreenRecording || needsMicPermission || (chosenModel && !chosenModel.installed) || (chosenModel && chosenModel.installed && chosenModel.coremlAvailable))))}
         <div class="box-aux">
-          {#if chosenModel && !chosenModel.installed}
+          {#if liveEngine === "local" && chosenModel && !chosenModel.installed}
             {#if downloading === chosenModel.id && downloadProgress}
               <div class="dl-bar">
                 <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
@@ -839,14 +802,14 @@
           {/if}
 
           <!-- Before download, surface that whisper.cpp models also support an optional ANE boost. -->
-          {#if chosenModel && !chosenModel.installed && chosenModel.coremlAvailable}
+          {#if liveEngine === "local" && chosenModel && !chosenModel.installed && chosenModel.coremlAvailable}
             <span class="coreml-hint">
               ⚡ Supports Neural Engine acceleration · optional {fmtSize(chosenModel.coremlSizeBytes)} after install
             </span>
           {/if}
 
           <!-- Optional Apple Neural Engine encoder for installed whisper.cpp models. -->
-          {#if chosenModel && chosenModel.installed && chosenModel.coremlAvailable}
+          {#if liveEngine === "local" && chosenModel && chosenModel.installed && chosenModel.coremlAvailable}
             {#if chosenModel.coremlInstalled}
               <span class="coreml-on">⚡ Neural Engine acceleration on</span>
             {:else if downloadingCoreml === chosenModel.id && coremlProgress}
@@ -867,7 +830,7 @@
             {/if}
           {/if}
 
-          {#if needsScreenRecording}
+          {#if liveEngine === "local" && needsScreenRecording}
             <div class="notice">
               <span class="notice-text">
                 <strong>Screen Recording is off.</strong> Enable Wisp under Screen Recording in System
@@ -882,7 +845,7 @@
             </div>
           {/if}
 
-          {#if needsMicPermission}
+          {#if liveEngine === "local" && needsMicPermission}
             <div class="notice">
               <span class="notice-text">
                 <strong>Microphone is off.</strong> Enable Wisp under Microphone in System Settings,
@@ -898,6 +861,21 @@
           {#if error}
             <div class="notice error">{error}</div>
           {/if}
+        </div>
+      {/if}
+
+      {#if !running && liveEngine === "cloud"}
+        <div class="box-aux">
+          <div class="notice">
+            <span class="notice-text">
+              <strong>Real-time cloud is coming soon.</strong> Cloud transcription works in the
+              <button class="link-btn" onclick={() => (mode = "file")}>File</button> tab today — you
+              can still save your API key here for when live cloud lands.
+            </span>
+            <span class="notice-actions">
+              <button class="btn outline sm" onclick={openKeyModal}>API keys</button>
+            </span>
+          </div>
         </div>
       {/if}
 
@@ -919,7 +897,11 @@
         {#if running}
           <button class="btn primary stop" onclick={stop}>Stop</button>
         {:else}
-          <button class="btn primary" onclick={start} disabled={!canStart || downloading !== null}>
+          <button
+            class="btn primary"
+            onclick={start}
+            disabled={liveEngine === "cloud" || !canStart || downloading !== null}
+          >
             {downloading !== null ? "Downloading…" : "Start"}
           </button>
         {/if}
@@ -1100,16 +1082,16 @@
           </div>
         {/if}
         <ul class="feed">
-          {#each fileSegments as seg (seg.id)}
+          {#each fileParagraphs as para (para.id)}
             <li>
               {#if fileHasTimestamps}
-                <span class="meta"><span class="time">{fmtTime(seg.startMs)}</span></span>
+                <span class="meta"><span class="time">{fmtTime(para.startMs)}</span></span>
               {/if}
               <span class="text"
-                >{#if seg.speaker !== null}<span
+                >{#if para.speaker !== null}<span
                     class="speaker"
-                    style="--spk: {speakerColor(seg.speaker)}">{speakerLabel(seg.speaker)}</span
-                  >{/if}{seg.text}</span>
+                    style="--spk: {speakerColor(para.speaker)}">{speakerLabel(para.speaker)}</span
+                  >{/if}{para.text}</span>
             </li>
           {:else}
             <li class="empty">Transcribing… large files take a little while.</li>
@@ -1143,19 +1125,42 @@
           {#if fileEngine === "local"}
             {@render modelPicker()}
           {:else}
-            {@render cloudPicker()}
+            <CloudPicker
+              bind:providerId={fileCloudProvider}
+              bind:modelId={fileCloudModel}
+              capability="batch"
+            />
           {/if}
         </div>
         {#if fileEngine === "cloud"}
           <div class="cloud-key-row">
-            {#if cloudProvider?.keySet}
-              <span class="key-ok">✓ {cloudProvider.name} key saved on this device</span>
-              <button class="link-btn" onclick={() => (keysOpen = true)}>Manage keys</button>
+            {#if fileProv?.keySet}
+              <span class="key-ok">✓ {fileProv.name} key saved on this device</span>
+              <button class="link-btn" onclick={openKeyModal}>Manage keys</button>
             {:else}
-              <span class="key-missing"
-                >{cloudProvider?.name ?? "This provider"} needs your API key</span
+              <span class="key-missing">{fileProv?.name ?? "This provider"} needs your API key</span>
+              <button class="btn outline sm" onclick={openKeyModal}>Add API key</button>
+            {/if}
+          </div>
+        {/if}
+        {#if fileEngine === "local" && chosenModel && !chosenModel.installed}
+          <div class="box-aux">
+            {#if downloading === chosenModel.id && downloadProgress}
+              <div class="dl-bar">
+                <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
+                <span class="dl-label">
+                  {downloadPct}% · {fmtSize(downloadProgress.downloaded)} / {fmtSize(downloadProgress.total)}
+                </span>
+              </div>
+            {:else}
+              <button
+                class="btn outline"
+                onclick={() => download(chosenModel.id)}
+                disabled={downloading !== null}
               >
-              <button class="btn outline sm" onclick={() => (keysOpen = true)}>Add API key</button>
+                {downloadFailed === chosenModel.id ? "Retry download" : "Download"} · {chosenModel.name}
+                · {fmtSize(chosenModel.sizeBytes)}
+              </button>
             {/if}
           </div>
         {/if}
@@ -1169,19 +1174,19 @@
           <div class="dropzone-title">Click to choose a file, or drop one here</div>
           <p class="dropzone-sub">
             {#if fileEngine === "cloud"}
-              {#if cloudReady}
+              {#if fileCloudReady}
                 mp3, m4a, wav, flac, mp4, mov… sent to
-                <strong>{cloudProvider?.name} {cloudModel?.name}</strong>.
-              {:else if cloudProvider?.keySet}
+                <strong>{fileProv?.name} {fileMod?.name}</strong>.
+              {:else if fileProv?.keySet}
                 Choose a cloud model above.
               {:else}
-                Add your {cloudProvider?.name ?? "provider"} API key to transcribe in the cloud.
+                Add your {fileProv?.name ?? "provider"} API key to transcribe in the cloud.
               {/if}
-            {:else if canStart}
+            {:else if chosenModel?.installed}
               mp3, m4a, wav, flac, mp4, mov… transcribed locally with
-              <strong>{activeModel?.name}</strong>.
+              <strong>{chosenModel.name}</strong>.
             {:else}
-              Download a model in the Live tab first.
+              <strong>{chosenModel?.name}</strong> isn't downloaded yet — get it below to transcribe.
             {/if}
           </p>
         </button>
@@ -1307,41 +1312,12 @@
             </p>
           </section>
         </Modal>
-        <Modal bind:open={keysOpen} title="Cloud API keys">
-          <p class="modal-hint">
-            Keys are stored only on this device, and sent only to the provider they belong to.
-          </p>
-          {#each cloudProviders as p (p.id)}
-            <section class="modal-section">
-              <div class="opt-row">
-                <span class="opt-label">{p.name}</span>
-                {#if p.keySet}<span class="key-ok">saved</span>{/if}
-              </div>
-              <div class="key-entry">
-                <input
-                  class="prompt-input key-input"
-                  type="password"
-                  autocomplete="off"
-                  placeholder={p.keySet ? "Replace saved key…" : "Paste API key"}
-                  bind:value={keyDrafts[p.id]}
-                />
-                <button
-                  class="btn sm"
-                  onclick={() => saveKey(p.id)}
-                  disabled={!keyDrafts[p.id]?.trim()}
-                >
-                  Save
-                </button>
-                {#if p.keySet}
-                  <button class="btn outline sm" onclick={() => clearKey(p.id)}>Remove</button>
-                {/if}
-              </div>
-            </section>
-          {/each}
-        </Modal>
       {/if}
     </section>
   {/if}
+
+  <!-- One generic key manager for the whole app; opened from anywhere via openKeyModal(). -->
+  <ApiKeyManager />
 </main>
 
 <style>
@@ -2265,22 +2241,13 @@
     color: var(--accent-hover);
   }
 
-  .modal-hint {
-    margin: 0 0 4px;
-    font-size: 12.5px;
-    color: var(--muted);
-    line-height: 1.5;
-  }
-
-  .key-entry {
+  /* Live: groups the engine toggle and its picker on the left of the header (status stays right). */
+  .engine-group {
     display: flex;
     align-items: center;
-    gap: 8px;
-  }
-
-  .key-input {
-    flex: 1;
+    gap: 10px;
     min-width: 0;
+    flex: 1;
   }
 
 </style>

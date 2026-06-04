@@ -37,7 +37,7 @@ pub use engine::{
     AsrEngine, ClipOptions, EngineInfo, StreamingAsrEngine, StreamingResult, TranscriptionResult,
 };
 pub use error::{Result, WispError};
-pub use export::{format_transcript, ExportFormat};
+pub use export::{format_transcript, group_paragraphs, ExportFormat, Paragraph};
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 pub use transcript::{
     AudioSourceKind, SegmentStatus, SpeakerId, TranscriptEvent, TranscriptSegment, Word,
