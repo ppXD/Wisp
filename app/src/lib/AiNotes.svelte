@@ -92,12 +92,6 @@
     localStorage.setItem(MODEL_KEY, modelId);
   });
 
-  // Signal to the session starter (+page) whether to tap the live audio for the realtime assist: only
-  // when a real-time model is the current pick. An ordinary chat-assist session then pays nothing.
-  $effect(() => {
-    localStorage.setItem("wisp.assistArmed", selectedKind === "realtime" ? "1" : "0");
-  });
-
   // Built-in prompts are just starting points — pick one, then edit freely. "Summary" is one of many.
   const TEMPLATES = [
     {
