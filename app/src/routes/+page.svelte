@@ -337,6 +337,14 @@
       error = String(e);
     }
   }
+
+  // Cloud analogue of the on-device "Import custom model" footer: jump to the global AI-models
+  // settings (API keys, custom OpenAI-compatible endpoints, custom model ids) instead of importing.
+  function manageCloudModels() {
+    pickerOpen = false;
+    openEndpointsModal();
+  }
+
   // System audio on macOS needs Screen Recording permission; only relevant for the one-click source.
   const needsScreenRecording = $derived(
     !!systemAudioId && systemDevice === systemAudioId && !screenAuthorized,
@@ -663,9 +671,10 @@
           cloudProvider: liveEngine === "cloud" ? liveCloudProvider : null,
           cloudModel: liveEngine === "cloud" ? liveCloudModel : null,
           params: liveEngine === "cloud" ? liveParams : {},
-          // Tap the live audio for the realtime assist only when one is armed (AiNotes sets this when a
-          // real-time assist model is selected) — otherwise the audio path stays untouched.
-          assist: localStorage.getItem("wisp.assistArmed") === "1",
+          // Always tap the live audio for the realtime assist. The tap is a cheap drop-oldest tee that
+          // is never drained unless the assist runs, so the realtime assist can be started at any point
+          // during a live session — no need to have "armed" it before Start.
+          assist: true,
         },
       });
       liveNotice = notice ?? "";
@@ -1392,6 +1401,15 @@
                   <span class="picker-custom-label">Import custom model…</span>
                 </span>
                 <span class="picker-custom-hint">.bin / .gguf · Whisper GGML/GGUF</span>
+              </button>
+            {:else}
+              <!-- Cloud analogue of Import — jump to the AI-models settings (keys, endpoints, models). -->
+              <button class="picker-custom" onclick={manageCloudModels}>
+                <span class="picker-custom-main">
+                  <span class="picker-custom-icon cog" aria-hidden="true"></span>
+                  <span class="picker-custom-label">Manage models in Settings…</span>
+                </span>
+                <span class="picker-custom-hint">API keys · endpoints · custom models</span>
               </button>
             {/if}
           </div>
@@ -2943,6 +2961,14 @@
     -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2.5v7'/%3E%3Cpath d='M5 6.5l3 3 3-3'/%3E%3Cpath d='M3 12.5h10'/%3E%3C/svg%3E")
       no-repeat center / contain;
     mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2.5v7'/%3E%3Cpath d='M5 6.5l3 3 3-3'/%3E%3Cpath d='M3 12.5h10'/%3E%3C/svg%3E")
+      no-repeat center / contain;
+  }
+
+  /* Cloud footer reuses the import button but with a settings (sliders) glyph, not the import arrow. */
+  .picker-custom-icon.cog {
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='2.5' y1='5' x2='13.5' y2='5'/%3E%3Cline x1='2.5' y1='11' x2='13.5' y2='11'/%3E%3Ccircle cx='6' cy='5' r='1.8'/%3E%3Ccircle cx='10' cy='11' r='1.8'/%3E%3C/svg%3E")
+      no-repeat center / contain;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='2.5' y1='5' x2='13.5' y2='5'/%3E%3Cline x1='2.5' y1='11' x2='13.5' y2='11'/%3E%3Ccircle cx='6' cy='5' r='1.8'/%3E%3Ccircle cx='10' cy='11' r='1.8'/%3E%3C/svg%3E")
       no-repeat center / contain;
   }
 
