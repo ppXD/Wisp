@@ -19,6 +19,14 @@ const WHISPER_MEDIUM_BASE: &str =
 const STREAMING_ZIPFORMER_BASE: &str =
     "https://huggingface.co/csukuangfj/sherpa-onnx-streaming-zipformer-bilingual-zh-en-2023-02-20/resolve/main";
 
+/// Hugging Face repo hosting the sherpa-onnx FunASR Paraformer (offline, zh+en) ONNX export (no auth).
+const PARAFORMER_ZH_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-paraformer-zh-2024-03-09/resolve/main";
+
+/// Hugging Face repo hosting the sherpa-onnx NVIDIA NeMo Parakeet TDT (offline, English) export (no auth).
+const PARAKEET_BASE: &str =
+    "https://huggingface.co/csukuangfj/sherpa-onnx-nemo-parakeet-tdt-0.6b-v2-int8/resolve/main";
+
 /// Hugging Face repo hosting the whisper.cpp GGUF models (no auth needed). Also hosts the optional
 /// Core ML encoder archives (see [`crate::coreml`]).
 pub(crate) const WHISPER_CPP_BASE: &str =
@@ -40,13 +48,203 @@ pub fn builtin_catalog() -> Vec<ModelDescriptor> {
     vec![
         whisper_turbo_q8(),
         whisper_turbo_q5(),
+        whisper_turbo_full(),
         whisper_large_v3_gpu(),
         sense_voice_int8(),
         sense_voice_fp32(),
+        paraformer_zh(),
+        parakeet_en(),
         streaming_zipformer_zh_en(),
+        apple_speech(),
         whisper_large_v3(),
         whisper_medium(),
+        whisper_tiny(),
+        whisper_base(),
+        whisper_small(),
+        whisper_medium_gpu(),
     ]
+}
+
+/// FunASR Paraformer (offline, Chinese + English) via sherpa-onnx — non-autoregressive, fast on the
+/// CPU, with timestamps. A strong Mandarin-focused alternative to SenseVoice. int8 (~0.22 GB).
+fn paraformer_zh() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("paraformer-zh".to_owned()),
+        family: ModelFamily::Paraformer,
+        quant: Quant::Q8,
+        display_name: "Paraformer · zh + en · int8 (fast)".to_owned(),
+        files: vec![
+            ModelFile {
+                name: "model.int8.onnx".to_owned(),
+                url: format!("{PARAFORMER_ZH_BASE}/model.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 227_330_205,
+            },
+            ModelFile {
+                name: "tokens.txt".to_owned(),
+                url: format!("{PARAFORMER_ZH_BASE}/tokens.txt"),
+                sha256: String::new(),
+                size_bytes: 75_354,
+            },
+        ],
+        languages: vec!["zh".to_owned(), "en".to_owned()],
+        description:
+            "FunASR Paraformer (Chinese + English) via sherpa-onnx — a non-autoregressive recognizer \
+             that runs fast on the CPU and emits timestamps. Often stronger on Mandarin than \
+             SenseVoice. Offline (not for live captions). int8 (~0.22 GB)."
+                .to_owned(),
+    }
+}
+
+/// NVIDIA NeMo Parakeet TDT (offline, English) via sherpa-onnx — among the most accurate open English
+/// recognizers. An encoder/decoder/joiner transducer, run on the CPU. int8 (~0.63 GB).
+fn parakeet_en() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("parakeet-en".to_owned()),
+        family: ModelFamily::Parakeet,
+        quant: Quant::Q8,
+        display_name: "Parakeet · English · int8 (accurate)".to_owned(),
+        files: vec![
+            ModelFile {
+                name: "encoder.int8.onnx".to_owned(),
+                url: format!("{PARAKEET_BASE}/encoder.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 652_184_296,
+            },
+            ModelFile {
+                name: "decoder.int8.onnx".to_owned(),
+                url: format!("{PARAKEET_BASE}/decoder.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 7_257_753,
+            },
+            ModelFile {
+                name: "joiner.int8.onnx".to_owned(),
+                url: format!("{PARAKEET_BASE}/joiner.int8.onnx"),
+                sha256: String::new(),
+                size_bytes: 1_739_080,
+            },
+            ModelFile {
+                name: "tokens.txt".to_owned(),
+                url: format!("{PARAKEET_BASE}/tokens.txt"),
+                sha256: String::new(),
+                size_bytes: 9_384,
+            },
+        ],
+        languages: vec!["en".to_owned()],
+        description:
+            "NVIDIA NeMo Parakeet TDT 0.6B (English only) via sherpa-onnx — among the most accurate \
+             open English recognizers, run on the CPU. Offline; English audio only. int8 (~0.63 GB)."
+                .to_owned(),
+    }
+}
+
+/// whisper.cpp tiny (GPU/Metal) — the smallest, fastest Whisper size; lowest accuracy. q5 (~32 MB).
+fn whisper_tiny() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-tiny".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q5,
+        display_name: "Whisper tiny · GPU (Metal) · q5".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-tiny-q5_1.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-tiny-q5_1.bin"),
+            sha256: String::new(),
+            size_bytes: 32_152_673,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Whisper tiny on the GPU (Metal) — the smallest, fastest size. ~99 languages but markedly \
+             lower accuracy; best for quick drafts or very low-resource machines. q5 (~32 MB)."
+                .to_owned(),
+    }
+}
+
+/// whisper.cpp base (GPU/Metal) — a small, fast size; modest accuracy. q5 (~60 MB).
+fn whisper_base() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-base".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q5,
+        display_name: "Whisper base · GPU (Metal) · q5".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-base-q5_1.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-base-q5_1.bin"),
+            sha256: String::new(),
+            size_bytes: 59_707_625,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Whisper base on the GPU (Metal) — small and fast, with modest accuracy. ~99 languages. \
+             A step up from tiny for light workloads. q5 (~60 MB)."
+                .to_owned(),
+    }
+}
+
+/// whisper.cpp small (GPU/Metal) — a balanced size; good accuracy at low cost. q5 (~190 MB).
+fn whisper_small() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-small".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q5,
+        display_name: "Whisper small · GPU (Metal) · q5".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-small-q5_1.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-small-q5_1.bin"),
+            sha256: String::new(),
+            size_bytes: 190_085_487,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Whisper small on the GPU (Metal) — a good balance of speed and accuracy at a low memory \
+             cost. ~99 languages. q5 (~190 MB)."
+                .to_owned(),
+    }
+}
+
+/// whisper.cpp medium (GPU/Metal) — high accuracy, heavier than small, lighter than large. q5 (~539 MB).
+fn whisper_medium_gpu() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-medium-gpu".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::Q5,
+        display_name: "Whisper medium · GPU (Metal) · q5".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-medium-q5_0.bin".to_owned(),
+            url: format!("{WHISPER_CPP_BASE}/ggml-medium-q5_0.bin"),
+            sha256: String::new(),
+            size_bytes: 539_212_467,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Whisper medium on the GPU (Metal) — high accuracy across ~99 languages, between small and \
+             large-v3. A strong middle option when large-v3 is heavier than you need. q5 (~539 MB)."
+                .to_owned(),
+    }
+}
+
+/// Apple's on-device `SpeechAnalyzer` / `SpeechTranscriber` (macOS 26+). Downloads nothing of ours —
+/// the OS owns the recogniser and fetches the per-language asset itself on first use — so it has no
+/// files. Hidden off macOS by `family_runnable`; the app gates it further on the macOS-26 runtime check.
+fn apple_speech() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("apple-speech".to_owned()),
+        family: ModelFamily::AppleSpeech,
+        quant: Quant::Other("os".to_owned()),
+        display_name: "Apple on-device speech · macOS 26 · streaming".to_owned(),
+        files: Vec::new(),
+        languages: vec![
+            "yue".to_owned(),
+            "zh".to_owned(),
+            "en".to_owned(),
+            "ja".to_owned(),
+            "ko".to_owned(),
+        ],
+        description:
+            "Apple's built-in on-device recogniser (SpeechAnalyzer, macOS 26+) — zero download, very \
+             low power, and fully private. Streams words as you speak with the newest system models \
+             (a step beyond older Apple dictation). The OS fetches each language pack on first use."
+                .to_owned(),
+    }
 }
 
 /// Languages every Whisper model covers well (a subset surfaced in the UI).
@@ -116,6 +314,27 @@ fn whisper_large_v3_gpu() -> ModelDescriptor {
             "The full Whisper large-v3 (32-layer decoder, not distilled) on the GPU (Metal) — the \
              most accurate option, best for files with the Accurate mode. Slower than turbo; \
              ~1.1 GB."
+                .to_owned(),
+    }
+}
+
+fn whisper_turbo_full() -> ModelDescriptor {
+    ModelDescriptor {
+        id: ModelId("whisper-large-v3-turbo".to_owned()),
+        family: ModelFamily::WhisperCpp,
+        quant: Quant::F16,
+        display_name: "Whisper large-v3-turbo · GPU (Metal) · full".to_owned(),
+        files: vec![ModelFile {
+            name: "ggml-large-v3-turbo.bin".to_owned(),
+            // Declared size is a safe under-estimate (the store rejects a download shorter than this).
+            url: format!("{WHISPER_CPP_BASE}/ggml-large-v3-turbo.bin"),
+            sha256: String::new(),
+            size_bytes: 1_550_000_000,
+        }],
+        languages: whisper_languages(),
+        description:
+            "Full-precision large-v3-turbo on the GPU (Metal) — the most accurate turbo, a touch \
+             slower and larger than q8. Real Cantonese (yue) + ~99 languages. ~1.6 GB."
                 .to_owned(),
     }
 }
@@ -406,16 +625,22 @@ mod tests {
     #[test]
     fn catalog_has_distinct_ids_and_files() {
         let catalog = builtin_catalog();
-        assert_eq!(catalog.len(), 8);
+        assert_eq!(catalog.len(), 16);
 
         let ids: std::collections::HashSet<_> = catalog.iter().map(|d| &d.id).collect();
         assert_eq!(ids.len(), catalog.len(), "model ids must be distinct");
 
         for descriptor in &catalog {
-            // sherpa families ship ONNX + tokens; whisper.cpp ships a single GGUF `.bin`.
+            // sherpa families ship ONNX + tokens; whisper.cpp ships a single GGUF `.bin`; Apple
+            // on-device speech is OS-provided and ships nothing of ours.
             match descriptor.family {
+                ModelFamily::AppleSpeech => {
+                    assert!(descriptor.files.is_empty(), "OS-provided: no files of ours");
+                    assert_eq!(descriptor.total_size_bytes(), 0, "nothing to download");
+                }
                 ModelFamily::WhisperCpp => {
                     assert!(descriptor.files.iter().any(|f| f.name.ends_with(".bin")));
+                    assert!(descriptor.total_size_bytes() > 0);
                 }
                 _ => {
                     assert!(descriptor.files.iter().any(|f| f.name.ends_with(".onnx")));
@@ -423,10 +648,10 @@ mod tests {
                         .files
                         .iter()
                         .any(|f| f.name.ends_with("tokens.txt")));
+                    assert!(descriptor.total_size_bytes() > 0);
                 }
             }
             assert!(!descriptor.description.is_empty());
-            assert!(descriptor.total_size_bytes() > 0);
         }
     }
 

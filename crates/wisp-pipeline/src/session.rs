@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use wisp_audio::{Resampler16k, TARGET_SAMPLE_RATE};
+use wisp_audio::{Resampler, TARGET_SAMPLE_RATE};
 use wisp_core::audio::AudioSource;
 use wisp_core::denoise::Denoiser;
 use wisp_core::engine::StreamingAsrEngine;
@@ -95,6 +95,7 @@ impl Session {
     ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_for_capture = Arc::clone(&stop);
+        let stop_for_transcribe = Arc::clone(&stop);
         let (job_tx, job_rx) = mpsc::channel::<Job>();
 
         // Most-recent partial-decode time (ms), shared so the capture thread can pace partials to
@@ -114,6 +115,10 @@ impl Session {
                 }
                 let (finals, partial) = coalesce(batch);
 
+                // Finals are the authoritative transcript — always transcribe them, even on stop. The
+                // capture thread flushes the trailing utterance as a Final on stop; dropping it (and any
+                // backlog of real finals a slow engine fell behind on) would silently lose the last
+                // sentence(s) of the recording.
                 for (id, utterance) in finals {
                     match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Final) {
                         Ok(Some(segment)) => sink(TranscriptEvent::Segment(segment)),
@@ -121,6 +126,14 @@ impl Session {
                         Err(e) => eprintln!("wisp: transcription error: {e}"),
                     }
                 }
+
+                // On stop, skip the provisional partial — a final supersedes it and decoding it would
+                // only slow the shutdown — and stop pulling new work: drain the queued finals above,
+                // then exit when the capture thread drops the sender.
+                if stop_for_transcribe.load(Ordering::Relaxed) {
+                    continue;
+                }
+
                 if let Some((id, utterance)) = partial {
                     let started = Instant::now();
                     match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Partial) {
@@ -190,6 +203,13 @@ impl Session {
         }
     }
 
+    /// Signals the session to stop *without* waiting — its thread(s) observe the flag on their next
+    /// frame and wind down (flushing the trailing utterance). Call this up front, before a bounded
+    /// teardown, so a session stops capturing/emitting even if a later join wedges on a stuck device.
+    pub fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     /// Signals the session to stop and waits for its thread(s) to finish, returning the first
     /// error encountered. Use this for live sources (e.g. a microphone) that never end on their
     /// own.
@@ -240,7 +260,7 @@ fn run_capture(
     let mut next_id: u64 = 0;
     let mut open_id: Option<u64> = None;
     let mut since_partial = Duration::ZERO;
-    let mut resampler = Resampler16k::new();
+    let mut resampler = Resampler::new(TARGET_SAMPLE_RATE);
 
     while !stop.load(Ordering::Relaxed) {
         match source.next_frame()? {
@@ -276,9 +296,9 @@ fn run_capture(
     Ok(())
 }
 
-/// Streaming capture+recognition loop for [`Session::spawn_streaming`]: pull frames, convert each to
-/// 16 kHz mono (optionally denoised), feed it to `engine`, and forward the growing hypothesis as
-/// `Partial`/`Final` segments until `stop` is set or the source ends.
+/// Streaming capture+recognition loop for [`Session::spawn_streaming`]: pull frames, resample each to
+/// the engine's own input rate as mono (optionally denoised), feed it to `engine`, and forward the
+/// growing hypothesis as `Partial`/`Final` segments until `stop` is set or the source ends.
 ///
 /// All partials of one utterance share an id with the `Final` that closes it, so the UI updates a
 /// single row in place; the engine's own endpoint detection commits the utterance and advances to a
@@ -291,9 +311,12 @@ fn run_streaming(
     kind: AudioSourceKind,
     stop: &AtomicBool,
 ) -> Result<()> {
+    // Most engines want 16 kHz; a cloud engine that accepts richer audio asks for more (e.g. 24 kHz),
+    // so we resample each frame to the engine's own rate rather than always downsampling to 16 kHz.
+    let rate = engine.input_sample_rate();
     let mut id: u64 = 0;
     let mut utterance_start: Option<Duration> = None;
-    let mut resampler = Resampler16k::new();
+    let mut resampler = Resampler::new(rate);
 
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = source.next_frame()? else {
@@ -303,18 +326,24 @@ fn run_streaming(
 
         let mono = resampler.process(&frame);
         let mono = match &mut denoiser {
-            Some(d) => d.denoise(&mono, TARGET_SAMPLE_RATE),
+            Some(d) => d.denoise(&mono, rate),
             None => mono,
         };
 
-        let result = engine.accept_waveform(TARGET_SAMPLE_RATE, &mono);
-        if !result.text.is_empty() {
+        let result = engine.accept_waveform(rate, &mono);
+
+        // A dual-stream engine (cloud model session) may carry a parallel `aux` rendering (a
+        // translation) that leads or lags the verbatim text, so emit when either side has content.
+        let aux = result.aux.filter(|a| !a.is_empty());
+        let emitted = !result.text.is_empty() || aux.is_some();
+        if emitted {
             let mut segment = TranscriptSegment::new(
                 id,
                 &result.text,
                 start..(frame.timestamp + frame.duration()),
                 kind,
-            );
+            )
+            .with_aux_text(aux);
             segment.status = if result.is_endpoint {
                 SegmentStatus::Final
             } else {
@@ -325,7 +354,7 @@ fn run_streaming(
         if result.is_endpoint {
             // A committed utterance (one that produced text) advances to a fresh id; an empty
             // endpoint just resets the start so the next utterance reuses this id.
-            if !result.text.is_empty() {
+            if emitted {
                 id += 1;
             }
             utterance_start = None;
@@ -470,6 +499,74 @@ mod tests {
         session.stop().unwrap();
     }
 
+    #[test]
+    fn spawn_live_stop_keeps_the_flushed_trailing_final() {
+        // The user stops mid/just-after a sentence: the capture thread flushes that buffered utterance
+        // as a Final on stop. The transcribe loop must still decode it — dropping it would silently lose
+        // the last sentence of every recording. (This segmenter never finalizes mid-stream and exposes
+        // no partial, so the *only* job is the flushed Final, isolating the stop path.)
+        struct BufferingSegmenter;
+        impl Segmenter for BufferingSegmenter {
+            fn push(&mut self, _m: &[f32], _t: Duration, _d: Duration) -> Vec<Utterance> {
+                Vec::new()
+            }
+            fn flush(&mut self) -> Vec<Utterance> {
+                vec![Utterance {
+                    audio: vec![0.3; 1_600],
+                    start: Duration::ZERO,
+                }]
+            }
+            fn partial(&self) -> Option<Utterance> {
+                None
+            }
+        }
+
+        struct Endless;
+        impl AudioSource for Endless {
+            fn info(&self) -> AudioSourceInfo {
+                AudioSourceInfo {
+                    kind: AudioSourceKind::Microphone,
+                    name: "endless".to_owned(),
+                }
+            }
+            fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
+                Ok(Some(AudioFrame::new(
+                    vec![0.0; 160],
+                    16_000,
+                    1,
+                    Duration::ZERO,
+                )))
+            }
+        }
+
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+
+        let session = Session::spawn_live(
+            Box::new(BufferingSegmenter),
+            transcriber(vec![canned("the trailing sentence")]),
+            Box::new(Endless),
+            sink,
+            None,
+        );
+        session.stop().unwrap();
+
+        let texts: Vec<String> = rx
+            .try_iter()
+            .filter_map(|event| match event {
+                TranscriptEvent::Segment(s) => Some(s.text),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            texts,
+            vec!["the trailing sentence".to_owned()],
+            "the utterance flushed on stop must still be transcribed, not dropped"
+        );
+    }
+
     fn segmenter() -> Box<dyn Segmenter> {
         Box::new(EnergySegmenter::new(
             Box::new(EnergyVad::new(0.01)),
@@ -611,10 +708,7 @@ mod tests {
         struct Scripted(VecDeque<StreamingResult>);
         impl StreamingAsrEngine for Scripted {
             fn accept_waveform(&mut self, _rate: u32, _samples: &[f32]) -> StreamingResult {
-                self.0.pop_front().unwrap_or(StreamingResult {
-                    text: String::new(),
-                    is_endpoint: false,
-                })
+                self.0.pop_front().unwrap_or_default()
             }
             fn reset(&mut self) {}
         }
@@ -627,22 +721,10 @@ mod tests {
         ];
         let source: Box<dyn AudioSource> = Box::new(MockAudioSource::new(frames));
         let results = VecDeque::from(vec![
-            StreamingResult {
-                text: "he".to_owned(),
-                is_endpoint: false,
-            },
-            StreamingResult {
-                text: "hello".to_owned(),
-                is_endpoint: false,
-            },
-            StreamingResult {
-                text: "hello.".to_owned(),
-                is_endpoint: true,
-            },
-            StreamingResult {
-                text: "next".to_owned(),
-                is_endpoint: false,
-            },
+            StreamingResult::new("he", false),
+            StreamingResult::new("hello", false),
+            StreamingResult::new("hello.", true),
+            StreamingResult::new("next", false),
         ]);
 
         let (tx, rx) = mpsc::channel();
@@ -675,6 +757,85 @@ mod tests {
                 (1, "next".to_owned(), SegmentStatus::Partial),
             ],
             "partials share the utterance id, the endpoint finalizes it, and the next utterance gets a fresh id"
+        );
+    }
+
+    #[test]
+    fn streaming_threads_the_aux_translation_onto_segments() {
+        use std::collections::VecDeque;
+        use wisp_core::engine::{StreamingAsrEngine, StreamingResult};
+        use wisp_core::transcript::SegmentStatus;
+
+        struct Scripted(VecDeque<StreamingResult>);
+        impl StreamingAsrEngine for Scripted {
+            fn accept_waveform(&mut self, _rate: u32, _samples: &[f32]) -> StreamingResult {
+                self.0.pop_front().unwrap_or_default()
+            }
+            fn reset(&mut self) {}
+        }
+
+        // A dual-stream engine (cloud model session): a parallel `aux` rendering (the translation)
+        // that can lead the verbatim text and rides each segment through to the UI.
+        let frames = vec![frame(0.5, 0), frame(0.5, 100), frame(0.5, 200)];
+        let source: Box<dyn AudioSource> = Box::new(MockAudioSource::new(frames));
+        let results = VecDeque::from(vec![
+            StreamingResult {
+                text: String::new(),
+                is_endpoint: false,
+                aux: Some("Hel".to_owned()),
+            },
+            StreamingResult {
+                text: "你好".to_owned(),
+                is_endpoint: false,
+                aux: Some("Hello".to_owned()),
+            },
+            StreamingResult {
+                text: "你好。".to_owned(),
+                is_endpoint: true,
+                aux: Some("Hello.".to_owned()),
+            },
+        ]);
+
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let session = Session::spawn_streaming(
+            Box::new(Scripted(results)),
+            source,
+            sink,
+            None,
+            AudioSourceKind::Microphone,
+        );
+        session.join().unwrap();
+
+        let segs: Vec<(String, Option<String>, SegmentStatus)> = rx
+            .try_iter()
+            .map(|e| match e {
+                TranscriptEvent::Segment(s) => (s.text, s.aux_text, s.status),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(
+            segs,
+            vec![
+                (
+                    String::new(),
+                    Some("Hel".to_owned()),
+                    SegmentStatus::Partial
+                ),
+                (
+                    "你好".to_owned(),
+                    Some("Hello".to_owned()),
+                    SegmentStatus::Partial
+                ),
+                (
+                    "你好。".to_owned(),
+                    Some("Hello.".to_owned()),
+                    SegmentStatus::Final
+                ),
+            ],
+            "the translation rides each segment; an aux-only frame (empty verbatim) still emits"
         );
     }
 

@@ -1,0 +1,9 @@
+[package]
+name = "wisp-applespeech"
+version = "0.0.0"
+description = "On-device streaming speech recognition via macOS 26 SpeechAnalyzer (zero model download)"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }

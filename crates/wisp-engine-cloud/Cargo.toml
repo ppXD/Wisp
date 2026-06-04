@@ -11,5 +11,10 @@ wisp-core = { path = "../wisp-core" }
 ureq = "2"
 # Encode the 16 kHz f32 audio to in-memory 16-bit WAV for the multipart upload.
 hound = "3.5"
+# Base64-encode the WAV for the JSON body protocols (Gemini inline data, OpenAI input_audio).
+base64 = "0.22"
+# Synchronous WebSocket client for the realtime streaming path (OpenAI Realtime). rustls TLS with
+# bundled webpki roots — pure Rust, no native TLS, matching ureq.
+tungstenite = { version = "0.24", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

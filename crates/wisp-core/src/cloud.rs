@@ -15,6 +15,35 @@ pub enum CloudProtocol {
     /// OpenAI `/v1/audio/transcriptions` — and every OpenAI-compatible endpoint (e.g. Groq),
     /// reached by overriding `base_url`.
     OpenAi,
+    /// Google Gemini `models/{model}:generateContent` with inline base64 audio; the key is a `?key=`
+    /// query parameter and the transcript comes back as the candidate's text.
+    Gemini,
+    /// OpenAI-compatible `/chat/completions` carrying the audio as an `input_audio` content part
+    /// (e.g. Alibaba DashScope's Qwen audio models). Bearer-authed; transcript is the message content.
+    OpenAiChatAudio,
+}
+
+/// The realtime WebSocket protocol a provider speaks for LIVE streaming — distinct from its batch
+/// [`CloudProtocol`], since a vendor's realtime and file APIs often differ (e.g. Qwen is an
+/// OpenAI-compatible chat endpoint for files but a DashScope WebSocket for realtime). A provider with
+/// `None` is file-only. Each variant maps to a `RealtimeProtocol` adapter in the engine crate.
+///
+/// `#[non_exhaustive]`: new live vendors are added without breaking matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum StreamingProtocol {
+    /// OpenAI Realtime (`wss://api.openai.com/v1/realtime`) — transcription / model / translation
+    /// sessions. Bearer auth, base64-PCM-in-JSON audio frames.
+    OpenAiRealtime,
+    /// Speechmatics RT (`wss://…rt.speechmatics.com/v2`) — `StartRecognition`/`AddAudio`(raw binary
+    /// PCM)/`AddTranscript`. Bearer auth, strong multilingual incl. Cantonese.
+    Speechmatics,
+    /// Google Gemini Live (`…BidiGenerateContent`) — `Setup`/`RealtimeInput`, used purely for its
+    /// `inputAudioTranscription`. `x-goog-api-key` auth.
+    GeminiLive,
+    /// Alibaba DashScope realtime (`wss://…/api-ws/v1/inference`) — `run-task`/`finish-task` JSON +
+    /// binary audio, `paraformer-realtime`. Bearer auth, strong Mandarin/Cantonese.
+    DashScopeRealtime,
 }
 
 /// How to authenticate a request: a header carrying the API key, with a scheme prefix.
@@ -59,6 +88,26 @@ pub struct CloudModel {
     pub languages: Vec<String>,
     /// Short guidance shown in the picker.
     pub description: String,
+    /// The provider's suggested default for its capability — a picker pre-selects the recommended
+    /// model rather than relying on list order. At most one per (provider, capability) is meaningful.
+    pub recommended: bool,
+    /// The model returns speaker-labelled segments itself (e.g. OpenAI's diarized model), so local
+    /// diarization must not run on top of it (it would overwrite the model's own speaker labels).
+    pub diarizes: bool,
+}
+
+impl CloudModel {
+    /// Marks this model as the provider's recommended default (chainable on a constructed model).
+    pub fn recommended(mut self) -> Self {
+        self.recommended = true;
+        self
+    }
+
+    /// Marks this model as one that returns speaker labels itself (no local diarization needed).
+    pub fn diarizes(mut self) -> Self {
+        self.diarizes = true;
+        self
+    }
 }
 
 /// A cloud transcription provider and the models it serves.
@@ -77,6 +126,8 @@ pub struct CloudProvider {
     pub keys_url: String,
     /// How to authenticate with the user's API key.
     pub auth: CloudAuth,
+    /// The realtime protocol this provider speaks for LIVE streaming, or `None` if it's file-only.
+    pub streaming: Option<StreamingProtocol>,
     /// Models offered, in display order.
     pub models: Vec<CloudModel>,
 }
@@ -117,6 +168,7 @@ mod tests {
             base_url: "https://example".to_owned(),
             keys_url: "https://example/keys".to_owned(),
             auth: CloudAuth::bearer(),
+            streaming: Some(StreamingProtocol::OpenAiRealtime),
             models: vec![CloudModel {
                 id: "m1".to_owned(),
                 display_name: "M1".to_owned(),
@@ -124,9 +176,32 @@ mod tests {
                 batch: true,
                 languages: vec![],
                 description: String::new(),
+                recommended: false,
+                diarizes: false,
             }],
         };
         assert_eq!(provider.model("m1").unwrap().display_name, "M1");
         assert!(provider.model("nope").is_none());
+    }
+
+    #[test]
+    fn recommended_builder_sets_the_flag() {
+        let base = CloudModel {
+            id: "m".to_owned(),
+            display_name: "M".to_owned(),
+            streaming: true,
+            batch: false,
+            languages: vec![],
+            description: String::new(),
+            recommended: false,
+            diarizes: false,
+        };
+        assert!(!base.recommended, "defaults to not recommended");
+        assert!(!base.diarizes, "defaults to not diarizing");
+        assert!(
+            base.clone().recommended().recommended,
+            "recommended builder flips the flag"
+        );
+        assert!(base.diarizes().diarizes, "diarizes builder flips the flag");
     }
 }

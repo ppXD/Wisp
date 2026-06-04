@@ -32,10 +32,14 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = [] }
 tauri-plugin-opener = "2"
 tauri-plugin-dialog = "2"
+# Global push-to-talk hotkey for dictation (fires on key press AND release).
+tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
 wisp-core = { path = "../../crates/wisp-core" }
+# Insert dictated text into the frontmost app (clipboard + synthesized ⌘V). Stub off macOS.
+wisp-textinject = { path = "../../crates/wisp-textinject" }
 wisp-audio = { path = "../../crates/wisp-audio", features = ["mic", "file"] }
 wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
@@ -55,6 +59,8 @@ wisp-screencapture = { path = "../../crates/wisp-screencapture" }
 wisp-aec = { path = "../../crates/wisp-aec" }
 # GPU (Metal) Whisper engine.
 wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }
+# On-device streaming speech via macOS 26 SpeechAnalyzer (zero download).
+wisp-applespeech = { path = "../../crates/wisp-applespeech" }
 
 # Windows-only native deps. System-audio capture via WASAPI loopback — the counterpart to macOS
 # ScreenCaptureKit, so Windows gets the same one-click "capture the meeting" Live experience.

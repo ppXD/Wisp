@@ -17,9 +17,15 @@ pub fn request_screen_recording() -> bool {
     imp::request_screen_recording()
 }
 
-/// Opens the System Settings privacy pane for `pane` ("screen" or "microphone"). macOS only.
+/// Opens the System Settings privacy pane for `pane` ("screen", "microphone", "accessibility"). macOS.
 pub fn open_privacy_settings(pane: &str) -> Result<(), String> {
     imp::open_privacy_settings(pane)
+}
+
+/// Whether the app is trusted for Accessibility — required to synthesize the paste keystroke that
+/// dictation uses to insert text into other apps. `true` off macOS (no such gate).
+pub fn accessibility_authorized() -> bool {
+    imp::accessibility_authorized()
 }
 
 /// Whether microphone access is blocked (explicitly denied or restricted).
@@ -48,8 +54,18 @@ mod imp {
         static AVMediaTypeAudio: *const AnyObject;
     }
 
+    // Accessibility-trust check (HIServices, via the ApplicationServices umbrella).
+    #[link(name = "ApplicationServices", kind = "framework")]
+    extern "C" {
+        fn AXIsProcessTrusted() -> bool;
+    }
+
     pub(super) fn screen_recording_authorized() -> bool {
         unsafe { CGPreflightScreenCaptureAccess() }
+    }
+
+    pub(super) fn accessibility_authorized() -> bool {
+        unsafe { AXIsProcessTrusted() }
     }
 
     pub(super) fn request_screen_recording() -> bool {
@@ -68,6 +84,7 @@ mod imp {
         let anchor = match pane {
             "screen" => "Privacy_ScreenCapture",
             "microphone" => "Privacy_Microphone",
+            "accessibility" => "Privacy_Accessibility",
             other => return Err(format!("unknown settings pane: {other}")),
         };
         let url = format!("x-apple.systempreferences:com.apple.preference.security?{anchor}");
@@ -86,6 +103,10 @@ mod imp {
     }
 
     pub(super) fn request_screen_recording() -> bool {
+        true
+    }
+
+    pub(super) fn accessibility_authorized() -> bool {
         true
     }
 

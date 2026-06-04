@@ -6,7 +6,7 @@
 #![cfg(target_os = "macos")]
 
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc::{self, Sender};
+use std::sync::mpsc::{self, RecvTimeoutError, Sender};
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -27,6 +27,13 @@ const CAPTURE_SAMPLE_RATE: u32 = 48_000;
 /// transcribing one utterance doesn't drop the audio of the next.
 const FRAME_CHANNEL_CAPACITY: usize = 1024;
 
+/// How long [`ScreenCaptureSource::new`] waits for the capture thread to signal it is live before
+/// giving up. ScreenCaptureKit's `SCShareableContent::get` can wedge indefinitely (most often after a
+/// previous session was hard-killed and the capture daemon is left confused); bounding the wait lets
+/// the caller fall back to mic-only instead of hanging Start forever. Generous enough to clear the
+/// one-time permission prompt + first-launch setup on a healthy Mac.
+pub const STARTUP_TIMEOUT: Duration = Duration::from_secs(6);
+
 /// An [`AudioSource`] capturing system audio through ScreenCaptureKit.
 ///
 /// The `SCStream` (which is not `Send`) is owned by a dedicated thread that feeds frames to a
@@ -38,8 +45,9 @@ pub struct ScreenCaptureSource {
 }
 
 impl ScreenCaptureSource {
-    /// Starts capturing system audio. Prompts for Screen Recording permission on first use;
-    /// errors if permission is denied or no display is available.
+    /// Starts capturing system audio. Prompts for Screen Recording permission on first use; errors
+    /// (so the caller degrades to mic-only) if permission is denied, no display is available, or the
+    /// capture daemon does not come up within [`STARTUP_TIMEOUT`].
     pub fn new() -> Result<Self> {
         let (tx, rx) = frame_channel(FRAME_CHANNEL_CAPACITY);
         let (ready_tx, ready_rx) = mpsc::channel::<std::result::Result<(), String>>();
@@ -48,17 +56,50 @@ impl ScreenCaptureSource {
 
         let handle = thread::spawn(move || capture_loop(tx, &stop_for_thread, &ready_tx));
 
-        match ready_rx.recv() {
-            Ok(Ok(())) => Ok(Self {
+        match await_readiness(&ready_rx, STARTUP_TIMEOUT) {
+            Readiness::Ready => Ok(Self {
                 rx,
                 stop,
                 handle: Some(handle),
             }),
-            Ok(Err(e)) => Err(WispError::Audio(e)),
-            Err(_) => Err(WispError::Audio(
+            Readiness::Failed(e) => Err(WispError::Audio(e)),
+            Readiness::TimedOut => {
+                // The capture thread is stuck (almost always a wedged ScreenCaptureKit daemon). Signal
+                // it to stop and detach it — it self-cleans when the blocking call finally returns —
+                // and report the timeout so the caller captures the microphone only.
+                stop.store(true, Ordering::Relaxed);
+                handle.thread().unpark();
+                Err(WispError::Audio(format!(
+                    "ScreenCaptureKit did not start within {STARTUP_TIMEOUT:?} (capture daemon may be wedged)"
+                )))
+            }
+            Readiness::Gone => Err(WispError::Audio(
                 "screen-capture thread exited before signalling readiness".to_owned(),
             )),
         }
+    }
+}
+
+/// The outcome of waiting for the capture thread's startup signal — separated from [`ScreenCaptureSource::new`]
+/// so the wait/timeout decision is unit-testable without a real ScreenCaptureKit stream.
+enum Readiness {
+    Ready,
+    Failed(String),
+    TimedOut,
+    Gone,
+}
+
+/// Resolves the capture thread's readiness signal within `timeout`: it became live, it failed during
+/// setup, it stayed silent past the deadline, or its sender hung up before signalling.
+fn await_readiness(
+    ready_rx: &mpsc::Receiver<std::result::Result<(), String>>,
+    timeout: Duration,
+) -> Readiness {
+    match ready_rx.recv_timeout(timeout) {
+        Ok(Ok(())) => Readiness::Ready,
+        Ok(Err(e)) => Readiness::Failed(e),
+        Err(RecvTimeoutError::Timeout) => Readiness::TimedOut,
+        Err(RecvTimeoutError::Disconnected) => Readiness::Gone,
     }
 }
 
@@ -201,4 +242,59 @@ fn bytes_to_f32(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(4)
         .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ready_when_the_worker_signals_success() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Ok(())).unwrap();
+
+        assert!(matches!(
+            await_readiness(&rx, Duration::from_secs(1)),
+            Readiness::Ready
+        ));
+    }
+
+    #[test]
+    fn failed_when_the_worker_signals_an_error() {
+        let (tx, rx) = mpsc::channel();
+        tx.send(Err("no display available".to_owned())).unwrap();
+
+        assert!(matches!(
+            await_readiness(&rx, Duration::from_secs(1)),
+            Readiness::Failed(_)
+        ));
+    }
+
+    #[test]
+    fn timed_out_when_the_worker_stays_silent() {
+        // Keep the sender alive (so it is not "disconnected") but never signal — the wedged case.
+        let (_tx, rx) = mpsc::channel::<std::result::Result<(), String>>();
+
+        assert!(matches!(
+            await_readiness(&rx, Duration::from_millis(40)),
+            Readiness::TimedOut
+        ));
+    }
+
+    #[test]
+    fn gone_when_the_worker_hangs_up_without_signalling() {
+        let (tx, rx) = mpsc::channel::<std::result::Result<(), String>>();
+        drop(tx);
+
+        assert!(matches!(
+            await_readiness(&rx, Duration::from_secs(1)),
+            Readiness::Gone
+        ));
+    }
+
+    #[test]
+    fn startup_timeout_is_pinned() {
+        // Bounds Start's worst-case wait on a wedged capture daemon; changing it shifts real UX.
+        assert_eq!(STARTUP_TIMEOUT, Duration::from_secs(6));
+    }
 }

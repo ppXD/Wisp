@@ -69,6 +69,10 @@ fn coreml_size(dir_name: &str) -> Option<u64> {
     match dir_name {
         "ggml-large-v3-turbo-encoder.mlmodelc" => Some(1_173_393_014),
         "ggml-large-v3-encoder.mlmodelc" => Some(1_175_711_232),
+        "ggml-tiny-encoder.mlmodelc" => Some(15_037_446),
+        "ggml-base-encoder.mlmodelc" => Some(37_922_638),
+        "ggml-small-encoder.mlmodelc" => Some(163_083_239),
+        "ggml-medium-encoder.mlmodelc" => Some(567_829_413),
         _ => None,
     }
 }

@@ -44,6 +44,41 @@ impl AudioSource for ChannelSource {
     }
 }
 
+/// An [`AudioSource`] with a runtime mute flag. When muted, frames still flow (so the capture pipeline
+/// keeps ticking and any echo far-end reference stays live) but their samples are zeroed — the
+/// recogniser hears silence and produces no transcription. This lets a live session mute one stream
+/// (the mic, or the system audio) without tearing down and re-wiring capture/AEC; flipping the shared
+/// flag mutes/unmutes instantly.
+pub struct MutedSource {
+    inner: Box<dyn AudioSource>,
+    muted: Arc<AtomicBool>,
+}
+
+impl MutedSource {
+    /// Wraps `inner`, gating it on the shared `muted` flag.
+    pub fn new(inner: Box<dyn AudioSource>, muted: Arc<AtomicBool>) -> Self {
+        Self { inner, muted }
+    }
+}
+
+impl AudioSource for MutedSource {
+    fn info(&self) -> AudioSourceInfo {
+        self.inner.info()
+    }
+
+    fn next_frame(&mut self) -> Result<Option<AudioFrame>> {
+        let frame = self.inner.next_frame()?;
+        if self.muted.load(Ordering::Relaxed) {
+            Ok(frame.map(|mut frame| {
+                frame.samples.iter_mut().for_each(|s| *s = 0.0);
+                frame
+            }))
+        } else {
+            Ok(frame)
+        }
+    }
+}
+
 /// Handle to a running [`tee`] pump thread. Dropping it (or calling [`stop`](Tee::stop)) stops the
 /// pump and closes both branches, so downstream consumers end cleanly.
 pub struct Tee {
