@@ -317,6 +317,10 @@ fn run_streaming(
     let mut id: u64 = 0;
     let mut utterance_start: Option<Duration> = None;
     let mut resampler = Resampler::new(rate);
+    // The open utterance's latest partial, kept so stopping (or the source ending) mid-utterance
+    // promotes it to a `Final` instead of dropping the last words — a streaming engine commits text
+    // only on its own endpoint, which a stop pre-empts.
+    let mut pending_final: Option<TranscriptSegment> = None;
 
     while !stop.load(Ordering::Relaxed) {
         let Some(frame) = source.next_frame()? else {
@@ -349,6 +353,8 @@ fn run_streaming(
             } else {
                 SegmentStatus::Partial
             };
+            // Hold the open partial so the post-loop flush can finalize it; a final closes it now.
+            pending_final = (!result.is_endpoint).then(|| segment.clone());
             sink(TranscriptEvent::Segment(segment));
         }
         if result.is_endpoint {
@@ -358,7 +364,15 @@ fn run_streaming(
                 id += 1;
             }
             utterance_start = None;
+            pending_final = None;
         }
+    }
+
+    // The loop exited mid-utterance (stop, or the source ended): promote the still-open partial to a
+    // `Final` so the user's last sentence survives even though the engine never endpointed it.
+    if let Some(mut segment) = pending_final {
+        segment.status = SegmentStatus::Final;
+        sink(TranscriptEvent::Segment(segment));
     }
     Ok(())
 }
@@ -755,8 +769,64 @@ mod tests {
                 (0, "hello".to_owned(), SegmentStatus::Partial),
                 (0, "hello.".to_owned(), SegmentStatus::Final),
                 (1, "next".to_owned(), SegmentStatus::Partial),
+                (1, "next".to_owned(), SegmentStatus::Final),
             ],
-            "partials share the utterance id, the endpoint finalizes it, and the next utterance gets a fresh id"
+            "partials share the utterance id, the endpoint finalizes it, the next utterance gets a fresh id, and the open partial is flushed to a Final when the source ends"
+        );
+    }
+
+    #[test]
+    fn spawn_streaming_promotes_the_open_partial_to_final_when_the_stream_ends() {
+        use std::collections::VecDeque;
+        use wisp_core::engine::{StreamingAsrEngine, StreamingResult};
+        use wisp_core::transcript::SegmentStatus;
+
+        // The engine never reaches its own endpoint before the source ends (a Stop mid-sentence): the
+        // last words only ever surface as a Partial, so the loop must promote them to a Final on exit
+        // rather than drop the user's last spoken sentence.
+        struct Scripted(VecDeque<StreamingResult>);
+        impl StreamingAsrEngine for Scripted {
+            fn accept_waveform(&mut self, _rate: u32, _samples: &[f32]) -> StreamingResult {
+                self.0.pop_front().unwrap_or_default()
+            }
+            fn reset(&mut self) {}
+        }
+
+        let frames = vec![frame(0.5, 0), frame(0.5, 100)];
+        let source: Box<dyn AudioSource> = Box::new(MockAudioSource::new(frames));
+        let results = VecDeque::from(vec![
+            StreamingResult::new("good", false),
+            StreamingResult::new("good morning", false),
+        ]);
+
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+        let session = Session::spawn_streaming(
+            Box::new(Scripted(results)),
+            source,
+            sink,
+            None,
+            AudioSourceKind::Microphone,
+        );
+        session.join().unwrap();
+
+        let segs: Vec<(u64, String, SegmentStatus)> = rx
+            .try_iter()
+            .map(|e| match e {
+                TranscriptEvent::Segment(s) => (s.id, s.text, s.status),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        assert_eq!(
+            segs,
+            vec![
+                (0, "good".to_owned(), SegmentStatus::Partial),
+                (0, "good morning".to_owned(), SegmentStatus::Partial),
+                (0, "good morning".to_owned(), SegmentStatus::Final),
+            ],
+            "the open utterance's last partial is re-emitted as a Final (same id) when the stream ends"
         );
     }
 
