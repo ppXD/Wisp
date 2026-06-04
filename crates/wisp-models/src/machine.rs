@@ -147,14 +147,67 @@ fn resolve(ideal: &str, catalog: &[ModelDescriptor]) -> ModelId {
 /// Whether an ASR model of `family` can actually run on a host with `accelerator`, so the picker only
 /// offers models this machine can start.
 ///
-/// The GPU whisper.cpp family is the macOS Metal engine and needs [`Accelerator::Metal`]; the
-/// CPU-ONNX families (SenseVoice, sherpa Whisper, streaming transducer) run on every platform. Pure,
-/// so the per-platform capability lives in one tested place rather than scattered `cfg` checks.
+/// The GPU whisper.cpp family is the macOS Metal engine and needs [`Accelerator::Metal`]; Apple
+/// on-device speech is macOS-only too (Metal is the macOS accelerator — the app layers the macOS-26
+/// runtime check on top). The CPU-ONNX families (SenseVoice, sherpa Whisper, streaming transducer) run
+/// on every platform. Pure, so the per-platform capability lives in one tested place rather than
+/// scattered `cfg` checks.
 pub fn family_runnable(family: ModelFamily, accelerator: Accelerator) -> bool {
     match family {
-        ModelFamily::WhisperCpp => accelerator == Accelerator::Metal,
+        ModelFamily::WhisperCpp | ModelFamily::AppleSpeech => accelerator == Accelerator::Metal,
         _ => true,
     }
+}
+
+/// How a model fits a host — for an honest picker that disables (with a reason) what can't run and
+/// flags what runs but heavily, instead of silently hiding either.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ModelFit {
+    /// Runs well on this machine.
+    Ready,
+    /// Runs, but is large for this machine's memory — selectable, with a caveat.
+    Heavy(String),
+    /// Can't run on this host at all — disabled in the picker, with the reason.
+    Blocked(String),
+}
+
+/// A model is "heavy" when its on-disk size times this factor exceeds the host's RAM — a coarse proxy
+/// for peak working-set pressure (weights load several times their size in scratch/activations). It
+/// only ever flags big models on small-RAM hosts; an ample machine flags nothing.
+const HEAVY_RAM_FACTOR: u64 = 6;
+
+/// Assesses how `descriptor` fits a host with `profile`: blocked (the platform can't run this family),
+/// heavy (runs but large for the RAM), or ready. Pure — the app layers the Apple-Speech macOS-26
+/// runtime check on top, the one capability that can't be read from the profile alone.
+pub fn model_fit(descriptor: &ModelDescriptor, profile: &MachineProfile) -> ModelFit {
+    if !family_runnable(descriptor.family, profile.accelerator) {
+        return ModelFit::Blocked(platform_block_reason(descriptor.family));
+    }
+
+    if descriptor
+        .total_size_bytes()
+        .saturating_mul(HEAVY_RAM_FACTOR)
+        > profile.ram_bytes
+    {
+        return ModelFit::Heavy(heavy_reason(profile.ram_bytes));
+    }
+
+    ModelFit::Ready
+}
+
+/// Why a family can't run on a host lacking its accelerator — the text shown on the greyed entry.
+fn platform_block_reason(family: ModelFamily) -> String {
+    match family {
+        ModelFamily::WhisperCpp => "Needs a macOS Metal GPU".to_owned(),
+        ModelFamily::AppleSpeech => "Needs macOS".to_owned(),
+        _ => "Not supported on this machine".to_owned(),
+    }
+}
+
+/// The caveat shown on a runnable-but-large model.
+fn heavy_reason(ram_bytes: u64) -> String {
+    const GIB: u64 = 1024 * 1024 * 1024;
+    format!("Large for {} GB RAM — may run slowly", ram_bytes / GIB)
 }
 
 #[cfg(test)]
@@ -231,6 +284,74 @@ mod tests {
                 "{accel:?} has no Metal whisper.cpp engine"
             );
         }
+    }
+
+    #[test]
+    fn apple_speech_runs_only_on_metal() {
+        // Apple's on-device recogniser is macOS-only (Metal is the macOS accelerator); every other
+        // accelerator must hide it. The macOS-26 runtime gate is layered on top in the app.
+        assert!(family_runnable(
+            ModelFamily::AppleSpeech,
+            Accelerator::Metal
+        ));
+        for accel in [
+            Accelerator::Cpu,
+            Accelerator::Cuda,
+            Accelerator::Vulkan,
+            Accelerator::DirectMl,
+        ] {
+            assert!(
+                !family_runnable(ModelFamily::AppleSpeech, accel),
+                "{accel:?} is not macOS — no Apple on-device speech"
+            );
+        }
+    }
+
+    #[test]
+    fn model_fit_blocks_metal_only_families_off_metal() {
+        let catalog = builtin_catalog();
+        let cpu = MachineProfile::new(Accelerator::Cpu, 16 * GIB);
+        for d in catalog
+            .iter()
+            .filter(|d| d.family == ModelFamily::WhisperCpp || d.family == ModelFamily::AppleSpeech)
+        {
+            assert!(
+                matches!(model_fit(d, &cpu), ModelFit::Blocked(_)),
+                "{:?} should be blocked off Metal",
+                d.id
+            );
+        }
+    }
+
+    #[test]
+    fn model_fit_is_ready_for_every_runnable_model_on_an_ample_machine() {
+        // A 64 GB Apple Silicon Mac runs everything comfortably — nothing blocked, nothing heavy.
+        let profile = MachineProfile::new(Accelerator::Metal, 64 * GIB);
+        for d in builtin_catalog() {
+            assert_eq!(model_fit(&d, &profile), ModelFit::Ready, "{:?}", d.id);
+        }
+    }
+
+    #[test]
+    fn model_fit_flags_big_models_heavy_on_a_small_ram_host_but_not_zero_download_ones() {
+        let catalog = builtin_catalog();
+        let small = MachineProfile::new(Accelerator::Metal, 8 * GIB);
+
+        let big = catalog
+            .iter()
+            .find(|d| d.id == ModelId("whisper-large-v3".to_owned()))
+            .expect("large-v3 in catalog");
+        assert!(
+            matches!(model_fit(big, &small), ModelFit::Heavy(_)),
+            "a 1.8 GB model is heavy on 8 GB"
+        );
+
+        // Apple on-device speech downloads nothing of ours (0 bytes), so it's never "heavy".
+        let apple = catalog
+            .iter()
+            .find(|d| d.family == ModelFamily::AppleSpeech)
+            .expect("apple speech in catalog");
+        assert_eq!(model_fit(apple, &small), ModelFit::Ready);
     }
 
     #[test]

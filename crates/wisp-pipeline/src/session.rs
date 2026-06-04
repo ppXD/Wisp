@@ -203,6 +203,13 @@ impl Session {
         }
     }
 
+    /// Signals the session to stop *without* waiting — its thread(s) observe the flag on their next
+    /// frame and wind down (flushing the trailing utterance). Call this up front, before a bounded
+    /// teardown, so a session stops capturing/emitting even if a later join wedges on a stuck device.
+    pub fn signal_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     /// Signals the session to stop and waits for its thread(s) to finish, returning the first
     /// error encountered. Use this for live sources (e.g. a microphone) that never end on their
     /// own.

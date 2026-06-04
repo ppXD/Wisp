@@ -7,6 +7,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -17,7 +18,8 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
-    MeetingMixer, MicSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS, TARGET_SAMPLE_RATE,
+    MeetingMixer, MicSource, MutedSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS,
+    TARGET_SAMPLE_RATE,
 };
 use wisp_core::aec::{EchoCanceller, PassthroughEchoCanceller};
 use wisp_core::audio::{AudioFrame, AudioSource, AudioSourceInfo};
@@ -28,9 +30,10 @@ use wisp_core::denoise::Denoiser;
 use wisp_core::diarize::{attribute_speakers_by_word, ClipDiarizer, SpeakerSpan};
 use wisp_core::engine::{AsrEngine, ClipOptions, StreamingAsrEngine};
 use wisp_core::error::{Result as WispResult, WispError};
-use wisp_core::export::{format_transcript, ExportFormat};
+use wisp_core::export::{format_markdown, format_transcript, ExportFormat, MeetingMeta};
 use wisp_core::model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
+use wisp_core::task::run_within;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::{
     batch_param_specs as cloud_batch_param_specs, build_assist_engine, build_realtime_engine,
@@ -38,15 +41,15 @@ use wisp_engine_cloud::{
     ChatRequest, CloudEngine,
 };
 use wisp_engine_sherpa::{
-    GtcrnDenoiser, SenseVoiceEngine, SherpaDiarizer, SherpaLiveDiarizer, SileroSegmenter,
-    StreamingTransducerEngine, WhisperEngine,
+    GtcrnDenoiser, ParaformerEngine, ParakeetEngine, SenseVoiceEngine, SherpaDiarizer,
+    SherpaLiveDiarizer, SileroSegmenter, StreamingTransducerEngine, WhisperEngine,
 };
 #[cfg(target_os = "windows")]
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
     builtin_catalog, cloud_catalog, coreml_asset, denoise_models, diarization_models,
-    family_runnable, recommended_accurate_model, recommended_default_model, Accelerator,
-    FsModelStore, GpuTier, HttpDownloader, MachineProfile,
+    family_runnable, model_fit, recommended_accurate_model, recommended_default_model, Accelerator,
+    FsModelStore, GpuTier, HttpDownloader, MachineProfile, ModelFit,
 };
 use wisp_pipeline::{
     remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, Segmenter,
@@ -55,6 +58,7 @@ use wisp_pipeline::{
 #[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
 
+mod dictation;
 mod permissions;
 
 /// Event channel the UI listens on for transcript segments.
@@ -105,6 +109,11 @@ const MIC_VAD_THRESHOLD: f32 = 0.012;
 struct AppState {
     store: Arc<FsModelStore>,
     sessions: Mutex<Vec<Session>>,
+    /// The push-to-talk dictation session, while the hotkey is held; `None` otherwise.
+    dictation: Mutex<Option<dictation::Dictation>>,
+    /// The configured dictation hotkey, and whether it's currently registered.
+    dictation_hotkey: Mutex<String>,
+    dictation_enabled: Mutex<bool>,
     active: Mutex<Option<ModelId>>,
     mic_device: Mutex<Option<String>>,
     system_device: Mutex<Option<String>>,
@@ -135,6 +144,13 @@ struct AppState {
     assist_finals_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Segments from the most recent file transcription, kept for export.
     file_segments: Mutex<Vec<TranscriptSegment>>,
+    /// Committed finals from the current/most-recent live session (both mic and system streams),
+    /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
+    live_segments: Mutex<Vec<TranscriptSegment>>,
+    /// Per-stream live mute flags shared with the running capture (via `MutedSource`), so the Live bar
+    /// can mute/unmute "You" (mic) and "Them" (system) mid-session. Reset to unmuted on each start.
+    mic_muted: Arc<AtomicBool>,
+    system_muted: Arc<AtomicBool>,
     /// File where the active model id is persisted, so the choice survives a restart.
     active_model_path: PathBuf,
     /// Per-provider cloud API keys, kept purely on-device (persisted to `cloud_keys_path`).
@@ -229,6 +245,11 @@ struct ModelInfoDto {
     coreml_installed: bool,
     /// Download size of the Core ML encoder, for its progress bar.
     coreml_size_bytes: u64,
+    /// How this model fits the host: `"ready"`, `"heavy"` (runs but large for the RAM), or `"blocked"`
+    /// (this OS/machine can't run it). The picker greys out `"blocked"` and hints on `"heavy"`.
+    fit: String,
+    /// The reason behind a `"heavy"` or `"blocked"` fit (e.g. "Needs macOS 26"); `None` when ready.
+    fit_reason: Option<String>,
 }
 
 /// Per-file transcription options sent from the UI as one object.
@@ -307,6 +328,33 @@ fn build_engine(
             Ok(Box::new(engine))
         }
         ModelFamily::WhisperCpp => build_whisper_cpp_engine(descriptor, dir, language),
+        ModelFamily::Paraformer => {
+            let model_name = descriptor
+                .files
+                .iter()
+                .find(|f| f.name.ends_with(".onnx"))
+                .map(|f| f.name.clone())
+                .ok_or_else(|| WispError::Model("paraformer model has no .onnx file".to_owned()))?;
+            let engine = ParaformerEngine::new(&dir.join(model_name), &dir.join("tokens.txt"))?;
+            Ok(Box::new(engine))
+        }
+        ModelFamily::Parakeet => {
+            let onnx = |needle: &str| {
+                descriptor
+                    .files
+                    .iter()
+                    .find(|f| f.name.contains(needle) && f.name.ends_with(".onnx"))
+                    .map(|f| dir.join(&f.name))
+            };
+            let encoder = onnx("encoder")
+                .ok_or_else(|| WispError::Model("parakeet model has no encoder".to_owned()))?;
+            let decoder = onnx("decoder")
+                .ok_or_else(|| WispError::Model("parakeet model has no decoder".to_owned()))?;
+            let joiner = onnx("joiner")
+                .ok_or_else(|| WispError::Model("parakeet model has no joiner".to_owned()))?;
+            let engine = ParakeetEngine::new(&encoder, &decoder, &joiner, &dir.join("tokens.txt"))?;
+            Ok(Box::new(engine))
+        }
         other => Err(WispError::Engine(format!(
             "no engine for model family {other:?} yet"
         ))),
@@ -443,6 +491,34 @@ fn build_whisper_cpp_engine(
     ))
 }
 
+/// Builds Apple's on-device streaming recogniser (macOS 26 SpeechAnalyzer) for the session language.
+/// No download — the OS owns the model; only the BCP-47 locale is resolved here. macOS only.
+#[cfg(target_os = "macos")]
+fn build_apple_speech_engine(language: &str) -> WispResult<Box<dyn StreamingAsrEngine>> {
+    let locale = wisp_applespeech::locale_for_language(language);
+    let engine = wisp_applespeech::AppleSpeechEngine::new(&locale)?;
+    Ok(Box::new(engine))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn build_apple_speech_engine(_language: &str) -> WispResult<Box<dyn StreamingAsrEngine>> {
+    Err(WispError::Engine(
+        "Apple on-device speech is only available on macOS".to_owned(),
+    ))
+}
+
+/// Whether Apple's on-device recogniser can run on this host right now (macOS 26+). Off macOS, or on an
+/// older macOS, it's `false` — the picker then hides the entry even though the catalog lists it.
+#[cfg(target_os = "macos")]
+fn apple_speech_available() -> bool {
+    wisp_applespeech::is_available()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn apple_speech_available() -> bool {
+    false
+}
+
 /// Builds the segmenter for a live session: the Silero neural VAD when its bundled model resolves,
 /// otherwise the dependency-free energy gate (so capture still works if the asset is missing).
 fn build_segmenter(app: &AppHandle, kind: AudioSourceKind) -> Box<dyn Segmenter> {
@@ -568,6 +644,36 @@ fn tap_for_assist(
     Box::new(ChannelSource::new(main_rx, info))
 }
 
+/// Wraps a live stream's source with its shared mute flag (mic = You, system = Them), so the Live bar
+/// can silence it mid-session. Any non-live kind is returned untouched.
+fn wrap_muted(
+    app: &AppHandle,
+    source: Box<dyn AudioSource>,
+    kind: AudioSourceKind,
+) -> Box<dyn AudioSource> {
+    let state = app.state::<AppState>();
+    let muted = match kind {
+        AudioSourceKind::Microphone => Arc::clone(&state.mic_muted),
+        AudioSourceKind::System => Arc::clone(&state.system_muted),
+        _ => return source,
+    };
+    Box::new(MutedSource::new(source, muted))
+}
+
+/// Mutes/unmutes a live stream — `"mic"` (You) or `"system"` (Them) — mid-session. The capture keeps
+/// running (so an echo far-end reference stays live) but the muted stream is silenced, so it stops
+/// producing transcription until unmuted.
+#[tauri::command]
+fn set_stream_muted(state: State<'_, AppState>, kind: String, muted: bool) -> Result<(), String> {
+    let flag = match kind.as_str() {
+        "mic" => &state.mic_muted,
+        "system" => &state.system_muted,
+        other => return Err(format!("unknown stream: {other}")),
+    };
+    flag.store(muted, Ordering::Relaxed);
+    Ok(())
+}
+
 /// Spawns one transcription session over `source`, tagging its segments with `kind` and
 /// forwarding them to the webview.
 ///
@@ -582,6 +688,9 @@ fn spawn_session(
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
     settings: &LiveSettings,
 ) -> WispResult<Session> {
+    // Gate the stream on its live mute flag, so the Live bar can mute "You"/"Them" mid-session.
+    let source = wrap_muted(app, source, kind);
+
     // The per-session denoiser and the event sink (cross-stream echo dedup on finals) are the same
     // regardless of engine kind, so build them once up front.
     let denoiser = settings
@@ -609,6 +718,7 @@ fn spawn_session(
                 // speaker-attributed text — the diarized anchor the model trusts over its own ASR.
                 if matches!(segment.status, SegmentStatus::Final) {
                     route_assist_final(&emitter, &segment);
+                    retain_live_segment(&emitter, &segment);
                 }
             }
         }
@@ -673,6 +783,15 @@ fn spawn_session(
     // on its own thread, so it never stalls capture or drops audio mid-sentence.
     if descriptor.family == ModelFamily::StreamingTransducer {
         let engine = build_streaming_engine(descriptor, dir)?;
+        return Ok(Session::spawn_streaming(
+            engine, source, sink, denoiser, kind,
+        ));
+    }
+
+    // Apple's on-device recogniser self-segments and streams volatile/final results, so it drives the
+    // streaming pipeline directly too — no local VAD, decode loop, or model files.
+    if descriptor.family == ModelFamily::AppleSpeech {
+        let engine = build_apple_speech_engine(&settings.language)?;
         return Ok(Session::spawn_streaming(
             engine, source, sink, denoiser, kind,
         ));
@@ -817,7 +936,9 @@ fn to_model_info(
     live_rec: Option<&ModelId>,
     file_rec: Option<&ModelId>,
 ) -> ModelInfoDto {
-    let installed = store.local_path(&d.id).is_some();
+    // An OS-provided model (no files of ours, e.g. Apple on-device speech) is always "installed" —
+    // there's nothing to download, so the picker shows it ready rather than gating it behind a fetch.
+    let installed = d.files.is_empty() || store.local_path(&d.id).is_some();
     let is_active = active == Some(&d.id);
     let recommended_live = live_rec == Some(&d.id);
     let recommended_file = file_rec == Some(&d.id);
@@ -844,7 +965,42 @@ fn to_model_info(
         coreml_available: coreml.is_some(),
         coreml_installed,
         coreml_size_bytes,
+        // Defaults to a comfortable fit; the ASR picker overwrites these per machine (support-model
+        // lists — diarization/denoise — are CPU-ONNX and always ready, so they keep the default).
+        fit: "ready".to_owned(),
+        fit_reason: None,
     }
+}
+
+/// Overwrites a DTO's `fit`/`fit_reason` from a [`ModelFit`] verdict — the bridge between the pure
+/// machine assessment and the picker's UI fields.
+fn apply_fit(dto: &mut ModelInfoDto, fit: ModelFit) {
+    let (kind, reason) = match fit {
+        ModelFit::Ready => ("ready", None),
+        ModelFit::Heavy(reason) => ("heavy", Some(reason)),
+        ModelFit::Blocked(reason) => ("blocked", Some(reason)),
+    };
+
+    dto.fit = kind.to_owned();
+    dto.fit_reason = reason;
+
+    // A model the host can't run is never "ready to start" — surface it greyed, not as installed.
+    if dto.fit == "blocked" {
+        dto.installed = false;
+    }
+}
+
+/// The host fit for a catalog `descriptor`, layering the Apple-Speech macOS-26 runtime check (which the
+/// pure assessment can't see) on top of [`model_fit`]: on a Mac too old for the API, mark it blocked.
+fn assess_fit(descriptor: &ModelDescriptor, machine: &MachineProfile) -> ModelFit {
+    if descriptor.family == ModelFamily::AppleSpeech
+        && family_runnable(descriptor.family, machine.accelerator)
+        && !apple_speech_available()
+    {
+        return ModelFit::Blocked("Needs macOS 26 or newer".to_owned());
+    }
+
+    model_fit(descriptor, machine)
 }
 
 #[tauri::command]
@@ -864,35 +1020,36 @@ fn list_models(state: State<'_, AppState>) -> Result<Vec<ModelInfoDto>, String> 
         // Only transcription models belong in the ASR picker — diarization and denoise are support
         // models with their own pickers.
         .filter(|d| d.family.is_asr())
-        // Only offer models this machine can actually start — e.g. the Metal whisper.cpp models are
-        // hidden off macOS, where building their engine would fail.
-        .filter(|d| family_runnable(d.family, machine.accelerator))
+        // Don't hide what this host can't run — surface every ASR model, tagging each with how it fits
+        // (ready / heavy / blocked) so the picker greys out the unrunnable ones with a reason.
         .map(|d| {
-            to_model_info(
+            let fit = assess_fit(&d, &machine);
+            let mut dto = to_model_info(
                 d,
                 &state.store,
                 active.as_ref(),
                 Some(&live_rec),
                 Some(&file_rec),
-            )
+            );
+            apply_fit(&mut dto, fit);
+            dto
         })
         .collect();
 
-    // Append the user's imported custom models — always installed, gated by the same runnability
-    // rule (a Metal-only `.bin` stays hidden off macOS).
+    // Append the user's imported custom models — always installed, tagged with the same fit (a
+    // Metal-only `.bin` shows greyed "Needs a macOS Metal GPU" off macOS rather than silently vanishing).
     let custom = state
         .custom_models
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?;
     for cm in custom.iter() {
-        let Some(family) = custom_family(&cm.kind) else {
+        let Some(mut info) = custom_model_info(cm, active.as_ref()) else {
             continue;
         };
-        if family_runnable(family, machine.accelerator) {
-            if let Some(info) = custom_model_info(cm, active.as_ref()) {
-                models.push(info);
-            }
+        if let Some(descriptor) = custom_descriptor(cm) {
+            apply_fit(&mut info, assess_fit(&descriptor, &machine));
         }
+        models.push(info);
     }
 
     Ok(models)
@@ -1947,6 +2104,9 @@ fn custom_model_info(cm: &CustomModel, active: Option<&ModelId>) -> Option<Model
         coreml_available: false,
         coreml_installed: false,
         coreml_size_bytes: 0,
+        // The caller (`list_models`) overwrites these from the machine fit; a comfortable default here.
+        fit: "ready".to_owned(),
+        fit_reason: None,
     })
 }
 
@@ -1957,10 +2117,16 @@ fn resolve_local_model(
     id: &ModelId,
 ) -> Result<(ModelDescriptor, PathBuf), String> {
     if let Some(descriptor) = state.store.available().into_iter().find(|d| d.id == *id) {
-        let dir = state
-            .store
-            .local_path(id)
-            .ok_or_else(|| format!("model '{}' is not downloaded yet", id.as_str()))?;
+        // A zero-file, OS-provided model (Apple on-device speech) has nothing to download — materialize
+        // its dir on first use rather than gating it behind a "not downloaded yet" error.
+        let dir = if descriptor.files.is_empty() {
+            state.store.ensure(id).map_err(|e| e.to_string())?
+        } else {
+            state
+                .store
+                .local_path(id)
+                .ok_or_else(|| format!("model '{}' is not downloaded yet", id.as_str()))?
+        };
         return Ok((descriptor, dir));
     }
 
@@ -2310,6 +2476,33 @@ fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
     Err("system-audio capture isn't available on this platform yet".to_owned())
 }
 
+/// How long [`open_mic_within`] waits for the microphone to come up before failing Start. A healthy
+/// device opens in well under a second; the budget covers first-use permission + a busy HAL. cpal's
+/// open can wedge indefinitely on a CoreAudio HAL left confused by a prior hard-kill, so bounding it
+/// turns "Start hangs forever" into a fast, actionable error.
+const MIC_STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Opens a microphone source (a named device, or the default) within [`MIC_STARTUP_TIMEOUT`] so a
+/// wedged audio system fails Start fast with a clear message instead of hanging it forever. On
+/// timeout the in-flight open is detached; it self-cleans when the HAL recovers.
+fn open_mic_within(device: Option<String>) -> Result<Box<dyn AudioSource>, String> {
+    run_within(
+        MIC_STARTUP_TIMEOUT,
+        move || -> Result<Box<dyn AudioSource>, String> {
+            let mic = match device {
+                Some(name) => MicSource::from_device(&name).map_err(|e| e.to_string())?,
+                None => MicSource::from_default().map_err(|e| e.to_string())?,
+            };
+            Ok(Box::new(mic))
+        },
+    )
+    .unwrap_or_else(|| {
+        Err(format!(
+            "microphone didn't start within {MIC_STARTUP_TIMEOUT:?} — it may be held by another app or the audio system is wedged. Restart the app, or reset audio with: sudo killall coreaudiod"
+        ))
+    })
+}
+
 /// The echo canceller for this platform: WebRTC AEC on macOS (falling back to passthrough if it
 /// won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>` lets the dual-stream
 /// path stay identical on every platform — the cross-stream dedup handles residual echo where there
@@ -2459,6 +2652,14 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
         return Err("a session is already running".to_owned());
     }
 
+    // Start a fresh meeting transcript for export — drop the previous session's retained finals.
+    if let Ok(mut retained) = state.live_segments.lock() {
+        retained.clear();
+    }
+    // Every stream starts unmuted; the Live bar's You/Them chips flip these mid-session.
+    state.mic_muted.store(false, Ordering::Relaxed);
+    state.system_muted.store(false, Ordering::Relaxed);
+
     let live_engine = resolve_live_engine(&state, &options)?;
     let language = state
         .language
@@ -2523,12 +2724,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
         .clone();
     let mic_source: Option<Box<dyn AudioSource>> = match mic_device {
         Some(name) if name == MIC_OFF_ID => None,
-        Some(name) => Some(Box::new(
-            MicSource::from_device(&name).map_err(|e| e.to_string())?,
-        )),
-        None => Some(Box::new(
-            MicSource::from_default().map_err(|e| e.to_string())?,
-        )),
+        device => Some(open_mic_within(device)?),
     };
 
     let system_device = state
@@ -2550,9 +2746,7 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
                 None
             }
         },
-        Some(name) => Some(Box::new(
-            MicSource::from_device(&name).map_err(|e| e.to_string())?,
-        )),
+        Some(name) => Some(open_mic_within(Some(name))?),
         None => None,
     };
 
@@ -2729,50 +2923,116 @@ async fn stop_session(app: AppHandle) -> Result<(), String> {
         .map_err(|e| format!("session stop task failed: {e}"))?
 }
 
-/// The blocking body of [`stop_session`]: signal each session to stop, join its threads, and tear
-/// down the system-audio tee.
+/// How long [`stop_session_blocking`] waits for the capture/assist threads to join before detaching
+/// them. State is cleared first, so on timeout the UI returns to idle and a new Start works at once
+/// while the stuck thread self-cleans when its OS resource unblocks.
+const STOP_TEARDOWN_TIMEOUT: Duration = Duration::from_secs(8);
+
+/// The live resources lifted out of [`AppState`] for teardown — joined off the Stop command so a
+/// wedged native handle (a stuck ScreenCaptureKit pump, a blocked engine drop) can never hang it.
+struct LiveTeardown {
+    worker: Option<AssistWorker>,
+    assist_tees: Vec<Tee>,
+    assist_audio: Option<Box<dyn AudioSource>>,
+    tee: Option<Tee>,
+    sessions: Vec<Session>,
+}
+
+/// The blocking body of [`stop_session`]: lift every live resource out of state (instant), then join
+/// its threads under a deadline so Stop can never hang.
 fn stop_session_blocking(app: AppHandle) -> Result<(), String> {
     let state = app.state::<AppState>();
 
+    let teardown = take_live_teardown(&state)?;
+
+    // Join the capture/assist threads off the command, bounded. If a native teardown wedges, detach
+    // it (it self-cleans when the OS resource unblocks) rather than hang Stop — state is already
+    // clear, so the app stays fully usable and a new Start works immediately.
+    match run_within(STOP_TEARDOWN_TIMEOUT, move || teardown_session(teardown)) {
+        Some(result) => result,
+        None => {
+            eprintln!(
+                "wisp: session teardown exceeded {STOP_TEARDOWN_TIMEOUT:?} — detaching (state already cleared)"
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Lifts the running session's resources out of [`AppState`], leaving it empty — fast and
+/// non-blocking (quick lock + take/`None`; dropping the finals sender just closes its channel), so
+/// the session is "gone" the instant this returns and a wedged teardown can't collide with a Start.
+fn take_live_teardown(state: &AppState) -> Result<LiveTeardown, String> {
     let sessions = std::mem::take(
         &mut *state
             .sessions
             .lock()
             .map_err(|_| "state lock poisoned".to_owned())?,
     );
+    // Signal every session to stop up front — non-blocking, so even if the bounded join below wedges
+    // on a stuck device and detaches, the sessions still wind down and stop emitting segments rather
+    // than lingering as a second live transcriber that bleeds into the next session's feed.
+    for session in &sessions {
+        session.signal_stop();
+    }
 
-    // Stop the realtime assist FIRST, while audio still flows — its loop sees the stop flag on the
-    // next frame and exits cleanly (closing its WebSocket). The global Stop ends the assist with the
-    // session; the returned mix source is dropped here (no restart once the session is gone). Drop the
-    // finals channel up front so the sink stops routing into a worker that's about to be joined.
-    // Drop the assist taps + parked mix BEFORE joining the assist worker: the worker blocks on its
-    // MixSource `recv`, fed by these tap tees, so closing them lets it observe end-of-stream and exit
-    // even if the capture device has wedged — otherwise the join below could hang on a recv nothing
-    // satisfies. (Stop routing finals first so the sink doesn't push into a dying worker.)
+    // Stop routing finals first so the sink doesn't push into a worker that's about to be joined.
     *state
         .assist_finals_tx
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = None;
-    *state
-        .assist_tees
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = Vec::new();
-    *state
+    let assist_tees = std::mem::take(
+        &mut *state
+            .assist_tees
+            .lock()
+            .map_err(|_| "state lock poisoned".to_owned())?,
+    );
+    let assist_audio = state
         .assist_audio
         .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = None;
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .take();
+    let worker = take_assist_worker(state)?;
+    let tee = state
+        .tee
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .take();
 
-    if let Some(worker) = take_assist_worker(&state)? {
+    Ok(LiveTeardown {
+        worker,
+        assist_tees,
+        assist_audio,
+        tee,
+        sessions,
+    })
+}
+
+/// Joins the live session's threads in dependency order, so no join waits on a channel a later step
+/// would have closed: close the assist taps (the worker's mixed input ends), join the assist worker,
+/// drop the system-audio tee (capture stops and the system session's source channel closes), then
+/// stop each transcription session. Returns the first session error, if any.
+fn teardown_session(t: LiveTeardown) -> Result<(), String> {
+    let LiveTeardown {
+        worker,
+        assist_tees,
+        assist_audio,
+        tee,
+        sessions,
+    } = t;
+
+    // Close the assist taps + drop any parked mix BEFORE joining the worker: it blocks on its mixed
+    // `recv` fed by these taps, so closing them lets it observe end-of-stream and exit even if the
+    // capture device wedged — otherwise the join could hang on a recv nothing satisfies.
+    drop(assist_tees);
+    drop(assist_audio);
+    if let Some(worker) = worker {
         let _ = worker.stop_join();
     }
 
-    // Tear down the system-audio tee — dropping it stops the pump + capture and closes the channels
-    // feeding the system session's source, so a blocking `recv` returns `None` and the capture loop
-    // exits. Joining the live sessions before this would deadlock on a recv the dead tee never feeds.
-    *state
-        .tee
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())? = None;
+    // Dropping the tee stops the capture pump and closes the system session's source channel, so its
+    // blocking `recv` returns `None`. Joining the sessions before this would deadlock on that recv.
+    drop(tee);
 
     let mut last_error = None;
     for session in sessions {
@@ -2839,6 +3099,14 @@ fn route_assist_final(app: &AppHandle, segment: &TranscriptSegment) {
 
     if let Some(tx) = guard.as_ref() {
         let _ = tx.send(assist_final_text(segment));
+    }
+}
+
+/// Retains one committed live final for export (the meeting transcript), accumulated across both the
+/// mic and system streams. Best-effort: a poisoned lock just drops it from the export, never the feed.
+fn retain_live_segment(app: &AppHandle, segment: &TranscriptSegment) {
+    if let Ok(mut segments) = app.state::<AppState>().live_segments.lock() {
+        segments.push(segment.clone());
     }
 }
 
@@ -3413,23 +3681,64 @@ fn gate_clip(app: &AppHandle, audio: &[f32]) -> GatedClip {
     GatedClip::from_utterances(utterances)
 }
 
-/// Writes the most recent file transcription to `dest` in `format` (`txt`/`srt`/`vtt`).
+/// Meeting metadata the frontend supplies for a Markdown export — everything the pure formatter can't
+/// derive from the segments. All optional; the document degrades gracefully when fields are absent.
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarkdownMetaInput {
+    title: Option<String>,
+    date: Option<String>,
+    engine: Option<String>,
+    language: Option<String>,
+    summary: Option<String>,
+}
+
+impl From<MarkdownMetaInput> for MeetingMeta {
+    fn from(m: MarkdownMetaInput) -> Self {
+        MeetingMeta {
+            title: m.title,
+            date: m.date,
+            engine: m.engine,
+            language: m.language,
+            summary: m.summary,
+        }
+    }
+}
+
+/// Writes a transcript to `dest` in `format` (`txt`/`srt`/`vtt`/`md`). `source` selects which transcript
+/// — `"live"` (the meeting just captured) or `"file"` (the most recent file transcription, the default).
+/// `meta` carries the meeting metadata used by the Markdown format and is ignored by the others.
 #[tauri::command]
 fn export_transcript(
     state: State<'_, AppState>,
     format: String,
     dest: String,
+    source: Option<String>,
+    meta: Option<MarkdownMetaInput>,
 ) -> Result<(), String> {
     let format =
         ExportFormat::from_name(&format).ok_or_else(|| format!("unknown format: {format}"))?;
-    let segments = state
-        .file_segments
+
+    let buffer = match source.as_deref() {
+        Some("live") => &state.live_segments,
+        _ => &state.file_segments,
+    };
+    let mut segments = buffer
         .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?;
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
     if segments.is_empty() {
-        return Err("nothing to export — transcribe a file first".to_owned());
+        return Err("nothing to export — transcribe or record first".to_owned());
     }
-    let content = format_transcript(&segments, format);
+
+    // Mic and system finals arrive interleaved by finalization time; order by start so the document
+    // reads in speech order rather than arrival order.
+    segments.sort_by_key(|s| s.start);
+
+    let content = match format {
+        ExportFormat::Markdown => format_markdown(&segments, &meta.unwrap_or_default().into()),
+        other => format_transcript(&segments, other),
+    };
     fs::write(&dest, content).map_err(|e| format!("write {dest}: {e}"))?;
     Ok(())
 }
@@ -3439,6 +3748,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(dictation::shortcut_plugin())
         .setup(|app| {
             let data_dir = app.path().app_data_dir()?;
             let active_model_path = data_dir.join("active-model");
@@ -3478,6 +3788,9 @@ pub fn run() {
             app.manage(AppState {
                 store,
                 sessions: Mutex::new(Vec::new()),
+                dictation: Mutex::new(None),
+                dictation_hotkey: Mutex::new(dictation::DEFAULT_DICTATION_HOTKEY.to_owned()),
+                dictation_enabled: Mutex::new(false),
                 active: Mutex::new(active),
                 mic_device: Mutex::new(None),
                 // Default to capturing everything: mic (you) + system audio (all scenarios).
@@ -3493,6 +3806,9 @@ pub fn run() {
                 assist_worker: Mutex::new(None),
                 assist_finals_tx: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
+                live_segments: Mutex::new(Vec::new()),
+                mic_muted: Arc::new(AtomicBool::new(false)),
+                system_muted: Arc::new(AtomicBool::new(false)),
                 active_model_path,
                 cloud_keys: Mutex::new(cloud_keys),
                 cloud_keys_path,
@@ -3545,10 +3861,22 @@ pub fn run() {
             stop_assist_realtime,
             assist_hint_now,
             transcribe_file,
-            export_transcript
+            export_transcript,
+            dictation::dictation_status,
+            dictation::set_dictation_enabled,
+            dictation::open_accessibility_settings,
+            set_stream_muted
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Release audio capture on quit so an abrupt exit never leaves the CoreAudio HAL or
+            // ScreenCaptureKit wedged for the next launch. Bounded (it reuses the stop teardown), so a
+            // stuck native handle can't hang the quit either; a no-op when nothing is running.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                let _ = stop_session_blocking(app_handle.clone());
+            }
+        });
 }
 
 #[cfg(test)]

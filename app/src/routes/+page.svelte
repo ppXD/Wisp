@@ -8,10 +8,9 @@
   import { onDestroy, onMount } from "svelte";
   import { fly } from "svelte/transition";
   import Modal from "$lib/Modal.svelte";
-  import CloudPicker from "$lib/CloudPicker.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
-  import EndpointsManager from "$lib/EndpointsManager.svelte";
+  import Settings from "$lib/Settings.svelte";
   import {
     refreshCloud,
     cloudReady,
@@ -53,6 +52,10 @@
     coremlAvailable: boolean;
     coremlInstalled: boolean;
     coremlSizeBytes: number;
+    // How the model fits this machine: "ready" | "heavy" (runs but large for the RAM) | "blocked"
+    // (this OS/machine can't run it). Blocked models are shown greyed with the reason, never started.
+    fit: string;
+    fitReason?: string | null;
   };
 
   let running = $state(false);
@@ -62,6 +65,23 @@
   // True while a session is tearing down (joining the capture/socket threads) — same smooth
   // disabled + spinner treatment on the Stop button.
   let stopping = $state(false);
+  // True once a start has been "Connecting" long enough to be worth telling the user it's loading the
+  // model — a slow first run is progress, not a hang, but it looks like one without a hint.
+  let slowStart = $state(false);
+  // Elapsed recording time (ms), driving the live "Recording · M:SS" readout. Ticks every 250ms
+  // while a session runs and resets to 0 when it stops.
+  let elapsedMs = $state(0);
+  $effect(() => {
+    if (!running) {
+      elapsedMs = 0;
+      return;
+    }
+
+    const started = Date.now();
+    elapsedMs = 0;
+    const id = setInterval(() => (elapsedMs = Date.now() - started), 250);
+    return () => clearInterval(id);
+  });
   let error = $state("");
   // Non-fatal notice from a started session (e.g. system audio unavailable → mic-only).
   let liveNotice = $state("");
@@ -85,6 +105,18 @@
   let systemAudioId = $state("");
   let micOffId = $state("");
   let mode = $state<"live" | "file">("live");
+
+  // Collapsible left rail: collapsed (icon-only) by default; expands to icon + label rows. Persisted.
+  let sidebarExpanded = $state(false);
+  function toggleSidebar() {
+    sidebarExpanded = !sidebarExpanded;
+    try {
+      localStorage.setItem("wisp.sidebarExpanded", String(sidebarExpanded));
+    } catch {
+      /* storage unavailable — keep the choice for this session only */
+    }
+  }
+
   // Settings modals (replace the old inline disclosures, so opening them never shifts the layout).
   let liveAdvancedOpen = $state(false);
   let fileOptionsOpen = $state(false);
@@ -96,11 +128,24 @@
 
   const activeModel = $derived(models.find((m) => m.active));
 
+  // Segments with actual text (a freshly-opened partial can be momentarily empty — never show a blank row).
+  const liveSegments = $derived(segments.filter((s) => s.text.trim().length > 0));
+  // Only label each row's source (You/Them) when both are present — otherwise the repeated tag is noise.
+  const multiSource = $derived(new Set(liveSegments.map((s) => s.source)).size > 1);
+
   // Each mode remembers its own model — File leans accurate, Live leans real-time — persisted across
   // restarts and seeded from the per-mode recommendation on first run. The picker shows the current
   // mode's pick.
   let liveModelId = $state("");
   let fileModelId = $state("");
+  // Engine + cloud selection per mode (the catalog/keys live in $lib/cloud.svelte; these are this
+  // screen's current picks). The unified "Transcribe with" dropdown drives all of these.
+  let fileEngine = $state<"local" | "cloud">("local");
+  let fileCloudProvider = $state("");
+  let fileCloudModel = $state("");
+  let liveEngine = $state<"local" | "cloud">("local");
+  let liveCloudProvider = $state("");
+  let liveCloudModel = $state("");
   const chosenId = $derived(mode === "file" ? fileModelId : liveModelId);
   const chosenModel = $derived(models.find((m) => m.id === chosenId));
 
@@ -115,14 +160,16 @@
     }
   }
 
-  // Seed an unset mode from its recommendation once models load.
+  // Seed an unset mode from its recommendation once models load. Never seed a blocked model (one this
+  // machine can't run) — fall back to the first runnable one.
   $effect(() => {
     if (!models.length) return;
+    const firstRunnable = models.find((m) => m.fit !== "blocked") ?? models[0];
     if (!liveModelId)
       liveModelId =
         models.find((m) => m.recommendedLive)?.id ??
-        models.find((m) => m.active)?.id ??
-        models[0].id;
+        models.find((m) => m.active && m.fit !== "blocked")?.id ??
+        firstRunnable.id;
     if (!fileModelId) fileModelId = models.find((m) => m.recommendedFile)?.id ?? liveModelId;
   });
 
@@ -133,9 +180,10 @@
     if (m?.installed && !m.active) selectModel(chosenId);
   });
 
-  // Ready to start once the *chosen* model is installed. Picking a not-yet-downloaded model must
-  // never silently run a different (previously-active) model — Live and File both gate on this.
-  const canStart = $derived(!!chosenModel?.installed);
+  // Ready to start once the *chosen* model is installed and this machine can actually run it. Picking
+  // a not-yet-downloaded (or blocked) model must never silently run a different model — Live and File
+  // both gate on this.
+  const canStart = $derived(!!chosenModel?.installed && chosenModel?.fit !== "blocked");
 
   async function pickModel(id: string) {
     if (mode === "file") fileModelId = id;
@@ -154,8 +202,13 @@
   // Curated model dropdown. One clear "Recommended for this machine" up top (accuracy for File,
   // real-time for Live), the user's other installed models next, and everything else under "More".
   let pickerOpen = $state(false);
+  // Which top tab the open dropdown shows — On-device vs Cloud. The left column lists that tab's
+  // categories (families / providers); the right column lists the selected category's models.
+  let pickerTab = $state<"local" | "cloud">("local");
+  // The category selected within the active tab — "local:<Family>" or "cloud:<providerId>".
+  let pickerCat = $state<string>("");
   // This machine has a GPU Whisper engine if the catalog surfaced any (the backend hides them off
-  // Metal); when it does, the CPU-ONNX Whisper models are strictly worse, so they drop to "More".
+  // Metal); when it does, the CPU-ONNX Whisper models are strictly worse, so they sort last.
   const hasGpuWhisper = $derived(models.some((m) => m.family === "WhisperCpp"));
   const isRedundant = (m: ModelInfo) => hasGpuWhisper && m.family === "Whisper";
   const recommendedId = $derived(
@@ -164,17 +217,104 @@
       : models.find((m) => m.recommendedLive)
     )?.id,
   );
-  const recommendedModel = $derived(models.find((m) => m.id === recommendedId));
   const recommendTag = $derived(mode === "file" ? "best accuracy" : "for this machine");
-  const installedPrimary = $derived(
-    models.filter((m) => m.installed && m.id !== recommendedId && !isRedundant(m)),
+
+  // ── On-device categories: group local models by engine family (the left column's "On-device" rows) ─
+  const FAMILY_ORDER = ["Apple", "Whisper", "SenseVoice", "Paraformer", "Parakeet", "Streaming"];
+  // Map a raw engine family ("AppleSpeech"/"WhisperCpp"/…) to its user-facing category label.
+  function familyLabel(family: string): string {
+    if (family === "AppleSpeech") return "Apple";
+    if (family === "SenseVoice") return "SenseVoice";
+    if (family === "Paraformer") return "Paraformer";
+    if (family === "Parakeet") return "Parakeet";
+    if (family === "StreamingTransducer") return "Streaming";
+    return "Whisper";
+  }
+  const localCategories = $derived(
+    FAMILY_ORDER.filter((label) => models.some((m) => familyLabel(m.family) === label)).map(
+      (label) => ({ key: `local:${label}`, label }),
+    ),
   );
-  const moreModels = $derived(
-    models.filter((m) => m.id !== recommendedId && (!m.installed || isRedundant(m))),
+  // Models in one on-device category, best first (recommended → installed → rest), blocked last.
+  function localModelsFor(label: string): ModelInfo[] {
+    const rank = (m: ModelInfo) =>
+      (m.fit === "blocked" ? 100 : 0) +
+      (m.id === recommendedId ? 0 : m.installed ? 1 : isRedundant(m) ? 3 : 2);
+    return models.filter((m) => familyLabel(m.family) === label).sort((a, b) => rank(a) - rank(b));
+  }
+
+  // ── Unified "Transcribe with": one dropdown listing on-device + cloud models (mode-aware) ──────────
+  // The left column picks a category (family / provider); the right column lists that category's models.
+  const currentEngine = $derived(mode === "file" ? fileEngine : liveEngine);
+  const cloudCapability = $derived(mode === "file" ? "batch" : "streaming");
+  const currentCloudProvider = $derived(mode === "file" ? fileCloudProvider : liveCloudProvider);
+  const currentCloudModel = $derived(mode === "file" ? fileCloudModel : liveCloudModel);
+
+  // Cloud providers that have at least one model runnable in this mode (streaming for Live, batch for
+  // File) — the left column's "Cloud" rows.
+  const runnableCloudModels = (p: (typeof cloudState.providers)[number]) =>
+    p.models.filter((m) => (cloudCapability === "streaming" ? m.streaming || m.batch : m.batch));
+  const cloudProviders = $derived(cloudState.providers.filter((p) => runnableCloudModels(p).length));
+  const cloudCategories = $derived(
+    cloudProviders.map((p) => ({ key: `cloud:${p.id}`, label: p.name, keySet: p.keySet })),
   );
+
+  // The category that owns the current selection — the picker opens focused on it.
+  const currentCat = $derived(
+    currentEngine === "cloud"
+      ? `cloud:${currentCloudProvider}`
+      : `local:${familyLabel(chosenModel?.family ?? "")}`,
+  );
+  // The right column's content for the active category.
+  const pickerLocalLabel = $derived(pickerCat.startsWith("local:") ? pickerCat.slice(6) : "");
+  const pickerCatProvider = $derived(
+    pickerCat.startsWith("cloud:") ? cloudProvider(pickerCat.slice(6)) : undefined,
+  );
+
+  // Whether a given local model / cloud option is the current selection (only one engine is active).
+  const localSelected = (id: string) => currentEngine === "local" && id === chosenId;
+  const cloudSelected = (providerId: string, modelId: string) =>
+    currentEngine === "cloud" && providerId === currentCloudProvider && modelId === currentCloudModel;
+
+  // The current selection's display name, for the trigger.
+  const sourceName = $derived(
+    currentEngine === "cloud"
+      ? (cloudProvider(currentCloudProvider)?.models.find((m) => m.id === currentCloudModel)?.name ??
+          "Select a model")
+      : (chosenModel?.name ?? "Select a model"),
+  );
+
+  // Switch the top tab and land on a sensible category: the current selection's if it lives in this
+  // tab, otherwise the tab's first category.
+  function selectTab(tab: "local" | "cloud") {
+    pickerTab = tab;
+    const keys = (tab === "local" ? localCategories : cloudCategories).map((c) => c.key);
+    pickerCat = keys.includes(currentCat) ? currentCat : (keys[0] ?? "");
+  }
+
+  // Toggle the picker; on open, focus the tab + category that own the current selection.
+  function openModelPicker() {
+    pickerOpen = !pickerOpen;
+    if (pickerOpen) selectTab(currentEngine);
+  }
+
+  function chooseCloud(providerId: string, modelId: string) {
+    pickerOpen = false;
+    if (mode === "file") {
+      fileEngine = "cloud";
+      fileCloudProvider = providerId;
+      fileCloudModel = modelId;
+    } else {
+      liveEngine = "cloud";
+      liveCloudProvider = providerId;
+      liveCloudModel = modelId;
+    }
+  }
 
   async function choose(id: string) {
     pickerOpen = false;
+    if (mode === "file") fileEngine = "local";
+    else liveEngine = "local";
     await pickModel(id);
   }
 
@@ -285,6 +425,59 @@
     }
   }
 
+  // Quick mic/system toggles for the Live bar — the "You" (mic) and "Them" (system) chips. The
+  // specific-device choice stays in Advanced; these just flip each stream on/off with a sensible
+  // default (mic → system default; system → one-click system audio).
+  const micOn = $derived(micDevice !== micOffId);
+  const systemOn = $derived(!!systemDevice);
+
+  function toggleMic() {
+    micDevice = micOn ? micOffId : "";
+    applyDevices();
+  }
+  function toggleSystem() {
+    systemDevice = systemOn ? "" : systemAudioId;
+    applyDevices();
+  }
+
+  // While a live session runs, the same chips mute/unmute the streams that were started (capture keeps
+  // running; a muted stream is silenced so it stops transcribing). The per-stream mute state is
+  // tracked here and reset at Start.
+  let liveMicMuted = $state(false);
+  let liveSystemMuted = $state(false);
+
+  async function setStreamMuted(kind: "mic" | "system", muted: boolean) {
+    try {
+      await invoke("set_stream_muted", { kind, muted });
+    } catch (e) {
+      error = String(e);
+    }
+  }
+
+  // You/Them are always shown — pre-start each toggles whether that audio is captured; during a live
+  // session each mutes/unmutes its stream so you can drop or add a source on the fly.
+  const youShown = true;
+  const youOn = $derived(running ? !liveMicMuted : micOn);
+  function youClick() {
+    if (running) {
+      liveMicMuted = !liveMicMuted;
+      setStreamMuted("mic", liveMicMuted);
+    } else {
+      toggleMic();
+    }
+  }
+
+  const themShown = true;
+  const themOn = $derived(running ? !liveSystemMuted : systemOn);
+  function themClick() {
+    if (running) {
+      liveSystemMuted = !liveSystemMuted;
+      setStreamMuted("system", liveSystemMuted);
+    } else {
+      toggleSystem();
+    }
+  }
+
   async function applyLanguage() {
     try {
       await invoke("set_language", { language });
@@ -382,6 +575,10 @@
   async function ensureListener() {
     if (unlisten) return;
     unlisten = await listen<Segment>("transcript://segment", (event) => {
+      // The moment Stop is pressed (or after it lands), ignore any further emissions so a session that
+      // is tearing down — slowly, if a native handle wedged — can't keep adding rows. The already-shown
+      // transcript stays for export; it just stops growing.
+      if (!running || stopping) return;
       // Upsert by (source, id): a provisional partial creates a row, later partials of the same
       // utterance update it in place, and the final replaces it (dropping the .partial styling).
       const incoming = event.payload;
@@ -441,7 +638,13 @@
       error = "Download the speaker model first.";
       return;
     }
+    // Fresh session = fresh feed: the backend resets its segment ids to 0 and clears the export buffer
+    // per session, so a lingering previous transcript would collide by (source, id) and interleave two
+    // different time bases. Clear it here (export the old one first if you need it).
+    segments = [];
     starting = true;
+    slowStart = false;
+    const slowTimer = setTimeout(() => (slowStart = true), 4000);
     try {
       // Local-only prep (the cloud engine self-segments and denoises server-side); the device and
       // language selections apply to both.
@@ -467,6 +670,9 @@
       });
       liveNotice = notice ?? "";
       running = true;
+      // Both streams start unmuted; the live You/Them chips flip these mid-session.
+      liveMicMuted = false;
+      liveSystemMuted = false;
       // Capture started, so the permissions it needed are granted — clear any stale prompts
       // (macOS can report a stale status to a running process after a Settings change).
       screenAuthorized = true;
@@ -477,7 +683,9 @@
       await syncRunning();
       error = running ? "" : String(e);
     } finally {
+      clearTimeout(slowTimer);
       starting = false;
+      slowStart = false;
     }
   }
 
@@ -580,14 +788,6 @@
   });
 
   // Engine choice per mode: the active on-device model, or a cloud provider/model. The provider
-  // catalog and saved-key flags live in the shared cloud store ($lib/cloud.svelte); these are just
-  // this screen's current selections. Cloud picking/keys are handled by <CloudPicker> + the store.
-  let fileEngine = $state<"local" | "cloud">("local");
-  let fileCloudProvider = $state("");
-  let fileCloudModel = $state("");
-  let liveEngine = $state<"local" | "cloud">("local");
-  let liveCloudProvider = $state("");
-  let liveCloudModel = $state("");
 
   const liveProv = $derived(cloudProvider(liveCloudProvider));
   const liveMod = $derived(liveProv?.models.find((m) => m.id === liveCloudModel));
@@ -608,6 +808,8 @@
   // Live AI assist: a right-side drawer running the same LLM tasks over the live transcript (finals
   // only), on demand. Auto-rolling refresh is a later refinement.
   let liveAssistOpen = $state(false);
+  // Whether the transcript's compact "Export ▾" menu is open (collapses MD/TXT/SRT into one control).
+  let exportMenuOpen = $state(false);
   let liveBodyEl = $state<HTMLElement | null>(null);
   const ASSIST_MIN = 320;
   const TRANSCRIPT_MIN = 360;
@@ -870,19 +1072,54 @@
     }
   }
 
-  async function exportFile(format: string) {
-    if (!fileSegments.length) return;
-    const base = (fileName || "transcript").replace(/\.[^.]+$/, "");
+  // Meeting metadata for a Markdown export — the bits the Rust formatter can't derive from the
+  // transcript (date, model, language). The backend appends nothing; the serializer derives duration +
+  // participants from the segments themselves.
+  function meetingMeta(title: string) {
+    return {
+      title,
+      date: new Date().toISOString().slice(0, 10),
+      engine: activeModel?.name,
+      language: language || undefined,
+    };
+  }
+
+  // Saves `source` ("file" or "live") as `format`, prompting for a destination. Markdown also carries
+  // the meeting metadata; the subtitle/text formats ignore it.
+  async function runExport(format: string, source: "file" | "live", base: string, title: string) {
     try {
       const dest = await save({
         defaultPath: `${base}.${format}`,
         filters: [{ name: format.toUpperCase(), extensions: [format] }],
       });
-      if (typeof dest === "string") await invoke("export_transcript", { format, dest });
+      if (typeof dest !== "string") return;
+      const args: Record<string, unknown> = { format, dest, source };
+      if (format === "md") args.meta = meetingMeta(title);
+      await invoke("export_transcript", args);
     } catch (e) {
       error = String(e);
     }
   }
+
+  async function exportFile(format: string) {
+    if (!fileSegments.length) return;
+    const base = (fileName || "transcript").replace(/\.[^.]+$/, "");
+    await runExport(format, "file", base, base);
+  }
+
+  // Export the live meeting transcript (mic + system finals retained by the backend this session).
+  async function exportLive(format: string) {
+    if (!segments.length) return;
+    const date = new Date().toISOString().slice(0, 10);
+    await runExport(format, "live", `meeting-${date}`, `Meeting ${date}`);
+  }
+
+  // Close the compact Export menu, then export in the chosen format.
+  function exportPick(format: string) {
+    exportMenuOpen = false;
+    exportLive(format);
+  }
+
 
   let fileListenersReady = false;
   async function ensureFileListeners() {
@@ -935,6 +1172,7 @@
       const saved = JSON.parse(localStorage.getItem("wisp.modelByMode") || "{}");
       if (saved.live) liveModelId = saved.live;
       if (saved.file) fileModelId = saved.file;
+      sidebarExpanded = localStorage.getItem("wisp.sidebarExpanded") === "true";
     } catch {
       /* ignore unreadable storage */
     }
@@ -961,32 +1199,94 @@
   });
 </script>
 
-<main class="app" class:wide={mode === "live" && liveAssistOpen && (running || segments.length)}>
-  <div class="brand">
-    <span class="brand-name">Wisp</span>
-  </div>
+<main
+  class="app"
+  class:live={mode === "live"}
+  class:wide={mode === "live" && liveAssistOpen && (running || segments.length)}
+>
+  <nav class="rail" class:expanded={sidebarExpanded}>
+    <!-- Collapse/expand handle: sits on the divider line, revealed on hover of the rail. -->
+    <button
+      class="rail-edge"
+      onclick={toggleSidebar}
+      title={sidebarExpanded ? "Collapse" : "Expand"}
+      aria-label={sidebarExpanded ? "Collapse sidebar" : "Expand sidebar"}
+    >
+      <svg
+        class="rail-chevron"
+        viewBox="0 0 16 16"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.8"
+        stroke-linecap="round"
+        stroke-linejoin="round"
+        aria-hidden="true"
+      >
+        <path d="M6 4l4 4-4 4" />
+      </svg>
+    </button>
 
-  <nav class="tabs">
-    <button class:active={mode === "live"} onclick={() => (mode = "live")}>Live</button>
-    <button class:active={mode === "file"} onclick={() => (mode = "file")}>File</button>
+    <div class="rail-nav">
+      <button
+        class="rail-item"
+        class:active={mode === "live"}
+        onclick={() => (mode = "live")}
+        title="Live"
+      >
+        <svg class="rail-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+          <circle cx="12" cy="12" r="6" />
+        </svg>
+        <span class="rail-label">Live</span>
+      </button>
+
+      <button
+        class="rail-item"
+        class:active={mode === "file"}
+        onclick={() => (mode = "file")}
+        title="File"
+      >
+        <svg
+          class="rail-ico"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4" />
+        </svg>
+        <span class="rail-label">File</span>
+      </button>
+    </div>
+
+    <div class="rail-spacer"></div>
+
+    <button
+      class="rail-item"
+      onclick={() => (cloudState.endpointsOpen = true)}
+      title="Settings"
+      aria-label="Settings"
+    >
+      <svg
+        class="rail-ico"
+        viewBox="0 0 24 24"
+        fill="none"
+        stroke="currentColor"
+        stroke-width="1.7"
+        stroke-linecap="round"
+        aria-hidden="true"
+      >
+        <circle cx="12" cy="12" r="3.2" />
+        <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" />
+      </svg>
+      <span class="rail-label">Settings</span>
+    </button>
   </nav>
 
-  <div class="toolbar">
-    {#if mode === "live" && (running || segments.length)}
-      <button
-        class="assist-launch"
-        class:on={liveAssistOpen}
-        onclick={() => (liveAssistOpen = !liveAssistOpen)}
-        title="AI Assist — live hints, notes & summary"
-      >
-        <span class="spark">✦</span> Assist
-      </button>
-    {/if}
-    <button class="models-trigger" onclick={() => (cloudState.endpointsOpen = true)} title="Manage AI models & endpoints">
-      ✦ Models
-    </button>
-  </div>
-  <EndpointsManager bind:open={cloudState.endpointsOpen} />
+  <Settings bind:open={cloudState.endpointsOpen} />
+
+  <div class="workspace">
 
   {#snippet modelPicker()}
     {#if models.length}
@@ -994,58 +1294,106 @@
         <button
           class="picker-trigger"
           class:open={pickerOpen}
-          onclick={() => (pickerOpen = !pickerOpen)}
+          onclick={openModelPicker}
           disabled={downloading !== null}
         >
-          <span class="picker-label">{chosenModel?.name ?? "Select a model"}</span>
+          <span class="picker-label">{sourceName}</span>
           <span class="picker-caret"></span>
         </button>
         {#if pickerOpen}
           <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
           ></button>
-          <div class="picker-menu" transition:fly={{ y: -6, duration: 120 }}>
-            <div class="picker-scroll">
-            {#if recommendedModel}
-              <div class="picker-section">Recommended</div>
-              <button
-                class="picker-opt"
-                class:sel={recommendedModel.id === chosenId}
-                onclick={() => choose(recommendedModel.id)}
-              >
-                <span class="picker-opt-name">{recommendedModel.name}</span>
-                <span class="picker-tag rec">{recommendTag}</span>
-                {#if recommendedModel.active}<span class="picker-tag">active</span>
-                {:else if !recommendedModel.installed}<span class="picker-opt-size"
-                    >{fmtSize(recommendedModel.sizeBytes)}</span
-                  >{/if}
+          <!-- Tabs (On-device | Cloud) up top; below, categories (left) → that category's models (right). -->
+          <div class="picker-menu wide" transition:fly={{ y: -6, duration: 120 }}>
+            <div class="picker-tabs">
+              <button class:active={pickerTab === "local"} onclick={() => selectTab("local")}>
+                On-device
+              </button>
+              <button class:active={pickerTab === "cloud"} onclick={() => selectTab("cloud")}>
+                Cloud
+              </button>
+            </div>
+            <div class="picker-panes">
+              <div class="picker-cats">
+                {#if pickerTab === "local"}
+                  {#each localCategories as c (c.key)}
+                    <button
+                      class="picker-cat"
+                      class:active={pickerCat === c.key}
+                      onclick={() => (pickerCat = c.key)}
+                    >
+                      <span class="picker-cat-name">{c.label}</span>
+                    </button>
+                  {/each}
+                {:else}
+                  {#each cloudCategories as c (c.key)}
+                    <button
+                      class="picker-cat"
+                      class:active={pickerCat === c.key}
+                      onclick={() => (pickerCat = c.key)}
+                    >
+                      <span class="picker-cat-name">{c.label}</span>
+                      {#if !c.keySet}<span class="picker-cat-dot" title="API key needed"></span>{/if}
+                    </button>
+                  {/each}
+                {/if}
+              </div>
+              <div class="picker-detail">
+                {#if pickerTab === "local"}
+                  {#each localModelsFor(pickerLocalLabel) as m (m.id)}
+                    {#if m.fit === "blocked"}
+                      <div class="picker-opt blocked" title={m.fitReason ?? ""}>
+                        <span class="picker-opt-name">{m.name}</span>
+                        <span class="picker-opt-note">{m.fitReason}</span>
+                      </div>
+                    {:else}
+                      <button
+                        class="picker-opt"
+                        class:sel={localSelected(m.id)}
+                        onclick={() => choose(m.id)}
+                      >
+                        <span class="picker-opt-name">{m.name}</span>
+                        {#if m.id === recommendedId}<span class="picker-tag rec">{recommendTag}</span>{/if}
+                        {#if m.active}<span class="picker-tag">active</span>
+                        {:else if !m.installed}<span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span
+                          >{/if}
+                        {#if m.fit === "heavy"}<span class="picker-opt-note">{m.fitReason}</span>{/if}
+                      </button>
+                    {/if}
+                  {/each}
+                {:else if pickerCatProvider}
+                  {#if !pickerCatProvider.keySet}
+                    <div class="picker-detail-hint">
+                      Add an API key in Settings → AI models to use {pickerCatProvider.name}.
+                    </div>
+                  {/if}
+                  {#each runnableCloudModels(pickerCatProvider) as m (m.id)}
+                    <button
+                      class="picker-opt"
+                      class:sel={cloudSelected(pickerCatProvider.id, m.id)}
+                      onclick={() => chooseCloud(pickerCatProvider.id, m.id)}
+                    >
+                      <span class="picker-opt-name">{m.name}</span>
+                      {#if m.recommended}<span class="picker-tag rec">recommended</span>{/if}
+                    </button>
+                  {/each}
+                {:else}
+                  <div class="picker-detail-hint">
+                    No cloud models yet — add a provider &amp; key in Settings → AI models.
+                  </div>
+                {/if}
+              </div>
+            </div>
+            {#if pickerTab === "local"}
+              <!-- Import a user model file (Whisper GGML/GGUF) — pinned across the whole dropdown. -->
+              <button class="picker-custom" onclick={importCustom}>
+                <span class="picker-custom-main">
+                  <span class="picker-custom-icon" aria-hidden="true"></span>
+                  <span class="picker-custom-label">Import custom model…</span>
+                </span>
+                <span class="picker-custom-hint">.bin / .gguf · Whisper GGML/GGUF</span>
               </button>
             {/if}
-            {#if installedPrimary.length}
-              <div class="picker-section">Installed</div>
-              {#each installedPrimary as m (m.id)}
-                <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
-                  <span class="picker-opt-name">{m.name}</span>
-                  {#if m.active}<span class="picker-tag">active</span>{/if}
-                </button>
-              {/each}
-            {/if}
-            {#if moreModels.length}
-              <div class="picker-section">More models</div>
-              {#each moreModels as m (m.id)}
-                <button class="picker-opt" class:sel={m.id === chosenId} onclick={() => choose(m.id)}>
-                  <span class="picker-opt-name">{m.name}</span>
-                  {#if m.active}<span class="picker-tag">active</span>
-                  {:else if !m.installed}<span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span
-                    >{/if}
-                </button>
-              {/each}
-            {/if}
-            </div>
-            <!-- Pinned at the bottom, always reachable regardless of how long the list is. -->
-            <button class="picker-custom" onclick={importCustom}>
-              <span class="picker-custom-label">Import custom model…</span>
-              <span class="picker-custom-hint">.bin / .gguf · Whisper GGML/GGUF</span>
-            </button>
           </div>
         {/if}
       </div>
@@ -1058,31 +1406,75 @@
     <section class="box">
       <div class="box-head">
         {#if running}
-          <span class="active-model"><span class="live-pip"></span>{liveRunningLabel}</span>
+          <span class="active-model">{liveRunningLabel}</span>
         {:else}
           <div class="engine-group">
-            <div class="seg engine-seg">
-              <button class:active={liveEngine === "local"} onclick={() => (liveEngine = "local")}
-                >On-device</button
-              >
-              <button class:active={liveEngine === "cloud"} onclick={() => (liveEngine = "cloud")}
-                >Cloud</button
-              >
-            </div>
-            {#if liveEngine === "local"}
-              {@render modelPicker()}
-            {:else}
-              <CloudPicker
-                bind:providerId={liveCloudProvider}
-                bind:modelId={liveCloudModel}
-                capability="streaming"
-              />
-            {/if}
+            <span class="source-prefix">Transcribe with</span>
+            {@render modelPicker()}
           </div>
         {/if}
-        <span class="status" class:live={running}>
+        <!-- You/Them: each pill toggles whether that audio is captured for transcription. The icon goes
+             slashed + grey when off (like a muted mic/speaker), accent + solid when on — read at a glance. -->
+        <div class="audio-chips">
+          {#if youShown}
+            <button
+              class="audio-chip"
+              class:on={youOn}
+              onclick={youClick}
+              title={youOn
+                ? running
+                  ? "You (your mic) is on — click to mute"
+                  : "You (your mic) is on — click to exclude from transcription"
+                : running
+                  ? "You (your mic) is muted — click to unmute"
+                  : "You (your mic) is off — click to include in transcription"}
+            >
+              {#if youOn}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                  <rect x="9" y="3" width="6" height="11" rx="3" />
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                </svg>
+              {:else}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
+                  <rect x="9" y="3" width="6" height="11" rx="3" />
+                  <path d="M5 11a7 7 0 0 0 14 0M12 18v3" />
+                  <path d="M4 3l16 18" />
+                </svg>
+              {/if}
+              <span class="chip-label">You</span>
+            </button>
+          {/if}
+          {#if themShown}
+            <button
+              class="audio-chip"
+              class:on={themOn}
+              onclick={themClick}
+              title={themOn
+                ? running
+                  ? "Them (system audio) is on — click to mute"
+                  : "Them (system audio) is on — click to exclude from transcription"
+                : running
+                  ? "Them (system audio) is muted — click to unmute"
+                  : "Them (system audio) is off — click to include in transcription"}
+            >
+              {#if themOn}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">
+                  <path d="M4 9v6h4l5 4V5L8 9H4z" />
+                  <path d="M16 9a4 4 0 0 1 0 6" />
+                </svg>
+              {:else}
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">
+                  <path d="M4 9v6h4l5 4V5L8 9H4z" />
+                  <path d="M16 10l4 4M20 10l-4 4" />
+                </svg>
+              {/if}
+              <span class="chip-label">Them</span>
+            </button>
+          {/if}
+        </div>
+        <span class="status" class:rec={running}>
           <span class="status-dot"></span>{running
-            ? "listening"
+            ? `Recording · ${fmtTime(elapsedMs)}`
             : liveEngine === "cloud"
               ? liveCloudReady
                 ? "ready"
@@ -1102,7 +1494,9 @@
 
       {#if !running && (error || (liveEngine === "local" && (needsScreenRecording || needsMicPermission || (chosenModel && !chosenModel.installed) || (chosenModel && chosenModel.installed && chosenModel.coremlAvailable))))}
         <div class="box-aux">
-          {#if liveEngine === "local" && chosenModel && !chosenModel.installed}
+          {#if liveEngine === "local" && chosenModel && chosenModel.fit === "blocked"}
+            <span class="blocked-notice">⚠ {chosenModel.fitReason} — pick another model.</span>
+          {:else if liveEngine === "local" && chosenModel && !chosenModel.installed}
             {#if downloading === chosenModel.id && downloadProgress}
               <div class="dl-bar">
                 <div class="dl-track"><div class="dl-fill" style="width:{downloadPct}%"></div></div>
@@ -1118,7 +1512,7 @@
           {/if}
 
           <!-- Before download, surface that whisper.cpp models also support an optional ANE boost. -->
-          {#if liveEngine === "local" && chosenModel && !chosenModel.installed && chosenModel.coremlAvailable}
+          {#if liveEngine === "local" && chosenModel && chosenModel.fit !== "blocked" && !chosenModel.installed && chosenModel.coremlAvailable}
             <span class="coreml-hint">
               ⚡ Supports Neural Engine acceleration · optional {fmtSize(chosenModel.coremlSizeBytes)} after install
             </span>
@@ -1241,24 +1635,68 @@
         <div class="transcript-pane">
           <div class="pane-head">
             <span class="pane-title">Transcript</span>
-            {#if segments.length}<button class="pane-clear" onclick={clear}>Clear</button>{/if}
+            <span class="pane-actions">
+              {#if running || liveSegments.length}
+                <button
+                  class="assist-launch"
+                  class:on={liveAssistOpen}
+                  onclick={() => (liveAssistOpen = !liveAssistOpen)}
+                  title="AI Assist — live hints, notes & summary"
+                >
+                  <span class="spark">✦</span> Assist
+                </button>
+              {/if}
+            </span>
           </div>
           <ul class="feed" bind:this={transcriptEl} onscroll={onTranscriptScroll}>
-        {#each segments as seg (seg.source + "-" + seg.id)}
+        {#each liveSegments as seg (seg.source + "-" + seg.id)}
           <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
             <span class="meta">
               <span class="time">{fmtTime(seg.startMs)}</span>
-              <span class="who">{sourceLabel(seg.source)}</span>
+              {#if multiSource}<span class="who">{sourceLabel(seg.source)}</span>{/if}
             </span>
             <span class="body">
               <span class="text">{seg.text}</span>
               {#if seg.auxText}<span class="aux-text">{seg.auxText}</span>{/if}
             </span>
           </li>
-        {:else}
-          <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
         {/each}
+        {#if running && !stopping}
+          <li class="listening" aria-live="polite">
+            <span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+            <span class="listening-text">Listening…</span>
+          </li>
+        {:else if !liveSegments.length}
+          <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
+        {/if}
           </ul>
+          {#if liveSegments.length}
+            <!-- Transcript utilities live at the box's bottom-right; the top-right is Assist only. -->
+            <div class="pane-foot">
+              <div class="export">
+                <button
+                  class="export-trigger"
+                  class:open={exportMenuOpen}
+                  onclick={() => (exportMenuOpen = !exportMenuOpen)}
+                >
+                  Export<span class="export-caret"></span>
+                </button>
+                {#if exportMenuOpen}
+                  <button
+                    class="export-backdrop"
+                    aria-label="Close"
+                    onclick={() => (exportMenuOpen = false)}
+                  ></button>
+                  <div class="export-menu up" transition:fly={{ y: 4, duration: 100 }}>
+                    <button onclick={() => exportPick("md")}>Markdown<span class="export-ext">.md</span></button>
+                    <button onclick={() => exportPick("txt")}>Plain text<span class="export-ext">.txt</span></button>
+                    <button onclick={() => exportPick("srt")}>Subtitles<span class="export-ext">.srt</span></button>
+                  </div>
+                {/if}
+              </div>
+              <button class="pane-clear" onclick={clear}>Clear</button>
+            </div>
+          {/if}
         </div>
         {#if liveAssistOpen && (running || segments.length)}
           <aside class="assist-panel" style:width="{assistWidth}px">
@@ -1280,33 +1718,49 @@
 
       <div class="box-foot center">
         {#if running}
+          <!-- Round recorder-style transport: a red circle with a stop square + a pulsing ring. -->
           <button
-            class="btn primary stop"
+            class="transport-btn stop"
             class:loading={stopping}
             onclick={stop}
             disabled={stopping}
+            title="Stop transcription"
+            aria-label="Stop transcription"
           >
             {#if stopping}
-              <span class="spinner" aria-hidden="true"></span>Stopping…
+              <span class="spinner" aria-hidden="true"></span>
             {:else}
-              Stop
+              <span class="ic-stop" aria-hidden="true"></span>
             {/if}
           </button>
         {:else}
-          <button
-            class="btn primary"
-            class:loading={starting}
-            onclick={start}
-            disabled={starting ||
-              (liveEngine === "cloud" ? !liveCloudReady : !canStart) ||
-              downloading !== null}
-          >
-            {#if starting}
-              <span class="spinner" aria-hidden="true"></span>Connecting…
-            {:else}
-              {downloading !== null ? "Downloading…" : "Start"}
+          <div class="start-stack">
+            <button
+              class="transport-btn start"
+              class:loading={starting}
+              onclick={start}
+              disabled={starting ||
+                (liveEngine === "cloud" ? !liveCloudReady : !canStart) ||
+                downloading !== null}
+              title={downloading !== null
+                ? "Downloading model…"
+                : starting
+                  ? "Connecting…"
+                  : "Start transcription"}
+              aria-label="Start transcription"
+            >
+              {#if starting}
+                <span class="spinner" aria-hidden="true"></span>
+              {:else}
+                <span class="ic-play" aria-hidden="true"></span>
+              {/if}
+            </button>
+            {#if starting && slowStart}
+              <span class="start-hint" role="status">
+                {liveEngine === "cloud" ? "Connecting…" : "Loading model — a first run can take a few seconds"}
+              </span>
             {/if}
-          </button>
+          </div>
         {/if}
       </div>
     </section>
@@ -1534,6 +1988,7 @@
           <div class="export-group">
             {#if fileSegments.length && !fileTranscribing}
               <span class="export-label">Export</span>
+              <button class="btn outline sm" onclick={() => exportFile("md")}>MD</button>
               <button class="btn outline sm" onclick={() => exportFile("txt")}>TXT</button>
               {#if fileHasTimestamps}
                 <button class="btn outline sm" onclick={() => exportFile("srt")}>SRT</button>
@@ -1547,23 +2002,8 @@
         </div>
       {:else}
         <div class="box-head file-pick-head">
-          <div class="seg engine-seg">
-            <button class:active={fileEngine === "local"} onclick={() => (fileEngine = "local")}
-              >On-device</button
-            >
-            <button class:active={fileEngine === "cloud"} onclick={() => (fileEngine = "cloud")}
-              >Cloud</button
-            >
-          </div>
-          {#if fileEngine === "local"}
-            {@render modelPicker()}
-          {:else}
-            <CloudPicker
-              bind:providerId={fileCloudProvider}
-              bind:modelId={fileCloudModel}
-              capability="batch"
-            />
-          {/if}
+          <span class="source-prefix">Transcribe with</span>
+          {@render modelPicker()}
         </div>
         {#if fileEngine === "cloud"}
           <div class="cloud-key-row">
@@ -1783,7 +2223,7 @@
       {/if}
     </section>
   {/if}
-
+  </div>
 </main>
 
 <style>
@@ -1812,68 +2252,157 @@
     text-rendering: optimizeLegibility;
   }
 
-  /* Strict viewport-height column: tabs on top, one content box filling the rest. */
+  /* App shell: a fixed left nav rail + the workspace that holds the active mode. */
   .app {
-    /* Grows with the window up to a readable cap, instead of a fixed 820 that left big side margins. */
-    max-width: min(1200px, 92vw);
-    margin: 0 auto;
-    padding: 16px 20px 18px;
     height: 100dvh;
     box-sizing: border-box;
     position: relative;
     display: flex;
+  }
+
+  /* Left nav rail — logo on top, Live/File in the middle, Settings gear pinned to the bottom. */
+  .rail {
+    position: relative;
+    flex: none;
+    width: 48px;
+    display: flex;
     flex-direction: column;
-    gap: 12px;
+    align-items: stretch;
+    gap: 3px;
+    /* Top/bottom padding matches the workspace so the nav icons line up with the content. */
+    padding: 16px 8px 18px;
+    border-right: 1px solid var(--border);
+    transition: width 0.16s ease;
   }
 
-  /* Global entry to manage AI models & endpoints — top-right, away from the centered tabs. */
-  .toolbar {
+  .rail.expanded {
+    width: 212px;
+  }
+
+  /* The collapse/expand handle, floating on the divider line — hidden until the rail is hovered. */
+  .rail-edge {
     position: absolute;
-    top: 18px;
-    right: 22px;
-    z-index: 10;
-    display: flex;
+    top: 50%;
+    right: -11px;
+    transform: translateY(-50%);
+    z-index: 20;
+    display: inline-flex;
     align-items: center;
-    gap: 10px;
-  }
-
-  /* Brand lockup — top-left, opposite the toolbar; tabs stay centered between them. */
-  .brand {
-    position: absolute;
-    top: 23px;
-    left: 20px;
-    z-index: 10;
-    display: flex;
-    align-items: center;
-    pointer-events: none;
-    user-select: none;
-  }
-
-  .brand-name {
-    font-size: 15px;
-    font-weight: 600;
-    letter-spacing: -0.4px;
-    color: var(--text);
-  }
-
-  .models-trigger {
-    font-family: inherit;
-    font-size: 12.5px;
-    font-weight: 500;
+    justify-content: center;
+    width: 22px;
+    height: 22px;
     color: var(--muted);
     background: var(--surface);
     border: 1px solid var(--border-strong);
-    border-radius: 9px;
-    padding: 6px 12px;
+    border-radius: 50%;
     cursor: pointer;
+    opacity: 0;
+    box-shadow: 0 1px 5px rgba(0, 0, 0, 0.08);
     transition:
-      color 0.15s,
-      border-color 0.15s;
+      opacity 0.14s ease,
+      background 0.12s,
+      color 0.12s;
   }
 
-  .models-trigger:hover {
+  .rail:hover .rail-edge {
+    opacity: 1;
+  }
+
+  .rail-edge:hover {
+    background: var(--surface-active);
+    color: var(--text);
+  }
+
+  .rail-chevron {
+    width: 13px;
+    height: 13px;
+  }
+
+  .rail.expanded .rail-edge .rail-chevron {
+    transform: rotate(180deg);
+  }
+
+  .rail-nav {
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .rail-item {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    height: 36px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-radius: 9px;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .rail.expanded .rail-item {
+    justify-content: flex-start;
+    gap: 11px;
+    padding: 0 11px;
+  }
+
+  .rail-item:hover {
+    background: var(--surface-active);
+    color: var(--text);
+  }
+
+  .rail-item.active {
     color: var(--accent);
-    border-color: var(--accent);
+    background: var(--surface-active);
+  }
+
+  .rail-ico {
+    flex: none;
+    width: 18px;
+    height: 18px;
+  }
+
+  .rail-label {
+    display: none;
+  }
+
+  .rail.expanded .rail-label {
+    display: inline;
+  }
+
+  .rail-spacer {
+    flex: 1;
+  }
+
+  /* The workspace: the active mode's content, capped to a readable width and centred in the space
+     left of the rail. Grows wider when the assist panel is open so both columns fit. */
+  .workspace {
+    flex: 1;
+    min-width: 0;
+    height: 100dvh;
+    box-sizing: border-box;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 16px 24px 18px;
+    max-width: min(1180px, 100%);
+    margin: 0 auto;
+  }
+
+  .app.wide .workspace {
+    max-width: min(1680px, 100%);
+  }
+
+  /* Live is a working surface, not a reading column — let it grow to fill the window when enlarged
+     (File stays capped for comfortable review). Defined after .wide so it wins when both apply. */
+  .app.live .workspace {
+    max-width: 100%;
   }
 
   /* The "smart" AI Assist launcher — a vibrant, gently shimmering gradient pill that appears top-right
@@ -1944,48 +2473,6 @@
     .assist-launch .spark {
       animation: none;
     }
-  }
-
-  /* Live with the assist panel open needs room for both columns — use more of the window (capped so
-     it never gets absurd on ultra-wide displays). Both grow as the window grows. */
-  .app.wide {
-    max-width: min(1680px, 96vw);
-  }
-
-  /* Top row — the three tabs. */
-  .tabs {
-    flex: none;
-    display: inline-flex;
-    align-self: center;
-    gap: 3px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 11px;
-    padding: 3px;
-  }
-
-  .tabs button {
-    font-family: inherit;
-    font-size: 13.5px;
-    font-weight: 500;
-    color: var(--muted);
-    background: transparent;
-    border: none;
-    border-radius: 8px;
-    padding: 6px 22px;
-    cursor: pointer;
-    transition:
-      background 0.15s,
-      color 0.15s;
-  }
-
-  .tabs button:hover {
-    color: var(--text);
-  }
-
-  .tabs button.active {
-    background: var(--accent);
-    color: #fff;
   }
 
   /* The content box — fills all remaining height; only its feed scrolls. */
@@ -2260,31 +2747,203 @@
     max-height: 56vh;
   }
 
-  /* The model list scrolls; the custom-import footer stays pinned below it. */
-  .picker-scroll {
-    overflow-y: auto;
-    min-height: 0;
+  /* Tabbed two-pane variant: tabs on top, then categories | models. The panes own padding + scroll. */
+  .picker-menu.wide {
+    right: auto;
+    width: 460px;
+    max-width: 92vw;
+    padding: 0;
+    max-height: none;
+    overflow: hidden;
   }
 
+  /* On-device / Cloud tabs at the top of the picker menu. */
+  .picker-tabs {
+    flex: none;
+    display: flex;
+    gap: 3px;
+    padding: 6px;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .picker-tabs button {
+    flex: 1;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 0;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .picker-tabs button:hover {
+    color: var(--text);
+    background: var(--surface-active);
+  }
+
+  .picker-tabs button.active {
+    color: #fff;
+    background: var(--accent);
+  }
+
+  .picker-panes {
+    display: flex;
+    align-items: stretch;
+    min-height: 0;
+    max-height: 56vh;
+  }
+
+  /* Left column: the active tab's categories (families / providers). */
+  .picker-cats {
+    flex: none;
+    width: 150px;
+    border-right: 1px solid var(--border);
+    padding: 6px;
+    overflow-y: auto;
+  }
+
+  /* Claude-style scrollbar: thin, rounded, translucent, only assertive on hover. */
+  .picker-cats,
+  .picker-detail {
+    scrollbar-width: thin;
+    scrollbar-color: color-mix(in srgb, var(--muted) 32%, transparent) transparent;
+  }
+
+  .picker-cats::-webkit-scrollbar,
+  .picker-detail::-webkit-scrollbar {
+    width: 10px;
+  }
+
+  .picker-cats::-webkit-scrollbar-track,
+  .picker-detail::-webkit-scrollbar-track {
+    background: transparent;
+  }
+
+  .picker-cats::-webkit-scrollbar-thumb,
+  .picker-detail::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 32%, transparent);
+    border-radius: 999px;
+    border: 3px solid transparent;
+    background-clip: padding-box;
+  }
+
+  .picker-cats:hover::-webkit-scrollbar-thumb,
+  .picker-detail:hover::-webkit-scrollbar-thumb {
+    background: color-mix(in srgb, var(--muted) 52%, transparent);
+    background-clip: padding-box;
+  }
+
+  .picker-cats::-webkit-scrollbar-thumb:hover,
+  .picker-detail::-webkit-scrollbar-thumb:hover {
+    background: color-mix(in srgb, var(--muted) 72%, transparent);
+    background-clip: padding-box;
+  }
+
+  .picker-cat {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 9px;
+    cursor: pointer;
+    text-align: left;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .picker-cat:hover {
+    background: var(--surface-active);
+  }
+
+  .picker-cat.active {
+    background: var(--surface-active);
+    color: var(--accent);
+  }
+
+  .picker-cat-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* Dot marking a cloud provider with no API key set yet. */
+  .picker-cat-dot {
+    flex: none;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  /* Right column: the selected category's models. */
+  .picker-detail {
+    flex: 1;
+    min-width: 0;
+    padding: 6px;
+    overflow-y: auto;
+  }
+
+  .picker-detail-hint {
+    padding: 8px 10px;
+    font-size: 12px;
+    line-height: 1.5;
+    color: var(--muted);
+  }
+
+  /* Full-width footer across the whole dropdown (below both panes), shown only on the On-device tab. */
   .picker-custom {
     flex: none;
     display: flex;
     flex-direction: column;
-    align-items: flex-start;
+    align-items: center;
     gap: 2px;
     width: 100%;
-    margin-top: 4px;
-    padding: 9px;
+    padding: 10px 12px;
     border: none;
     border-top: 1px solid var(--border);
     background: transparent;
     cursor: pointer;
-    text-align: left;
+    text-align: center;
     font-family: inherit;
   }
 
   .picker-custom:hover {
     background: var(--surface-active);
+  }
+
+  /* Icon + label, centered together; the hint sits centered below. */
+  .picker-custom-main {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+  }
+
+  /* A download-into-tray glyph, tinted to the accent like the label (CSS mask, same as .picker-caret). */
+  .picker-custom-icon {
+    flex: none;
+    width: 15px;
+    height: 15px;
+    background-color: var(--accent);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2.5v7'/%3E%3Cpath d='M5 6.5l3 3 3-3'/%3E%3Cpath d='M3 12.5h10'/%3E%3C/svg%3E")
+      no-repeat center / contain;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' viewBox='0 0 16 16' fill='none' stroke='%23000' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M8 2.5v7'/%3E%3Cpath d='M5 6.5l3 3 3-3'/%3E%3Cpath d='M3 12.5h10'/%3E%3C/svg%3E")
+      no-repeat center / contain;
   }
 
   .picker-custom-label {
@@ -2296,15 +2955,6 @@
   .picker-custom-hint {
     font-size: 11px;
     color: var(--muted);
-  }
-
-  .picker-section {
-    font-family: var(--font-mono);
-    font-size: 10.5px;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: var(--muted);
-    padding: 8px 10px 4px;
   }
 
   .picker-opt {
@@ -2349,6 +2999,24 @@
     font-variant-numeric: tabular-nums;
   }
 
+  /* The "heavy for this RAM" / "needs macOS 26" caveat shown on heavy or blocked rows. */
+  .picker-opt-note {
+    flex: none;
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  /* A model this machine/OS can't run: greyed, not clickable, no hover. */
+  .picker-opt.blocked {
+    cursor: default;
+    opacity: 0.5;
+  }
+
+  .picker-opt.blocked:hover {
+    background: transparent;
+  }
+
   .picker-tag {
     flex: none;
     font-family: var(--font-mono);
@@ -2370,6 +3038,8 @@
     display: inline-flex;
     align-items: center;
     gap: 9px;
+    /* Grow like .engine-group so the audio chips sit at the right in both states (not the middle). */
+    flex: 1;
     min-width: 0;
     font-size: 14px;
     font-weight: 500;
@@ -2383,15 +3053,6 @@
   .file-model {
     font-weight: 400;
     color: var(--muted);
-  }
-
-  .live-pip {
-    width: 7px;
-    height: 7px;
-    border-radius: 50%;
-    background: var(--live);
-    box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
-    flex-shrink: 0;
   }
 
   .btn {
@@ -2422,33 +3083,6 @@
     cursor: default;
   }
 
-  .btn.primary {
-    background: var(--accent);
-    color: #fff;
-  }
-
-  .btn.primary:hover:not(:disabled) {
-    background: var(--accent-hover);
-  }
-
-  .btn.primary.stop {
-    background: var(--stop);
-  }
-
-  /* Connecting state: keep the button looking engaged (dimmed, not fully greyed) with a spinner, so
-     the click feels responsive while the session connects. */
-  .btn.primary.loading {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    gap: 8px;
-  }
-
-  .btn.primary.loading:disabled {
-    opacity: 0.72;
-    cursor: progress;
-  }
-
   .spinner {
     width: 13px;
     height: 13px;
@@ -2462,6 +3096,117 @@
   @keyframes spin {
     to {
       transform: rotate(360deg);
+    }
+  }
+
+  /* ── Live transport: one round Start/Stop button, recorder/player style ──────────────────────── */
+  .start-stack {
+    display: inline-flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 10px;
+  }
+
+  /* Shown under the Start button only when a start is taking a while — a slow model load is progress,
+     not a hang, so we reassure rather than fail. */
+  .start-hint {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  .transport-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 58px;
+    height: 58px;
+    flex: none;
+    border: none;
+    border-radius: 50%;
+    cursor: pointer;
+    background: var(--accent);
+    color: #fff;
+    box-shadow: 0 6px 18px -6px color-mix(in srgb, var(--accent) 55%, transparent);
+    transition:
+      transform 0.15s,
+      box-shadow 0.15s,
+      background 0.15s,
+      opacity 0.15s;
+  }
+
+  .transport-btn:hover:not(:disabled) {
+    transform: translateY(-1px) scale(1.04);
+    box-shadow: 0 10px 26px -6px color-mix(in srgb, var(--accent) 60%, transparent);
+  }
+
+  .transport-btn:active:not(:disabled) {
+    transform: scale(0.97);
+  }
+
+  .transport-btn:disabled {
+    opacity: 0.45;
+    cursor: default;
+    box-shadow: none;
+  }
+
+  .transport-btn.loading:disabled {
+    opacity: 0.85;
+    cursor: progress;
+  }
+
+  /* Recording: red, with a ring that pulses outward — the classic "live recorder" tell. */
+  .transport-btn.stop {
+    background: var(--stop);
+    box-shadow: 0 6px 18px -6px color-mix(in srgb, var(--stop) 55%, transparent);
+    animation: rec-ring 1.8s ease-out infinite;
+  }
+
+  @keyframes rec-ring {
+    0% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--stop) 42%, transparent);
+    }
+    70% {
+      box-shadow: 0 0 0 15px color-mix(in srgb, var(--stop) 0%, transparent);
+    }
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--stop) 0%, transparent);
+    }
+  }
+
+  /* Play triangle (Start) ↔ stop square (Stop), centered in the circle. */
+  .ic-play {
+    width: 0;
+    height: 0;
+    border-style: solid;
+    border-width: 11px 0 11px 18px;
+    border-color: transparent transparent transparent #fff;
+    margin-left: 4px;
+  }
+
+  .ic-stop {
+    width: 18px;
+    height: 18px;
+    border-radius: 4px;
+    background: #fff;
+  }
+
+  @keyframes wave-bounce {
+    0%,
+    100% {
+      transform: scaleY(0.28);
+      opacity: 0.7;
+    }
+    50% {
+      transform: scaleY(1);
+      opacity: 1;
+    }
+  }
+
+  /* Respect reduced-motion: drop the recording ring + the status dot pulse. */
+  @media (prefers-reduced-motion: reduce) {
+    .transport-btn.stop,
+    .status.rec .status-dot {
+      animation: none;
     }
   }
 
@@ -2510,6 +3255,29 @@
   .status.live .status-dot {
     background: var(--live);
     box-shadow: 0 0 0 3px color-mix(in srgb, var(--live) 22%, transparent);
+  }
+
+  /* Live recording readout — accent (clay) with a breathing dot, the universal "REC" tell. */
+  .status.rec {
+    color: var(--accent);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .status.rec .status-dot {
+    background: var(--accent);
+    animation: rec-pulse 1.4s ease-in-out infinite;
+  }
+
+  @keyframes rec-pulse {
+    0%,
+    100% {
+      box-shadow: 0 0 0 0 color-mix(in srgb, var(--accent) 42%, transparent);
+      opacity: 1;
+    }
+    50% {
+      box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 0%, transparent);
+      opacity: 0.65;
+    }
   }
 
   /* Thin determinate progress bar under the file header; falls back to an indeterminate sweep
@@ -2583,6 +3351,12 @@
   }
 
   .coreml-hint {
+    font-size: 13px;
+    color: var(--muted);
+  }
+
+  /* Why the chosen model can't start on this machine (e.g. "Needs macOS 26"). */
+  .blocked-notice {
     font-size: 13px;
     color: var(--muted);
   }
@@ -2733,6 +3507,13 @@
     color: var(--muted);
   }
 
+  /* Export (collapsed menu) + Clear, then a divider before Assist — right side of the transcript header. */
+  .pane-actions {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
   .pane-clear {
     font-family: inherit;
     font-size: 12px;
@@ -2747,6 +3528,117 @@
   .pane-clear:hover {
     color: var(--text);
     border-color: var(--accent);
+  }
+
+  /* Export collapsed into one trigger + popover, so the header reads as one control, not four. */
+  .export {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .export-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    padding: 3px 9px;
+    cursor: pointer;
+    transition:
+      color 0.12s,
+      border-color 0.12s;
+  }
+
+  .export-trigger:hover,
+  .export-trigger.open {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .export-caret {
+    width: 8px;
+    height: 5px;
+    background-color: currentColor;
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l3 3 3-3'/%3E%3C/svg%3E")
+      no-repeat center;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='8' height='5' viewBox='0 0 8 5' fill='none' stroke='%23000' stroke-width='1.4' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1 1l3 3 3-3'/%3E%3C/svg%3E")
+      no-repeat center;
+    transition: transform 0.12s;
+  }
+
+  .export-trigger.open .export-caret {
+    transform: rotate(180deg);
+  }
+
+  .export-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 20;
+    background: transparent;
+    border: none;
+    cursor: default;
+  }
+
+  .export-menu {
+    position: absolute;
+    top: calc(100% + 5px);
+    right: 0;
+    z-index: 21;
+    display: flex;
+    flex-direction: column;
+    min-width: 168px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 10px;
+    box-shadow: 0 12px 28px -10px rgba(40, 30, 20, 0.28);
+    padding: 5px;
+  }
+
+  /* In the bottom-right pane-foot, the menu opens upward so the box edge never clips it. */
+  .export-menu.up {
+    top: auto;
+    bottom: calc(100% + 5px);
+  }
+
+  .export-menu button {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 14px;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 9px;
+    cursor: pointer;
+    text-align: left;
+    transition: background 0.12s;
+  }
+
+  .export-menu button:hover {
+    background: var(--surface-active);
+  }
+
+  .export-ext {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+
+  /* Transcript utilities at the box's bottom-right (Export ▾ + Clear); the top-right holds Assist. */
+  .pane-foot {
+    flex: none;
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 8px;
+    padding: 4px 14px 9px;
   }
 
   .assist-panel {
@@ -2989,6 +3881,75 @@
     font-style: normal;
   }
 
+  /* The live "mic is open" row pinned at the feed foot while recording — animated, not static. */
+  .feed li.listening {
+    align-items: center;
+    gap: 11px;
+    padding: 9px 12px;
+    border-bottom: none;
+    color: var(--muted);
+    font-size: 14px;
+  }
+
+  .eq {
+    display: inline-flex;
+    align-items: center;
+    gap: 2.5px;
+    height: 15px;
+    flex: none;
+  }
+
+  .eq i {
+    width: 2.5px;
+    height: 100%;
+    border-radius: 999px;
+    background: var(--accent);
+    transform: scaleY(0.3);
+    transform-origin: center;
+    animation: wave-bounce 1.1s ease-in-out infinite;
+  }
+
+  .eq i:nth-child(1) {
+    animation-delay: -1s;
+  }
+  .eq i:nth-child(2) {
+    animation-delay: -0.4s;
+  }
+  .eq i:nth-child(3) {
+    animation-delay: -0.75s;
+  }
+  .eq i:nth-child(4) {
+    animation-delay: -0.2s;
+  }
+  .eq i:nth-child(5) {
+    animation-delay: -0.55s;
+  }
+
+  /* The word itself breathes, reinforcing the "actively listening" feel. */
+  .listening-text {
+    animation: listening-fade 1.8s ease-in-out infinite;
+  }
+
+  @keyframes listening-fade {
+    0%,
+    100% {
+      opacity: 0.5;
+    }
+    50% {
+      opacity: 1;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .eq i {
+      animation: none;
+      transform: scaleY(0.6);
+    }
+    .listening-text {
+      animation: none;
+    }
+  }
+
   .dropzone {
     flex: 1;
     margin: 14px;
@@ -3156,8 +4117,12 @@
     justify-content: flex-start;
   }
 
-  .engine-seg {
+  /* "Transcribe with" label before the unified model dropdown. */
+  .source-prefix {
     flex: none;
+    font-size: 13px;
+    color: var(--muted);
+    white-space: nowrap;
   }
 
   .cloud-key-row {
@@ -3202,6 +4167,49 @@
     gap: 10px;
     min-width: 0;
     flex: 1;
+  }
+
+  /* Quick mic/system toggles in the Live bar — "You" (your mic) and "Them" (system/meeting audio). */
+  .audio-chips {
+    flex: none;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .audio-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--muted);
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 6px 11px;
+    cursor: pointer;
+    transition:
+      color 0.12s,
+      border-color 0.12s,
+      background 0.12s;
+  }
+
+  .audio-chip svg {
+    width: 15px;
+    height: 15px;
+  }
+
+  .audio-chip:hover {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .audio-chip.on {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 8%, var(--surface));
   }
 
 </style>

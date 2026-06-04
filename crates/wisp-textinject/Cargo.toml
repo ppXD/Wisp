@@ -1,0 +1,12 @@
+[package]
+name = "wisp-textinject"
+version = "0.0.0"
+description = "Insert text into the frontmost app (clipboard + synthesized paste), for dictation"
+edition = "2021"
+license = "MIT"
+
+# macOS-only native deps: arboard handles the NSPasteboard threading for us (text-only, no image
+# feature), and core-graphics posts the synthesized ⌘V keystroke. Other platforms compile a stub.
+[target.'cfg(target_os = "macos")'.dependencies]
+arboard = { version = "3", default-features = false }
+core-graphics = "0.25"

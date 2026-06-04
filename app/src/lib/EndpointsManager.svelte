@@ -4,7 +4,6 @@
   // ones (your gateway, a local Ollama, OpenAI) you define end to end (URL + model + key). Both kinds
   // live in one list here, and both back File/Live transcription and the AI assist/notes.
   import { openUrl } from "@tauri-apps/plugin-opener";
-  import Modal from "$lib/Modal.svelte";
   import {
     cloudState,
     addCloudEndpoint,
@@ -13,7 +12,8 @@
     setCloudKey,
   } from "$lib/cloud.svelte";
 
-  let { open = $bindable() }: { open: boolean } = $props();
+  // Content-only: the host (the Settings dialog) owns the modal chrome; this just renders the
+  // AI-models & endpoints manager body.
 
   const builtins = $derived(cloudState.providers.filter((p) => !p.custom));
   const customs = $derived(cloudState.providers.filter((p) => p.custom));
@@ -152,8 +152,7 @@
   }
 </script>
 
-<Modal bind:open title="AI models &amp; endpoints">
-  {#if editing}
+{#if editing}
     <div class="ep-form">
       <p class="ep-formnote">
         An <strong>OpenAI-compatible</strong> endpoint — base URL + key, like Cline or Ollama. Backs
@@ -326,7 +325,6 @@
       <button class="ep-add" onclick={startAdd}>+ Add OpenAI Compatible Endpoint</button>
     </div>
   {/if}
-</Modal>
 
 <style>
   .ep-form {

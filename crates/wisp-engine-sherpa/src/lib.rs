@@ -26,7 +26,9 @@ pub use streaming::StreamingTransducerEngine;
 use std::path::Path;
 use std::time::Duration;
 
+use sherpa_rs::paraformer::{ParaformerConfig, ParaformerRecognizer};
 use sherpa_rs::sense_voice::{SenseVoiceConfig, SenseVoiceRecognizer};
+use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 use sherpa_rs::whisper::{WhisperConfig, WhisperRecognizer};
 use wisp_core::engine::{AsrEngine, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
@@ -172,6 +174,95 @@ impl AsrEngine for WhisperEngine {
             audio,
             rate,
         ))
+    }
+}
+
+/// An [`AsrEngine`] backed by sherpa-onnx's Paraformer offline recognizer (FunASR, zh + en) — a
+/// non-autoregressive model that's fast on CPU. Single `model.onnx` + `tokens.txt`, like SenseVoice.
+pub struct ParaformerEngine {
+    recognizer: ParaformerRecognizer,
+}
+
+impl ParaformerEngine {
+    /// Loads a Paraformer model (`model.onnx` or `model.int8.onnx`) and its `tokens.txt`.
+    pub fn new(model: &Path, tokens: &Path) -> Result<Self> {
+        let config = ParaformerConfig {
+            model: model.to_string_lossy().into_owned(),
+            tokens: tokens.to_string_lossy().into_owned(),
+            num_threads: Some(asr_threads()),
+            ..Default::default()
+        };
+
+        let recognizer = ParaformerRecognizer::new(config)
+            .map_err(|e| WispError::Engine(format!("paraformer init: {e}")))?;
+
+        Ok(Self { recognizer })
+    }
+}
+
+impl AsrEngine for ParaformerEngine {
+    fn info(&self) -> EngineInfo {
+        EngineInfo {
+            name: "sherpa-paraformer".to_owned(),
+            streaming: false,
+        }
+    }
+
+    fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
+        let rate = if sample_rate == 0 {
+            16_000
+        } else {
+            sample_rate
+        };
+        let result = self.recognizer.transcribe(rate, audio);
+        Ok(to_result(&result.text, audio, rate))
+    }
+}
+
+/// An [`AsrEngine`] backed by sherpa-onnx's offline transducer — NVIDIA NeMo Parakeet
+/// (encoder/decoder/joiner), English, state-of-the-art accuracy.
+pub struct ParakeetEngine {
+    recognizer: TransducerRecognizer,
+}
+
+impl ParakeetEngine {
+    /// Loads a NeMo Parakeet transducer from its `encoder`/`decoder`/`joiner` ONNX files + `tokens.txt`.
+    pub fn new(encoder: &Path, decoder: &Path, joiner: &Path, tokens: &Path) -> Result<Self> {
+        let config = TransducerConfig {
+            encoder: encoder.to_string_lossy().into_owned(),
+            decoder: decoder.to_string_lossy().into_owned(),
+            joiner: joiner.to_string_lossy().into_owned(),
+            tokens: tokens.to_string_lossy().into_owned(),
+            // A NeMo-exported transducer decoded greedily — the standard sherpa-onnx setup for Parakeet.
+            model_type: "nemo_transducer".to_owned(),
+            decoding_method: "greedy_search".to_owned(),
+            num_threads: asr_threads(),
+            ..Default::default()
+        };
+
+        let recognizer = TransducerRecognizer::new(config)
+            .map_err(|e| WispError::Engine(format!("parakeet init: {e}")))?;
+
+        Ok(Self { recognizer })
+    }
+}
+
+impl AsrEngine for ParakeetEngine {
+    fn info(&self) -> EngineInfo {
+        EngineInfo {
+            name: "sherpa-parakeet".to_owned(),
+            streaming: false,
+        }
+    }
+
+    fn transcribe(&mut self, audio: &[f32], sample_rate: u32) -> Result<TranscriptionResult> {
+        let rate = if sample_rate == 0 {
+            16_000
+        } else {
+            sample_rate
+        };
+        let text = self.recognizer.transcribe(rate, audio);
+        Ok(to_result(&text, audio, rate))
     }
 }
 

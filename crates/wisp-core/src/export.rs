@@ -5,7 +5,7 @@
 
 use std::time::Duration;
 
-use crate::transcript::{SpeakerId, TranscriptSegment};
+use crate::transcript::{AudioSourceKind, SpeakerId, TranscriptSegment};
 
 /// A transcript export format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -17,15 +17,19 @@ pub enum ExportFormat {
     Srt,
     /// WebVTT subtitles (`WEBVTT` header, `HH:MM:SS.mmm` timestamps).
     Vtt,
+    /// Structured Markdown — a meeting document: YAML front-matter, optional summary, then a diarized,
+    /// timestamped, speaker-labelled transcript. Human- *and* agent-readable.
+    Markdown,
 }
 
 impl ExportFormat {
-    /// Parses a format from its name/extension (case-insensitive): `txt`/`text`, `srt`, `vtt`.
+    /// Parses a format from its name/extension (case-insensitive): `txt`/`text`, `srt`, `vtt`, `md`.
     pub fn from_name(name: &str) -> Option<Self> {
         match name.to_ascii_lowercase().as_str() {
             "txt" | "text" => Some(Self::Txt),
             "srt" => Some(Self::Srt),
             "vtt" => Some(Self::Vtt),
+            "md" | "markdown" => Some(Self::Markdown),
             _ => None,
         }
     }
@@ -36,16 +40,19 @@ impl ExportFormat {
             Self::Txt => "txt",
             Self::Srt => "srt",
             Self::Vtt => "vtt",
+            Self::Markdown => "md",
         }
     }
 }
 
 /// Renders `segments` into `format` as a single string. Empty/whitespace-only segments are skipped.
+/// Markdown uses empty [`MeetingMeta`]; call [`format_markdown`] directly to pass meeting metadata.
 pub fn format_transcript(segments: &[TranscriptSegment], format: ExportFormat) -> String {
     match format {
         ExportFormat::Txt => format_txt(segments),
         ExportFormat::Srt => format_srt(segments),
         ExportFormat::Vtt => format_vtt(segments),
+        ExportFormat::Markdown => format_markdown(segments, &MeetingMeta::default()),
     }
 }
 
@@ -56,6 +63,8 @@ pub struct Paragraph {
     pub start: Duration,
     pub end: Duration,
     pub speaker: Option<SpeakerId>,
+    /// Which stream this block came from — so a meeting export can label it Me / Them.
+    pub source: AudioSourceKind,
     pub text: String,
 }
 
@@ -87,6 +96,7 @@ pub fn group_paragraphs(segments: &[TranscriptSegment]) -> Vec<Paragraph> {
                 start: segment.start,
                 end: segment.end,
                 speaker: segment.speaker,
+                source: segment.source,
                 text: text.to_owned(),
             }),
         }
@@ -95,9 +105,11 @@ pub fn group_paragraphs(segments: &[TranscriptSegment]) -> Vec<Paragraph> {
     paragraphs
 }
 
-/// Whether `segment` continues `para`: same speaker, a short-enough pause, and still under the cap.
+/// Whether `segment` continues `para`: same stream and speaker, a short-enough pause, and still under
+/// the cap. The source check keeps a meeting's Me / Them turns in separate blocks.
 fn continues(para: &Paragraph, segment: &TranscriptSegment) -> bool {
-    para.speaker == segment.speaker
+    para.source == segment.source
+        && para.speaker == segment.speaker
         && segment.start.saturating_sub(para.end) <= PARAGRAPH_GAP
         && para.text.chars().count() < MAX_PARAGRAPH_CHARS
 }
@@ -135,6 +147,149 @@ fn labelled_paragraph(para: &Paragraph) -> String {
         Some(speaker) => format!("{}: {}", speaker_label(speaker), para.text),
         None => para.text.clone(),
     }
+}
+
+/// App-supplied context for a Markdown meeting export — the bits the pure formatter can't derive from
+/// the segments (the shell knows the date, model, and any AI summary). Duration and the participant
+/// list ARE derived from the segments here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct MeetingMeta {
+    /// Document title; defaults to "Meeting transcript" when absent.
+    pub title: Option<String>,
+    /// ISO date/time string, formatted by the shell (so core needs no clock/date dependency).
+    pub date: Option<String>,
+    /// The transcription model/engine used.
+    pub engine: Option<String>,
+    /// The transcription language.
+    pub language: Option<String>,
+    /// An AI-generated summary to lead the document with, when one is available.
+    pub summary: Option<String>,
+}
+
+/// Renders a structured Markdown meeting document: YAML front-matter (title, date, duration,
+/// participants, engine, language), an optional `## Summary`, then a `## Transcript` of diarized,
+/// timestamped, Me/Them-labelled paragraphs — human-readable and clean for an LLM/agent to consume.
+pub fn format_markdown(segments: &[TranscriptSegment], meta: &MeetingMeta) -> String {
+    let paragraphs = group_paragraphs(segments);
+
+    let mut out = front_matter(&paragraphs, meta);
+
+    out.push_str(&format!(
+        "# {}\n\n",
+        meta.title.as_deref().unwrap_or("Meeting transcript")
+    ));
+
+    if let Some(summary) = meta
+        .summary
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        out.push_str("## Summary\n\n");
+        out.push_str(summary);
+        out.push_str("\n\n");
+    }
+
+    out.push_str("## Transcript\n\n");
+    for para in &paragraphs {
+        let stamp = short_timestamp(para.start);
+        match meeting_label(para) {
+            Some(who) => out.push_str(&format!("**[{stamp}] {who}:** {}\n\n", para.text)),
+            None => out.push_str(&format!("**[{stamp}]** {}\n\n", para.text)),
+        }
+    }
+
+    out
+}
+
+/// The YAML front-matter block — only the fields present/derivable, so a bare file export stays minimal
+/// while a full meeting carries its context.
+fn front_matter(paragraphs: &[Paragraph], meta: &MeetingMeta) -> String {
+    let mut lines: Vec<String> = Vec::new();
+
+    lines.push(format!(
+        "title: {}",
+        yaml_scalar(meta.title.as_deref().unwrap_or("Meeting transcript"))
+    ));
+    if let Some(date) = meta.date.as_deref() {
+        lines.push(format!("date: {}", yaml_scalar(date)));
+    }
+    if let Some(duration) = paragraphs.iter().map(|p| p.end).max() {
+        lines.push(format!("duration: {}", full_timestamp(duration)));
+    }
+
+    let participants = participants(paragraphs);
+    if !participants.is_empty() {
+        let joined = participants
+            .iter()
+            .map(|p| yaml_scalar(p))
+            .collect::<Vec<_>>()
+            .join(", ");
+        lines.push(format!("participants: [{joined}]"));
+    }
+    if let Some(engine) = meta.engine.as_deref() {
+        lines.push(format!("engine: {}", yaml_scalar(engine)));
+    }
+    if let Some(language) = meta.language.as_deref() {
+        lines.push(format!("language: {}", yaml_scalar(language)));
+    }
+
+    format!("---\n{}\n---\n\n", lines.join("\n"))
+}
+
+/// The distinct speaker labels in first-seen order — the meeting's participant list.
+fn participants(paragraphs: &[Paragraph]) -> Vec<String> {
+    let mut seen: Vec<String> = Vec::new();
+    for para in paragraphs {
+        if let Some(label) = meeting_label(para) {
+            if !seen.contains(&label) {
+                seen.push(label);
+            }
+        }
+    }
+    seen
+}
+
+/// A meeting-aware speaker label for a paragraph: the local mic is "Me"; the system/far end is "Them"
+/// (with the diarized speaker number when known); any other source (a file) is just "Speaker N" when
+/// diarized, else unlabelled.
+fn meeting_label(para: &Paragraph) -> Option<String> {
+    match para.source {
+        AudioSourceKind::Microphone => Some("Me".to_owned()),
+        AudioSourceKind::System => Some(match para.speaker {
+            Some(speaker) => format!("Them ({})", speaker_label(speaker)),
+            None => "Them".to_owned(),
+        }),
+        _ => para.speaker.map(speaker_label),
+    }
+}
+
+/// Escapes a string as a double-quoted YAML scalar, so a colon/bracket in a title or model name can't
+/// break the front-matter.
+fn yaml_scalar(s: &str) -> String {
+    format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// `H:MM:SS` when there's an hour, else `M:SS` — a compact inline timestamp for the transcript.
+fn short_timestamp(d: Duration) -> String {
+    let secs = d.as_secs();
+    let (h, m, s) = (secs / 3600, (secs % 3600) / 60, secs % 60);
+    if h > 0 {
+        format!("{h}:{m:02}:{s:02}")
+    } else {
+        format!("{m}:{s:02}")
+    }
+}
+
+/// `HH:MM:SS` — the meeting's total length, for the front-matter.
+fn full_timestamp(d: Duration) -> String {
+    let secs = d.as_secs();
+    format!(
+        "{:02}:{:02}:{:02}",
+        secs / 3600,
+        (secs % 3600) / 60,
+        secs % 60
+    )
 }
 
 fn format_srt(segments: &[TranscriptSegment]) -> String {
@@ -242,7 +397,85 @@ mod tests {
         assert_eq!(ExportFormat::from_name("TXT"), Some(ExportFormat::Txt));
         assert_eq!(ExportFormat::from_name("srt"), Some(ExportFormat::Srt));
         assert_eq!(ExportFormat::from_name("vtt"), Some(ExportFormat::Vtt));
+        assert_eq!(ExportFormat::from_name("md"), Some(ExportFormat::Markdown));
+        assert_eq!(
+            ExportFormat::from_name("Markdown"),
+            Some(ExportFormat::Markdown)
+        );
+        assert_eq!(ExportFormat::Markdown.extension(), "md");
         assert_eq!(ExportFormat::from_name("docx"), None);
+    }
+
+    /// A segment from a specific stream (mic / system / file), for the Me-Them meeting-label tests.
+    fn seg_src(
+        text: &str,
+        start_ms: u64,
+        end_ms: u64,
+        source: AudioSourceKind,
+    ) -> TranscriptSegment {
+        TranscriptSegment::new(
+            0,
+            text,
+            Duration::from_millis(start_ms)..Duration::from_millis(end_ms),
+            source,
+        )
+    }
+
+    #[test]
+    fn markdown_has_front_matter_summary_and_a_transcript() {
+        let segs = vec![seg("hello there", 0, 2_000)];
+        let meta = MeetingMeta {
+            title: Some("Standup".to_owned()),
+            date: Some("2026-06-04".to_owned()),
+            engine: Some("Apple on-device speech".to_owned()),
+            language: Some("en".to_owned()),
+            summary: Some("Quick sync.".to_owned()),
+        };
+        let md = format_markdown(&segs, &meta);
+
+        assert!(md.starts_with("---\n"), "opens with YAML front-matter");
+        assert!(md.contains("title: \"Standup\""));
+        assert!(md.contains("date: \"2026-06-04\""));
+        assert!(md.contains("duration: 00:00:02"));
+        assert!(md.contains("engine: \"Apple on-device speech\""));
+        assert!(md.contains("# Standup"));
+        assert!(md.contains("## Summary\n\nQuick sync.\n\n"));
+        assert!(md.contains("## Transcript\n\n**[0:00]** hello there\n\n"));
+    }
+
+    #[test]
+    fn markdown_labels_me_and_them_by_source() {
+        let segs = vec![
+            seg_src("morning", 0, 1_000, AudioSourceKind::Microphone),
+            seg_src("hi back", 2_000, 3_000, AudioSourceKind::System),
+        ];
+        let md = format_markdown(&segs, &MeetingMeta::default());
+
+        assert!(md.contains("participants: [\"Me\", \"Them\"]"));
+        assert!(md.contains("**[0:00] Me:** morning"));
+        assert!(md.contains("**[0:02] Them:** hi back"));
+    }
+
+    #[test]
+    fn markdown_tags_the_diarized_far_end_speaker() {
+        let mut s = seg_src("over here", 0, 1_000, AudioSourceKind::System);
+        s.speaker = Some(SpeakerId(1));
+        let md = format_markdown(&[s], &MeetingMeta::default());
+        // System + a diarized speaker → "Them (Speaker 2)" (SpeakerId is 0-based, label 1-based).
+        assert!(
+            md.contains("**[0:00] Them (Speaker 2):** over here"),
+            "{md}"
+        );
+    }
+
+    #[test]
+    fn a_meeting_keeps_me_and_them_in_separate_blocks() {
+        // Same speaker (None) but different streams must not merge into one paragraph.
+        let segs = vec![
+            seg_src("a", 0, 500, AudioSourceKind::Microphone),
+            seg_src("b", 600, 1_000, AudioSourceKind::System),
+        ];
+        assert_eq!(group_paragraphs(&segs).len(), 2);
     }
 
     #[test]

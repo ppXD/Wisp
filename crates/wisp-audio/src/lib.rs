@@ -28,5 +28,5 @@ pub use media::MediaSource;
 pub use mic::{list_input_devices, MicSource};
 pub use mixer::MeetingMixer;
 pub use preprocess::normalize_for_asr;
-pub use stream::{tee, ChannelSource, Tee};
+pub use stream::{tee, ChannelSource, MutedSource, Tee};
 pub use wav::WavSource;

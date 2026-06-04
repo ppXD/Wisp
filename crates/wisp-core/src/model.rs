@@ -19,6 +19,15 @@ pub enum ModelFamily {
     StreamingTransducer,
     /// sherpa-onnx SenseVoice (single-file multilingual model).
     SenseVoice,
+    /// FunASR Paraformer via sherpa-onnx — a non-autoregressive offline recognizer (zh + en), fast on
+    /// CPU with timestamps. Single `model.onnx` + `tokens.txt`, like SenseVoice.
+    Paraformer,
+    /// NVIDIA NeMo Parakeet via sherpa-onnx — an offline transducer (encoder/decoder/joiner) with
+    /// state-of-the-art English accuracy.
+    Parakeet,
+    /// Apple's on-device `SpeechAnalyzer` / `SpeechTranscriber` (macOS 26+). The OS owns the model and
+    /// fetches the per-language asset itself, so this family downloads nothing of ours (no files).
+    AppleSpeech,
     /// Speaker diarization (segmentation + embedding) — labels who speaks when, not an ASR engine.
     Diarization,
     /// Speech denoiser (e.g. GTCRN) — cleans audio before ASR, not an ASR engine.
@@ -35,7 +44,10 @@ impl ModelFamily {
             ModelFamily::Whisper
             | ModelFamily::WhisperCpp
             | ModelFamily::StreamingTransducer
-            | ModelFamily::SenseVoice => true,
+            | ModelFamily::SenseVoice
+            | ModelFamily::Paraformer
+            | ModelFamily::Parakeet
+            | ModelFamily::AppleSpeech => true,
             ModelFamily::Diarization | ModelFamily::Denoise => false,
         }
     }
@@ -171,6 +183,7 @@ mod tests {
             ModelFamily::WhisperCpp,
             ModelFamily::StreamingTransducer,
             ModelFamily::SenseVoice,
+            ModelFamily::AppleSpeech,
         ] {
             assert!(f.is_asr(), "{f:?} is a transcription family");
         }

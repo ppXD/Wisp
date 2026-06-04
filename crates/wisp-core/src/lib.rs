@@ -21,6 +21,7 @@ pub mod export;
 pub mod model;
 pub mod params;
 pub mod perf;
+pub mod task;
 pub mod transcript;
 
 #[cfg(any(test, feature = "testing"))]
@@ -38,7 +39,9 @@ pub use engine::{
     AsrEngine, ClipOptions, EngineInfo, StreamingAsrEngine, StreamingResult, TranscriptionResult,
 };
 pub use error::{Result, WispError};
-pub use export::{format_transcript, group_paragraphs, ExportFormat, Paragraph};
+pub use export::{
+    format_markdown, format_transcript, group_paragraphs, ExportFormat, MeetingMeta, Paragraph,
+};
 pub use model::{ModelDescriptor, ModelFamily, ModelFile, ModelId, ModelStore, Quant};
 pub use params::{EnumOption, ParamKind, ParamSpec, ParamValue, ParamValues};
 pub use transcript::{
