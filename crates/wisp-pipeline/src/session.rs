@@ -261,6 +261,9 @@ fn run_capture(
     let mut open_id: Option<u64> = None;
     let mut since_partial = Duration::ZERO;
     let mut resampler = Resampler::new(TARGET_SAMPLE_RATE);
+    // A partial re-decodes the whole open utterance every cadence; cap it to a trailing window so the
+    // cost stays bounded on a long monologue (the closing Final still decodes the full utterance).
+    let max_partial_samples = partial_window_samples();
 
     while !stop.load(Ordering::Relaxed) {
         match source.next_frame()? {
@@ -282,6 +285,8 @@ fn run_capture(
                     since_partial = Duration::ZERO;
                     if let Some(utterance) = segmenter.partial() {
                         let id = *open_id.get_or_insert_with(|| alloc_id(&mut next_id));
+                        let utterance =
+                            cap_partial(utterance, max_partial_samples, TARGET_SAMPLE_RATE);
                         let _ = job_tx.send(Job::Partial(id, utterance));
                     }
                 }
@@ -375,6 +380,33 @@ fn run_streaming(
         sink(TranscriptEvent::Segment(segment));
     }
     Ok(())
+}
+
+/// Trailing-window cap (seconds) for a live *partial* re-decode: bounds the per-partial cost on a long
+/// utterance instead of re-decoding the whole thing every cadence. Override with the env var below.
+const PARTIAL_WINDOW_SECS_ENV: &str = "WISP_PARTIAL_WINDOW_SECS";
+const DEFAULT_PARTIAL_WINDOW_SECS: f64 = 8.0;
+
+/// The partial trailing-window length in 16 kHz samples — read once per session from the environment.
+fn partial_window_samples() -> usize {
+    let secs = std::env::var(PARTIAL_WINDOW_SECS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|&s| s > 0.0)
+        .unwrap_or(DEFAULT_PARTIAL_WINDOW_SECS);
+    (secs * f64::from(TARGET_SAMPLE_RATE)) as usize
+}
+
+/// Caps a live partial's audio to its trailing `max_samples`, shifting `start` forward by the dropped
+/// span so the shorter re-decode stays timestamp-consistent. Left unchanged when it already fits; the
+/// closing `Final` always decodes the whole utterance, so nothing is lost.
+fn cap_partial(mut utterance: Utterance, max_samples: usize, rate: u32) -> Utterance {
+    if utterance.audio.len() > max_samples {
+        let dropped = utterance.audio.len() - max_samples;
+        utterance.audio.drain(..dropped);
+        utterance.start += Duration::from_secs_f64(dropped as f64 / f64::from(rate));
+    }
+    utterance
 }
 
 /// The current partial cadence: the engine's last measured partial-decode time, clamped to the sane
@@ -1031,5 +1063,47 @@ mod tests {
         );
         // A slow machine (decode over the ceiling) is capped so it still tries periodically.
         assert_eq!(partial_target(&AtomicU64::new(9_000)), PARTIAL_CEIL);
+    }
+
+    #[test]
+    fn cap_partial_trims_to_the_trailing_window_and_shifts_start() {
+        // 5 s of 16 kHz audio (80 000 samples) starting at t = 1 s, capped to a 2 s (32 000) window.
+        let utterance = Utterance {
+            audio: (0..80_000).map(|i| i as f32).collect(),
+            start: Duration::from_secs(1),
+        };
+        let capped = cap_partial(utterance, 32_000, 16_000);
+
+        assert_eq!(
+            capped.audio.len(),
+            32_000,
+            "kept exactly the trailing window"
+        );
+        assert_eq!(
+            capped.audio[0], 48_000.0,
+            "the window is the last 32 000 samples (80 000 - 32 000)"
+        );
+        // start advanced by the dropped 48 000 samples = 3 s, so the window opens at 1 s + 3 s = 4 s.
+        assert_eq!(capped.start, Duration::from_secs(4));
+    }
+
+    #[test]
+    fn cap_partial_leaves_an_utterance_within_the_window_untouched() {
+        let utterance = Utterance {
+            audio: vec![0.1; 1_000],
+            start: Duration::from_millis(500),
+        };
+        assert_eq!(
+            cap_partial(utterance.clone(), 32_000, 16_000),
+            utterance,
+            "an utterance already within the window is returned unchanged"
+        );
+    }
+
+    #[test]
+    fn partial_window_env_var_name_is_pinned() {
+        // Operators tune live partial latency via this env var; renaming it silently changes behaviour
+        // for anyone who set it, so pin the literal.
+        assert_eq!(PARTIAL_WINDOW_SECS_ENV, "WISP_PARTIAL_WINDOW_SECS");
     }
 }
