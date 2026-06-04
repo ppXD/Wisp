@@ -10,9 +10,12 @@ BR = "/Users/mars/Projects/Wisp/branding"
 
 CLAY="#c96442"; CREAM="#f7f4ee"; INK="#1a1915"; SAGE="#5f8c6a"
 CLAY_D="#b5573a"; EMBER="#e89766"; DEEP="#9c4631"
-# App-icon tile: a bright, near-flat coral a touch deeper than Claude's #d97757 (no dark
-# vignette). Subtle top→bottom sheen only. Edit these two to nudge the icon lighter/deeper.
-ICON_TOP="#da7a57"; ICON_BOT="#cd6c49"
+# App-icon tile: a warm espresso (dark) — the cool waveform glows against it.
+ICON_TOP="#322823"; ICON_BOT="#221b16"
+# Iridescent waveform — a cool-only spectrum swept left→right across the bars (a colourful
+# equaliser). Cool hues stay clear of the warm bg so nothing blends; ends on violet, never
+# warm pink. Edit/extend to retune the "AI" gradient.
+ICON_PIX=["#4fe3a6","#3fd2dc","#4f9cff","#8a6bff","#a45cff"]
 HEAD='<?xml version="1.0" encoding="UTF-8"?>\n'
 
 # waveform shape (mirrored about the centre axis — audio-editor style)
@@ -59,15 +62,14 @@ files["wisp-mark-reverse.svg"] = svg(glow_def(), waveform(CREAM, SAGE))
 files["wisp-mark-mono.svg"]    = svg("", waveform("currentColor","currentColor", glow=False),
                                      extra=' fill="currentColor" style="color:#c96442"')
 
-# app icon master @1024 — bright coral squircle (near-flat) + white waveform + sage playhead
+# app icon master @1024 — vivid orange squircle + iridescent waveform + sage playhead
 def icon(size=1024):
     m=size*0.094; tile=size-2*m; r=tile*0.235; sc=7.6
     tg=(f'<linearGradient id="tg" gradientUnits="userSpaceOnUse" x1="{_f(size/2)}" y1="{_f(m)}" '
         f'x2="{_f(size/2)}" y2="{_f(size-m)}"><stop offset="0" stop-color="{ICON_TOP}"/>'
         f'<stop offset="1" stop-color="{ICON_BOT}"/></linearGradient>')
-    rg=(f'<linearGradient id="rg" gradientUnits="userSpaceOnUse" x1="50" y1="22" x2="50" y2="80">'
-        f'<stop offset="0" stop-color="#ffffff"/><stop offset="0.55" stop-color="#ffffff"/>'
-        f'<stop offset="1" stop-color="#f3ece3"/></linearGradient>')
+    stops="".join(f'<stop offset="{i/(len(ICON_PIX)-1):.3f}" stop-color="{c}"/>' for i,c in enumerate(ICON_PIX))
+    rg=(f'<linearGradient id="rg" gradientUnits="userSpaceOnUse" x1="14" y1="50" x2="86" y2="50">{stops}</linearGradient>')
     grp=(f'<g transform="translate({_f(size/2)},{_f(size/2)}) scale({sc}) translate(-50,-50)">'
          f'{waveform("url(#rg)", SAGE)}</g>')
     return svg(tg+rg+glow_def(),
