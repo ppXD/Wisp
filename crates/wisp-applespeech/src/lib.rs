@@ -51,7 +51,10 @@ pub fn locale_for_language(language: &str) -> String {
 
 /// What to surface from the recogniser this poll. A finalised utterance takes priority; otherwise a
 /// *changed* volatile partial; otherwise nothing — so an unchanged partial isn't re-emitted every frame.
+// Used by the `mac` engine and the cross-platform `pure_tests`; off macOS the engine is absent, so the
+// non-test lib build sees these as unused — allow it there rather than re-derive per platform.
 #[derive(Debug, PartialEq, Eq)]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 enum Emission {
     Final(String),
     Partial(String),
@@ -61,6 +64,7 @@ enum Emission {
 /// Picks the next [`Emission`] from the drained finals, the current volatile hypothesis, and the text
 /// last emitted: a pending final (utterance boundary) wins; else a volatile that actually changed; else
 /// idle. Emitting a final clears `last_partial`, so the next utterance's first partial always surfaces.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 fn select_emission(
     finals: &mut VecDeque<String>,
     volatile: &str,
@@ -138,7 +142,9 @@ mod pure_tests {
     }
 }
 
-#[cfg(all(test, target_os = "macos"))]
+// `apple_speech_real` (set by build.rs) gates this to builds that compiled the genuine macOS-26 shim;
+// on an older SDK we link the unavailable stub, where asserting availability would (correctly) fail.
+#[cfg(all(test, target_os = "macos", apple_speech_real))]
 mod tests {
     /// Calling across the FFI proves the Swift shim links (static lib + Speech/AVFoundation frameworks +
     /// Swift runtime) and runs; on the build machine (macOS 26+) it should report available.
