@@ -792,9 +792,10 @@ fn spawn_session(
 }
 
 /// Builds the event sink shared by every live path: forwards each segment to the webview, dropping
-/// cross-stream echo on committed finals (a shared `dedup` filter sees both streams' finals in
-/// commit order), then feeds each admitted final to the realtime assist and the retained meeting
-/// transcript. Provisional partials bypass the filter so they never prime it against their own final.
+/// cross-stream echo via a shared `dedup` filter, then feeds each admitted final to the realtime
+/// assist and the retained meeting transcript. Every segment — partial or final — is routed through
+/// the filter, which suppresses a mic echo even while it's still provisional; the filter only
+/// *remembers* committed meeting finals, so a mic line never primes itself.
 fn build_live_sink(
     app: &AppHandle,
     dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
@@ -802,13 +803,9 @@ fn build_live_sink(
     let emitter = app.clone();
     Box::new(move |event| {
         if let TranscriptEvent::Segment(segment) = event {
-            let emit = if matches!(segment.status, SegmentStatus::Final) {
-                match &dedup {
-                    Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
-                    None => true,
-                }
-            } else {
-                true
+            let emit = match &dedup {
+                Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
+                None => true,
             };
             if emit {
                 let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
