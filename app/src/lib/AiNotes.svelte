@@ -601,7 +601,11 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     {/if}
   </div>
 
-  {#if !collapsed}
+  <!-- Everything below the (fixed) model row scrolls when configuring, so a tall Advanced panel can't
+       push Start / params out of reach. While live-rolling (collapsed) the feed is the bounded scroller
+       instead, so its newest-at-bottom auto-scroll still works. -->
+  <div class="body" class:scroll={!collapsed}>
+    {#if !collapsed}
     {#if provider && !provider.keySet}
       <button class="keyrow" onclick={openEndpointsModal}>⚠ {provider.name} needs an API key — add it</button>
     {/if}
@@ -674,7 +678,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
   {/if}
 
   <!-- The scrolling feed of assist outputs (newest at the bottom). -->
-  <div class="feed" bind:this={feedEl} onscroll={onFeedScroll}>
+  <div class="feed" class:flow={!collapsed} bind:this={feedEl} onscroll={onFeedScroll}>
     {#each feed as e (e.id)}
       <div class="entry">
         <div class="entry-meta">
@@ -692,6 +696,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
       {/if}
     {/each}
     {#if running && streamId === null}<div class="working"><span class="spin"></span>Working…</div>{/if}
+  </div>
   </div>
 {/if}
 
@@ -1153,6 +1158,20 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     background: var(--surface);
   }
 
+  /* The scroll region below the fixed model row. While configuring (`.scroll`) it scrolls as one
+     column, so a tall Advanced panel keeps Start + every param reachable; while live-rolling it stays
+     overflow-visible and the feed below is the bounded scroller (its auto-scroll-to-newest works). */
+  .body {
+    flex: 1 1 auto;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .body.scroll {
+    overflow-y: auto;
+  }
+
   /* ── Scrolling output feed ── */
   .feed {
     flex: 1;
@@ -1162,6 +1181,13 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     display: flex;
     flex-direction: column;
     gap: 12px;
+  }
+
+  /* While configuring, the feed flows inside `.body.scroll` (natural height) instead of being its own
+     bounded scroller — so the composer above can use the full height and nothing is clipped. */
+  .feed.flow {
+    flex: 0 0 auto;
+    overflow: visible;
   }
 
   .entry {
