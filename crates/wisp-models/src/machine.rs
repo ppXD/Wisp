@@ -93,6 +93,21 @@ fn inferred_gpu_tier(accelerator: Accelerator, ram_bytes: u64) -> GpuTier {
     }
 }
 
+/// Parses total physical memory (bytes) from the contents of Linux `/proc/meminfo` — the `MemTotal:`
+/// line, whose value is in kibibytes (`MemTotal:  16384256 kB`). Returns `None` if that line is
+/// absent or unparseable, so the caller falls back to a safe default. Pure, so the parse is tested
+/// without a Linux host; the file read itself stays in the platform shell.
+pub fn parse_meminfo_total_bytes(meminfo: &str) -> Option<u64> {
+    let kib: u64 = meminfo
+        .lines()
+        .find_map(|line| line.strip_prefix("MemTotal:"))?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    Some(kib * 1024)
+}
+
 /// Auto-picks the **Live** default for `profile` — the most accurate Whisper its GPU tier can keep up
 /// with in *real time*, computed from the tier rather than hard-coded per platform:
 ///
@@ -508,6 +523,26 @@ mod tests {
         assert_eq!(
             MachineProfile::new(Accelerator::Cpu, 64 * GIB).gpu_tier,
             GpuTier::None
+        );
+    }
+
+    #[test]
+    fn parses_total_memory_from_proc_meminfo() {
+        let meminfo = "MemTotal:       16384256 kB\nMemFree:         1000000 kB\nBuffers: 0 kB\n";
+        assert_eq!(
+            parse_meminfo_total_bytes(meminfo),
+            Some(16_384_256 * 1024),
+            "MemTotal kB → bytes"
+        );
+    }
+
+    #[test]
+    fn meminfo_without_a_valid_memtotal_is_none() {
+        assert_eq!(parse_meminfo_total_bytes(""), None);
+        assert_eq!(parse_meminfo_total_bytes("MemFree: 1000 kB\n"), None);
+        assert_eq!(
+            parse_meminfo_total_bytes("MemTotal:  not_a_number kB"),
+            None
         );
     }
 }

@@ -928,7 +928,35 @@ fn machine_ram_bytes() -> u64 {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+/// Total physical memory in bytes on Windows, via `GlobalMemoryStatusEx` (`ullTotalPhys`). Falls
+/// back to 16 GiB if the call fails, so model recommendation never errors out.
+#[cfg(target_os = "windows")]
+fn machine_ram_bytes() -> u64 {
+    use windows::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+
+    // SAFETY: a zeroed MEMORYSTATUSEX with `dwLength` set is exactly the input the API documents.
+    let mut status: MEMORYSTATUSEX = unsafe { std::mem::zeroed() };
+    status.dwLength = std::mem::size_of::<MEMORYSTATUSEX>() as u32;
+
+    // SAFETY: `status` is a valid, correctly-sized out-pointer for the duration of the call.
+    match unsafe { GlobalMemoryStatusEx(&mut status) } {
+        Ok(()) if status.ullTotalPhys > 0 => status.ullTotalPhys,
+        _ => 16 * 1024 * 1024 * 1024,
+    }
+}
+
+/// Total physical memory in bytes on Linux, from `/proc/meminfo`'s `MemTotal`. Falls back to 16 GiB
+/// if the file can't be read or parsed.
+#[cfg(target_os = "linux")]
+fn machine_ram_bytes() -> u64 {
+    std::fs::read_to_string("/proc/meminfo")
+        .ok()
+        .and_then(|info| wisp_models::parse_meminfo_total_bytes(&info))
+        .unwrap_or(16 * 1024 * 1024 * 1024)
+}
+
+/// Any other platform: assume 16 GiB ("ample") so model recommendation never errors out.
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn machine_ram_bytes() -> u64 {
     16 * 1024 * 1024 * 1024
 }
