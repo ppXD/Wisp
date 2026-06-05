@@ -46,6 +46,26 @@ fn asr_threads() -> i32 {
     i32::try_from(n).unwrap_or(i32::MAX)
 }
 
+/// Env var selecting the ONNX Runtime execution provider for every sherpa engine — e.g. `cpu`,
+/// `cuda`, `directml`, `coreml`. Unset or empty leaves sherpa-rs on its built-in default (CPU). The
+/// app sets it once at startup from the detected host accelerator; an operator can override it to
+/// force (or disable) a GPU provider without a rebuild.
+pub const EXECUTION_PROVIDER_ENV: &str = "WISP_ONNX_PROVIDER";
+
+/// The configured execution provider for the sherpa ONNX engines, or `None` to leave sherpa-rs on its
+/// default. Read per config build, so a process can be pointed at a different provider via the
+/// environment without recompiling.
+fn execution_provider() -> Option<String> {
+    parse_provider(std::env::var(EXECUTION_PROVIDER_ENV).ok())
+}
+
+/// Normalizes a raw [`EXECUTION_PROVIDER_ENV`] value: trims surrounding space and treats an
+/// empty/whitespace value as unset (`None`). Pure, so it's tested without touching the process env.
+fn parse_provider(raw: Option<String>) -> Option<String> {
+    let trimmed = raw?.trim().to_owned();
+    (!trimmed.is_empty()).then_some(trimmed)
+}
+
 /// Whisper emits non-speech annotations like `[BLANK_AUDIO]` or `(speaking in foreign language)` on
 /// silence/noise. Treat any segment that is purely such an annotation as empty so it isn't shown.
 fn strip_whisper_annotation(raw: &str) -> &str {
@@ -108,6 +128,7 @@ impl SenseVoiceEngine {
             // Without this sherpa-rs runs SenseVoice single-threaded — the biggest cross-platform
             // speed loss, since SenseVoice is the default engine off macOS.
             num_threads: Some(asr_threads()),
+            provider: execution_provider(),
             ..Default::default()
         };
 
@@ -160,6 +181,7 @@ impl WhisperEngine {
             tokens: tokens.to_string_lossy().into_owned(),
             language: language.to_owned(),
             num_threads: Some(asr_threads()),
+            provider: execution_provider(),
             ..Default::default()
         };
 
@@ -208,6 +230,7 @@ impl ParaformerEngine {
             model: model.to_string_lossy().into_owned(),
             tokens: tokens.to_string_lossy().into_owned(),
             num_threads: Some(asr_threads()),
+            provider: execution_provider(),
             ..Default::default()
         };
 
@@ -261,6 +284,7 @@ impl ParakeetEngine {
             model_type: "nemo_transducer".to_owned(),
             decoding_method: "greedy_search".to_owned(),
             num_threads: asr_threads(),
+            provider: execution_provider(),
             ..Default::default()
         };
 
@@ -294,7 +318,7 @@ impl AsrEngine for ParakeetEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{strip_whisper_annotation, to_result};
+    use super::{parse_provider, strip_whisper_annotation, to_result, EXECUTION_PROVIDER_ENV};
 
     #[test]
     fn drops_whisper_non_speech_annotations() {
@@ -338,5 +362,26 @@ mod tests {
     #[test]
     fn to_result_empty_text_is_empty() {
         assert!(to_result("   ", &[], &[], 1.0).segments.is_empty());
+    }
+
+    /// Renaming this env var silently breaks any operator who pinned a GPU execution provider.
+    #[test]
+    fn execution_provider_env_name_is_pinned() {
+        assert_eq!(EXECUTION_PROVIDER_ENV, "WISP_ONNX_PROVIDER");
+    }
+
+    #[test]
+    fn parse_provider_trims_and_treats_blank_as_unset() {
+        assert_eq!(
+            parse_provider(Some("directml".to_owned())),
+            Some("directml".to_owned())
+        );
+        assert_eq!(
+            parse_provider(Some("  cuda  ".to_owned())),
+            Some("cuda".to_owned())
+        );
+        assert_eq!(parse_provider(Some("   ".to_owned())), None);
+        assert_eq!(parse_provider(Some(String::new())), None);
+        assert_eq!(parse_provider(None), None);
     }
 }
