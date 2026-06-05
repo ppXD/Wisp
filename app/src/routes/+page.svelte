@@ -20,6 +20,7 @@
     streamingParams,
     batchParams,
     defaultParamValues,
+    changedParamValues,
     loadParamValues,
     saveParamValues,
     type ParamSpec,
@@ -681,7 +682,7 @@
           engine: liveEngine,
           cloudProvider: liveEngine === "cloud" ? liveCloudProvider : null,
           cloudModel: liveEngine === "cloud" ? liveCloudModel : null,
-          params: liveEngine === "cloud" ? liveParams : {},
+          params: liveEngine === "cloud" ? changedParamValues(liveParams, liveParamSpecs) : {},
           // Always tap the live audio for the realtime assist. The tap is a cheap drop-oldest tee that
           // is never drained unless the assist runs, so the realtime assist can be started at any point
           // during a live session — no need to have "armed" it before Start.
@@ -1052,7 +1053,7 @@
           engine: fileEngine,
           cloudProvider: fileEngine === "cloud" ? fileCloudProvider : null,
           cloudModel: fileEngine === "cloud" ? fileCloudModel : null,
-          params: fileEngine === "cloud" ? fileParams : {},
+          params: fileEngine === "cloud" ? changedParamValues(fileParams, fileParamSpecs) : {},
         },
       });
     } catch (e) {

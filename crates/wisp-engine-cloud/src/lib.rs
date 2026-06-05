@@ -600,17 +600,24 @@ fn transcribe_prompt(language: &str, prompt: &str) -> String {
 
 /// Gemini `generateContent` request body: one user turn with the prompt and inline base64 audio.
 fn build_gemini_body(wav: &[u8], language: &str, params: &ParamValues) -> String {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "contents": [{
             "role": "user",
             "parts": [
                 { "text": transcribe_prompt(language, &params.text("prompt", "")) },
                 { "inlineData": { "mimeType": "audio/wav", "data": b64(wav) } }
             ]
-        }],
-        "generationConfig": { "temperature": params.float("temperature", 0.0) }
-    })
-    .to_string()
+        }]
+    });
+
+    // Send temperature only when the user set it — otherwise omit `generationConfig` so Gemini uses
+    // the model's own default (some models reject a non-default temperature).
+    if params.contains("temperature") {
+        body["generationConfig"] =
+            serde_json::json!({ "temperature": params.float("temperature", 0.0) });
+    }
+
+    body.to_string()
 }
 
 /// The transcript from a Gemini response — the concatenated text parts of the first candidate.
@@ -645,9 +652,8 @@ fn parse_gemini(json: &str) -> Result<String> {
 
 /// OpenAI-compatible `/chat/completions` body carrying the audio as an `input_audio` content part.
 fn build_chat_audio_body(wav: &[u8], model: &str, language: &str, params: &ParamValues) -> String {
-    serde_json::json!({
+    let mut body = serde_json::json!({
         "model": model,
-        "temperature": params.float("temperature", 0.0),
         "messages": [{
             "role": "user",
             "content": [
@@ -655,8 +661,15 @@ fn build_chat_audio_body(wav: &[u8], model: &str, language: &str, params: &Param
                 { "type": "text", "text": transcribe_prompt(language, &params.text("prompt", "")) }
             ]
         }]
-    })
-    .to_string()
+    });
+
+    // Send temperature only when the user set it — some OpenAI-compatible models only accept their
+    // own default and reject any explicit value.
+    if params.contains("temperature") {
+        body["temperature"] = serde_json::json!(params.float("temperature", 0.0));
+    }
+
+    body.to_string()
 }
 
 /// The transcript from an OpenAI-style chat completion: `choices[0].message.content`.
@@ -1323,6 +1336,29 @@ mod tests {
             .as_str()
             .unwrap()
             .contains("Wisp"));
+    }
+
+    #[test]
+    fn temperature_is_omitted_when_unset() {
+        // An unset temperature must not be sent — a model that only accepts its own default (e.g.
+        // "temperature only supports 1") would reject a fabricated value. Omitting lets it apply the
+        // model's own default.
+        let params = ParamValues::new();
+
+        let gemini: serde_json::Value =
+            serde_json::from_str(&build_gemini_body(b"a", "", &params)).unwrap();
+        assert!(
+            gemini.get("generationConfig").is_none(),
+            "no generationConfig when temperature is unset"
+        );
+
+        let chat: serde_json::Value =
+            serde_json::from_str(&build_chat_audio_body(b"a", "qwen3-asr-flash", "", &params))
+                .unwrap();
+        assert!(
+            chat.get("temperature").is_none(),
+            "no temperature field when unset"
+        );
     }
 
     #[test]
