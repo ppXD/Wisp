@@ -10,6 +10,11 @@
 //! (e.g. Groq) via the provider's `base_url`. The request building and response parsing are pure and
 //! unit-tested; only the HTTP round-trip needs the network.
 
+// `ureq::Error` is large (it embeds a `Response`), so any `Result` carrying it trips clippy's
+// `result_large_err`. These are infrequent network round-trips, not a hot path, so the `Result` size
+// is irrelevant — boxing every cloud error would only obscure the code. Allow it crate-wide.
+#![allow(clippy::result_large_err)]
+
 use std::io::{BufRead, BufReader, Cursor};
 use std::time::Duration;
 
@@ -173,11 +178,13 @@ impl CloudEngine {
         let endpoint = format!("{}/audio/transcriptions", self.base_url);
         let (content_type, body) =
             build_multipart(wav, &self.model, &self.language, &self.params, false);
-        let sent = ureq::post(&endpoint)
-            .set(&self.auth_header, &self.auth_value)
-            .set("Content-Type", &content_type)
-            .timeout(Duration::from_secs(300))
-            .send_bytes(&body);
+        let sent = send_with_retry(|| {
+            ureq::post(&endpoint)
+                .set(&self.auth_header, &self.auth_value)
+                .set("Content-Type", &content_type)
+                .timeout(Duration::from_secs(300))
+                .send_bytes(&body)
+        });
         body_or_error(sent)
     }
 
@@ -192,26 +199,27 @@ impl CloudEngine {
             "{}/models/{}:generateContent?key={}",
             self.base_url, self.model, self.api_key
         );
-        let sent = ureq::post(&url)
-            .set("Content-Type", "application/json")
-            .timeout(Duration::from_secs(300))
-            .send_string(&build_gemini_body(wav, &self.language, &self.params));
+        let gemini_body = build_gemini_body(wav, &self.language, &self.params);
+        let sent = send_with_retry(|| {
+            ureq::post(&url)
+                .set("Content-Type", "application/json")
+                .timeout(Duration::from_secs(300))
+                .send_string(&gemini_body)
+        });
         parse_gemini(&body_or_error(sent)?)
     }
 
     /// OpenAI-compatible `/chat/completions` with the audio as an `input_audio` content part.
     fn post_chat_audio(&self, wav: &[u8]) -> Result<String> {
         let endpoint = format!("{}/chat/completions", self.base_url);
-        let sent = ureq::post(&endpoint)
-            .set(&self.auth_header, &self.auth_value)
-            .set("Content-Type", "application/json")
-            .timeout(Duration::from_secs(300))
-            .send_string(&build_chat_audio_body(
-                wav,
-                &self.model,
-                &self.language,
-                &self.params,
-            ));
+        let chat_body = build_chat_audio_body(wav, &self.model, &self.language, &self.params);
+        let sent = send_with_retry(|| {
+            ureq::post(&endpoint)
+                .set(&self.auth_header, &self.auth_value)
+                .set("Content-Type", "application/json")
+                .timeout(Duration::from_secs(300))
+                .send_string(&chat_body)
+        });
         parse_chat_completion(&body_or_error(sent)?)
     }
 
@@ -233,11 +241,13 @@ impl CloudEngine {
         let endpoint = format!("{}/audio/transcriptions", self.base_url);
         let (content_type, body) =
             build_multipart(wav, &self.model, &self.language, &self.params, true);
-        let sent = ureq::post(&endpoint)
-            .set(&self.auth_header, &self.auth_value)
-            .set("Content-Type", &content_type)
-            .timeout(Duration::from_secs(300))
-            .send_bytes(&body);
+        let sent = send_with_retry(|| {
+            ureq::post(&endpoint)
+                .set(&self.auth_header, &self.auth_value)
+                .set("Content-Type", &content_type)
+                .timeout(Duration::from_secs(300))
+                .send_bytes(&body)
+        });
 
         let reader = match sent {
             Ok(response) => BufReader::new(response.into_reader()),
@@ -833,6 +843,75 @@ fn not_json_error(json: &str, e: serde_json::Error) -> WispError {
     ))
 }
 
+/// Total HTTP attempts for a transient cloud failure (>= 1); the rest are retries. Override with the
+/// env var so an operator on a flaky link can ask for more — or `1` to disable retries.
+const CLOUD_RETRY_ATTEMPTS_ENV: &str = "WISP_CLOUD_RETRY_ATTEMPTS";
+const DEFAULT_CLOUD_RETRY_ATTEMPTS: u32 = 3;
+/// Upper bound on any single backoff / `Retry-After` wait, so a hostile or huge value can't stall a File.
+const MAX_RETRY_DELAY: Duration = Duration::from_secs(30);
+
+fn cloud_retry_attempts() -> u32 {
+    std::env::var(CLOUD_RETRY_ATTEMPTS_ENV)
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(DEFAULT_CLOUD_RETRY_ATTEMPTS)
+}
+
+/// A transient failure worth retrying: any transport error (dropped connection, DNS, timeout) or a
+/// throttling / temporary-server HTTP status. A 4xx like 401/404 is the caller's fault — never retried.
+fn is_transient(err: &ureq::Error) -> bool {
+    matches!(
+        err,
+        ureq::Error::Transport(_) | ureq::Error::Status(429 | 500 | 502 | 503 | 504, _)
+    )
+}
+
+/// How long to wait before the next attempt: a server `Retry-After` (seconds, capped) when the status
+/// carries one, else exponential backoff (0.5s, 1s, 2s, …), capped at [`MAX_RETRY_DELAY`].
+fn retry_delay(err: &ureq::Error, attempt: u32) -> Duration {
+    if let ureq::Error::Status(_, response) = err {
+        if let Some(secs) = response
+            .header("Retry-After")
+            .and_then(|v| v.trim().parse::<u64>().ok())
+        {
+            return Duration::from_secs(secs).min(MAX_RETRY_DELAY);
+        }
+    }
+    Duration::from_millis(500u64.saturating_mul(2u64.saturating_pow(attempt - 1)))
+        .min(MAX_RETRY_DELAY)
+}
+
+/// Retries `send` while it fails transiently and attempts remain, sleeping between tries. Generic over
+/// the result/error so the loop is unit-testable without real HTTP.
+fn retry_send<T, E>(
+    mut send: impl FnMut() -> std::result::Result<T, E>,
+    max_attempts: u32,
+    transient: impl Fn(&E) -> bool,
+    delay: impl Fn(&E, u32) -> Duration,
+) -> std::result::Result<T, E> {
+    let mut attempt = 1u32;
+    loop {
+        match send() {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < max_attempts && transient(&err) => {
+                std::thread::sleep(delay(&err, attempt));
+                attempt += 1;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Sends a cloud HTTP request with bounded retry on transient failure, so one network blip or 503 on a
+/// single File window doesn't abort the whole transcription. Transcription POSTs are idempotent, so a
+/// re-send is safe.
+fn send_with_retry(
+    send: impl FnMut() -> std::result::Result<ureq::Response, ureq::Error>,
+) -> std::result::Result<ureq::Response, ureq::Error> {
+    retry_send(send, cloud_retry_attempts(), is_transient, retry_delay)
+}
+
 /// Turns a ureq send result into the response body text, surfacing the API's own error body (key
 /// rejected, model unknown, quota exceeded) on a non-2xx status rather than a bare status code.
 // Shared HTTP-result helper for every cloud call (transcription AND chat/assist) — so its message is
@@ -1254,5 +1333,122 @@ mod tests {
         assert_eq!(result.segments[0].text, "hi there");
 
         assert!(to_result("   ", &audio, 16_000).segments.is_empty());
+    }
+
+    #[test]
+    fn transient_classification_retries_throttle_and_5xx_only() {
+        let status = |code: u16| {
+            ureq::Error::Status(code, ureq::Response::new(code, "x", "").expect("resp"))
+        };
+        for code in [429u16, 500, 502, 503, 504] {
+            assert!(is_transient(&status(code)), "HTTP {code} should be retried");
+        }
+        for code in [400u16, 401, 403, 404, 422] {
+            assert!(
+                !is_transient(&status(code)),
+                "HTTP {code} should not be retried"
+            );
+        }
+    }
+
+    #[test]
+    fn retry_delay_honors_a_capped_retry_after_else_backs_off_exponentially() {
+        let from_raw = |raw: &str| {
+            ureq::Error::Status(429, raw.parse::<ureq::Response>().expect("parse resp"))
+        };
+        // A server Retry-After (seconds) wins, capped at MAX_RETRY_DELAY.
+        assert_eq!(
+            retry_delay(
+                &from_raw("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 5\r\n\r\n"),
+                1
+            ),
+            Duration::from_secs(5)
+        );
+        assert_eq!(
+            retry_delay(
+                &from_raw("HTTP/1.1 429 Too Many Requests\r\nRetry-After: 9999\r\n\r\n"),
+                1
+            ),
+            MAX_RETRY_DELAY
+        );
+        // No Retry-After → exponential 0.5s, 1s, 2s …
+        let no_header = ureq::Error::Status(503, ureq::Response::new(503, "x", "").expect("resp"));
+        assert_eq!(retry_delay(&no_header, 1), Duration::from_millis(500));
+        assert_eq!(retry_delay(&no_header, 2), Duration::from_secs(1));
+        assert_eq!(retry_delay(&no_header, 3), Duration::from_secs(2));
+    }
+
+    #[test]
+    fn cloud_retry_attempts_env_var_name_is_pinned() {
+        // Operators tune cloud resilience via this env var; a rename silently changes their behaviour.
+        assert_eq!(CLOUD_RETRY_ATTEMPTS_ENV, "WISP_CLOUD_RETRY_ATTEMPTS");
+    }
+
+    #[test]
+    fn retry_send_returns_on_first_success_without_retrying() {
+        let mut calls = 0;
+        let out: std::result::Result<i32, i32> = retry_send(
+            || {
+                calls += 1;
+                Ok(7)
+            },
+            3,
+            |_| true,
+            |_, _| Duration::ZERO,
+        );
+        assert_eq!(out, Ok(7));
+        assert_eq!(calls, 1);
+    }
+
+    #[test]
+    fn retry_send_retries_a_transient_error_then_succeeds() {
+        let mut calls = 0;
+        let out: std::result::Result<i32, i32> = retry_send(
+            || {
+                calls += 1;
+                if calls < 3 {
+                    Err(0)
+                } else {
+                    Ok(7)
+                }
+            },
+            3,
+            |&e| e == 0,
+            |_, _| Duration::ZERO,
+        );
+        assert_eq!(out, Ok(7));
+        assert_eq!(calls, 3, "two retries, succeeded on the third attempt");
+    }
+
+    #[test]
+    fn retry_send_gives_up_after_max_attempts_on_a_persistent_transient() {
+        let mut calls = 0;
+        let out: std::result::Result<i32, i32> = retry_send(
+            || {
+                calls += 1;
+                Err(0)
+            },
+            3,
+            |&e| e == 0,
+            |_, _| Duration::ZERO,
+        );
+        assert_eq!(out, Err(0));
+        assert_eq!(calls, 3, "exactly max_attempts tries");
+    }
+
+    #[test]
+    fn retry_send_does_not_retry_a_non_transient_error() {
+        let mut calls = 0;
+        let out: std::result::Result<i32, i32> = retry_send(
+            || {
+                calls += 1;
+                Err(42)
+            },
+            3,
+            |&e| e == 0,
+            |_, _| Duration::ZERO,
+        );
+        assert_eq!(out, Err(42));
+        assert_eq!(calls, 1, "a non-transient error is returned immediately");
     }
 }
