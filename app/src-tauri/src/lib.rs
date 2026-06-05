@@ -1424,7 +1424,8 @@ fn save_cloud_custom_models(path: &Path, models: &[CloudCustomModel]) {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AssistParams {
-    /// Sampling temperature for the chat model (default 0.3 when unset).
+    /// Sampling temperature for the chat model (omitted from the request when unset, so a model that
+    /// only accepts its default temperature — e.g. a reasoning model — isn't sent one).
     #[serde(default)]
     temperature: Option<f64>,
     /// Cap on the reply length, in tokens (omitted from the request when unset).
@@ -1991,7 +1992,7 @@ fn run_assist_stream_blocking(
             let req = ChatRequest {
                 system: &system,
                 user: transcript,
-                temperature: assist.temperature.unwrap_or(0.3),
+                temperature: assist.temperature,
                 max_tokens: assist.max_tokens,
                 top_p: assist.top_p,
             };
@@ -2071,8 +2072,8 @@ fn run_assist(
     }
 }
 
-/// One chat-completion call with the endpoint's tuning (temperature default 0.3, optional max tokens
-/// / top_p).
+/// One chat-completion call with the endpoint's tuning — temperature / max_tokens / top_p are each
+/// sent only when set, so a model that rejects a non-default temperature isn't sent one.
 fn chat_once(
     provider: &CloudProvider,
     model: &str,
@@ -2088,7 +2089,7 @@ fn chat_once(
         &ChatRequest {
             system,
             user,
-            temperature: assist.temperature.unwrap_or(0.3),
+            temperature: assist.temperature,
             max_tokens: assist.max_tokens,
             top_p: assist.top_p,
         },
