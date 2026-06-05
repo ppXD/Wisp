@@ -66,3 +66,6 @@ wisp-applespeech = { path = "../../crates/wisp-applespeech" }
 # ScreenCaptureKit, so Windows gets the same one-click "capture the meeting" Live experience.
 [target.'cfg(target_os = "windows")'.dependencies]
 wisp-loopback = { path = "../../crates/wisp-loopback" }
+# Total physical memory (GlobalMemoryStatusEx) to recommend a machine-appropriate model. Same
+# `windows` major as wisp-loopback, so no extra version in the tree.
+windows = { version = "0.61", features = ["Win32_System_SystemInformation"] }

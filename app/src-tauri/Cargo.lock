@@ -88,6 +88,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
  "tauri-plugin-opener",
+ "windows 0.61.3",
  "wisp-aec",
  "wisp-applespeech",
  "wisp-audio",
