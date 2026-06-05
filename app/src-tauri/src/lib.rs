@@ -52,8 +52,8 @@ use wisp_models::{
     FsModelStore, GpuTier, HttpDownloader, MachineProfile, ModelFit,
 };
 use wisp_pipeline::{
-    remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, Segmenter,
-    Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
+    remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, LiveStream,
+    Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
 };
 #[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
@@ -704,31 +704,7 @@ fn spawn_session(
         .as_deref()
         .and_then(|id| build_denoiser(id, settings.denoise_dir.as_deref()));
 
-    let emitter = app.clone();
-    let sink: wisp_pipeline::EventSink = Box::new(move |event| {
-        if let TranscriptEvent::Segment(segment) = event {
-            // Provisional partials bypass the cross-stream echo filter — only a committed final
-            // updates its dedup state (a partial priming it would make the final look like an echo,
-            // and partials of the same utterance would flap in and out of the feed).
-            let emit = if matches!(segment.status, SegmentStatus::Final) {
-                match &dedup {
-                    Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
-                    None => true,
-                }
-            } else {
-                true
-            };
-            if emit {
-                let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
-                // Feed each admitted final into the realtime assist (if one is running) as authoritative,
-                // speaker-attributed text — the diarized anchor the model trusts over its own ASR.
-                if matches!(segment.status, SegmentStatus::Final) {
-                    route_assist_final(&emitter, &segment);
-                    retain_live_segment(&emitter, &segment);
-                }
-            }
-        }
-    });
+    let sink = build_live_sink(app, dedup);
 
     let (descriptor, dir) = match engine_source {
         // Cloud realtime self-segments and denoises server-side, so it drives the streaming pipeline
@@ -803,18 +779,8 @@ fn spawn_session(
         ));
     }
 
-    let mut engine = build_engine(descriptor, dir, &settings.language)?;
-    engine.configure_streaming(&settings.prompt, settings.accurate);
+    let transcriber = build_local_transcriber(descriptor, dir, kind, settings)?;
     let segmenter = build_segmenter(app, kind);
-    let mut transcriber = Transcriber::new(engine, kind);
-    // Live speaker labels: a per-session diarizer (separate numbering per stream). Best-effort —
-    // if the model won't load, transcribe without labels rather than failing the session.
-    if let Some(diarize_dir) = &settings.diarize_dir {
-        match SherpaLiveDiarizer::new(&diarize_dir.join("embedding.onnx")) {
-            Ok(diarizer) => transcriber = transcriber.with_diarizer(Box::new(diarizer)),
-            Err(e) => eprintln!("wisp: live diarizer load failed ({e}); skipping speaker labels"),
-        }
-    }
 
     Ok(Session::spawn_live(
         segmenter,
@@ -823,6 +789,122 @@ fn spawn_session(
         sink,
         denoiser,
     ))
+}
+
+/// Builds the event sink shared by every live path: forwards each segment to the webview, dropping
+/// cross-stream echo on committed finals (a shared `dedup` filter sees both streams' finals in
+/// commit order), then feeds each admitted final to the realtime assist and the retained meeting
+/// transcript. Provisional partials bypass the filter so they never prime it against their own final.
+fn build_live_sink(
+    app: &AppHandle,
+    dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
+) -> wisp_pipeline::EventSink {
+    let emitter = app.clone();
+    Box::new(move |event| {
+        if let TranscriptEvent::Segment(segment) = event {
+            let emit = if matches!(segment.status, SegmentStatus::Final) {
+                match &dedup {
+                    Some(filter) => filter.lock().map(|mut f| f.admit(&segment)).unwrap_or(true),
+                    None => true,
+                }
+            } else {
+                true
+            };
+            if emit {
+                let _ = emitter.emit(SEGMENT_EVENT, SegmentDto::from(&segment));
+                if matches!(segment.status, SegmentStatus::Final) {
+                    route_assist_final(&emitter, &segment);
+                    retain_live_segment(&emitter, &segment);
+                }
+            }
+        }
+    })
+}
+
+/// Builds the local-batch live transcriber: a configured engine wrapped in a [`Transcriber`], with
+/// the per-session live diarizer attached when a speaker model is set. Shared by the single-stream
+/// ([`spawn_session`]) and shared-engine ([`spawn_shared_local_session`]) local-batch paths; the
+/// latter passes one transcriber across both streams, so its diarizer numbers speakers in one space.
+fn build_local_transcriber(
+    descriptor: &ModelDescriptor,
+    dir: &Path,
+    kind: AudioSourceKind,
+    settings: &LiveSettings,
+) -> WispResult<Transcriber> {
+    let mut engine = build_engine(descriptor, dir, &settings.language)?;
+    engine.configure_streaming(&settings.prompt, settings.accurate);
+
+    let mut transcriber = Transcriber::new(engine, kind);
+
+    // Live speaker labels via a per-session diarizer. Best-effort — if the model won't load,
+    // transcribe without labels rather than failing the session.
+    if let Some(diarize_dir) = &settings.diarize_dir {
+        match SherpaLiveDiarizer::new(&diarize_dir.join("embedding.onnx")) {
+            Ok(diarizer) => transcriber = transcriber.with_diarizer(Box::new(diarizer)),
+            Err(e) => eprintln!("wisp: live diarizer load failed ({e}); skipping speaker labels"),
+        }
+    }
+
+    Ok(transcriber)
+}
+
+/// Spawns ONE live session that runs several local streams (mic + system) through a SINGLE batch
+/// engine — one model copy in RAM, one rolling context, one unified speaker space — instead of a full
+/// engine per stream. Each stream keeps its own segmenter, denoiser, mute gate, and
+/// [`AudioSourceKind`] (so segments stay labelled by source); they share the transcriber and sink.
+/// Only valid for the decoupled local-batch path (see [`LiveEngine::shared_local_target`]).
+fn spawn_shared_local_session(
+    app: &AppHandle,
+    descriptor: &ModelDescriptor,
+    dir: &Path,
+    streams: Vec<(Box<dyn AudioSource>, AudioSourceKind)>,
+    dedup: Option<Arc<Mutex<CrossStreamEchoFilter>>>,
+    settings: &LiveSettings,
+) -> WispResult<Session> {
+    // The shared transcriber's own kind is only the single-stream default; every utterance is tagged
+    // per-stream below, so this value never reaches a segment. Use the first stream's kind.
+    let default_kind = streams
+        .first()
+        .map(|(_, kind)| *kind)
+        .unwrap_or(AudioSourceKind::Microphone);
+    let transcriber = build_local_transcriber(descriptor, dir, default_kind, settings)?;
+
+    let live_streams = streams
+        .into_iter()
+        .map(|(source, kind)| LiveStream {
+            segmenter: build_segmenter(app, kind),
+            source: wrap_muted(app, source, kind),
+            denoiser: settings
+                .denoiser
+                .as_deref()
+                .and_then(|id| build_denoiser(id, settings.denoise_dir.as_deref())),
+            kind,
+        })
+        .collect();
+
+    let sink = build_live_sink(app, dedup);
+
+    Ok(Session::spawn_live_multi(live_streams, transcriber, sink))
+}
+
+impl LiveEngine {
+    /// The `(descriptor, dir)` of a local batch engine that can be SHARED across multiple live streams
+    /// — i.e. one that drives the decoupled VAD-segment path. Streaming transducers and Apple Speech
+    /// self-segment a single audio timeline (no shared transcriber is possible), and cloud engines run
+    /// per stream, so they return `None` and stay one session per stream.
+    fn shared_local_target(&self) -> Option<(&ModelDescriptor, &Path)> {
+        match self {
+            LiveEngine::Local { descriptor, dir }
+                if !matches!(
+                    descriptor.family,
+                    ModelFamily::StreamingTransducer | ModelFamily::AppleSpeech
+                ) =>
+            {
+                Some((descriptor, dir))
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Total physical memory in bytes, via `sysctl hw.memsize`. Falls back to 16 GiB (treated as
@@ -2783,17 +2865,6 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
                 &mut assist_branches,
                 &mut assist_tees,
             );
-            sessions.push(
-                spawn_session(
-                    &app,
-                    &live_engine,
-                    aec_mic,
-                    AudioSourceKind::Microphone,
-                    Some(Arc::clone(&dedup)),
-                    &settings,
-                )
-                .map_err(|e| e.to_string())?,
-            );
 
             let meeting: Box<dyn AudioSource> =
                 Box::new(ChannelSource::new(meeting_rx, system_info));
@@ -2803,17 +2874,50 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
                 &mut assist_branches,
                 &mut assist_tees,
             );
-            sessions.push(
-                spawn_session(
-                    &app,
-                    &live_engine,
-                    meeting,
-                    AudioSourceKind::System,
-                    Some(dedup),
-                    &settings,
-                )
-                .map_err(|e| e.to_string())?,
-            );
+
+            // A shareable local batch engine runs BOTH streams through one model — half the RAM, one
+            // rolling context, one unified speaker space. Streaming/Apple/cloud engines can't share a
+            // transcriber, so they stay one session per stream.
+            match live_engine.shared_local_target() {
+                Some((descriptor, dir)) => sessions.push(
+                    spawn_shared_local_session(
+                        &app,
+                        descriptor,
+                        dir,
+                        vec![
+                            (aec_mic, AudioSourceKind::Microphone),
+                            (meeting, AudioSourceKind::System),
+                        ],
+                        Some(dedup),
+                        &settings,
+                    )
+                    .map_err(|e| e.to_string())?,
+                ),
+                None => {
+                    sessions.push(
+                        spawn_session(
+                            &app,
+                            &live_engine,
+                            aec_mic,
+                            AudioSourceKind::Microphone,
+                            Some(Arc::clone(&dedup)),
+                            &settings,
+                        )
+                        .map_err(|e| e.to_string())?,
+                    );
+                    sessions.push(
+                        spawn_session(
+                            &app,
+                            &live_engine,
+                            meeting,
+                            AudioSourceKind::System,
+                            Some(dedup),
+                            &settings,
+                        )
+                        .map_err(|e| e.to_string())?,
+                    );
+                }
+            }
 
             *state
                 .tee

@@ -62,6 +62,13 @@ impl Transcriber {
         self
     }
 
+    /// The kind this transcriber tags File segments with, and the default a single-stream live session
+    /// ([`spawn_live`](crate::session::Session::spawn_live)) labels its audio. A multi-stream session
+    /// overrides it per utterance via [`transcribe_utterance`](Self::transcribe_utterance).
+    pub fn source_kind(&self) -> AudioSourceKind {
+        self.source_kind
+    }
+
     /// Transcribes one complete `utterance` into final segments (one per engine sentence).
     ///
     /// Empty / punctuation-only recognitions are dropped (ASR hallucinations on near-silence).
@@ -113,6 +120,7 @@ impl Transcriber {
     pub fn transcribe_utterance(
         &mut self,
         id: u64,
+        kind: AudioSourceKind,
         utterance: &Utterance,
         status: SegmentStatus,
     ) -> Result<Option<TranscriptSegment>> {
@@ -125,7 +133,7 @@ impl Transcriber {
         };
 
         segment.id = id;
-        segment.source = self.source_kind;
+        segment.source = kind;
         segment.status = status;
         segment.start += utterance.start;
         segment.end += utterance.start;
@@ -278,7 +286,12 @@ mod tests {
         let mut transcriber = Transcriber::new(engine, AudioSourceKind::Microphone);
 
         let segment = transcriber
-            .transcribe_utterance(7, &utterance(500), SegmentStatus::Final)
+            .transcribe_utterance(
+                7,
+                AudioSourceKind::Microphone,
+                &utterance(500),
+                SegmentStatus::Final,
+            )
             .unwrap()
             .expect("a non-empty recognition yields a segment");
 
@@ -300,11 +313,21 @@ mod tests {
         let mut transcriber = Transcriber::new(engine, AudioSourceKind::Microphone);
 
         let partial = transcriber
-            .transcribe_utterance(3, &utterance(0), SegmentStatus::Partial)
+            .transcribe_utterance(
+                3,
+                AudioSourceKind::Microphone,
+                &utterance(0),
+                SegmentStatus::Partial,
+            )
             .unwrap()
             .unwrap();
         let committed = transcriber
-            .transcribe_utterance(3, &utterance(0), SegmentStatus::Final)
+            .transcribe_utterance(
+                3,
+                AudioSourceKind::Microphone,
+                &utterance(0),
+                SegmentStatus::Final,
+            )
             .unwrap()
             .unwrap();
 
@@ -319,7 +342,12 @@ mod tests {
         let mut transcriber = Transcriber::new(engine, AudioSourceKind::Microphone);
 
         let segment = transcriber
-            .transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
+            .transcribe_utterance(
+                0,
+                AudioSourceKind::Microphone,
+                &utterance(0),
+                SegmentStatus::Final,
+            )
             .unwrap();
         assert!(segment.is_none());
     }
@@ -345,7 +373,12 @@ mod tests {
         let mut transcriber = Transcriber::new(engine, AudioSourceKind::Microphone);
 
         let segment = transcriber
-            .transcribe_utterance(0, &utterance(100), SegmentStatus::Final)
+            .transcribe_utterance(
+                0,
+                AudioSourceKind::Microphone,
+                &utterance(100),
+                SegmentStatus::Final,
+            )
             .unwrap()
             .unwrap();
 
@@ -372,7 +405,12 @@ mod tests {
             .with_diarizer(Box::new(FixedSpeaker(3)));
 
         let segment = transcriber
-            .transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
+            .transcribe_utterance(
+                0,
+                AudioSourceKind::Microphone,
+                &utterance(0),
+                SegmentStatus::Final,
+            )
             .unwrap()
             .unwrap();
         assert_eq!(segment.speaker, Some(SpeakerId(3)));
@@ -395,7 +433,12 @@ mod tests {
             .with_diarizer(Box::new(FixedSpeaker));
 
         let segment = transcriber
-            .transcribe_utterance(0, &utterance(0), SegmentStatus::Partial)
+            .transcribe_utterance(
+                0,
+                AudioSourceKind::Microphone,
+                &utterance(0),
+                SegmentStatus::Partial,
+            )
             .unwrap()
             .unwrap();
         assert!(
@@ -432,12 +475,27 @@ mod tests {
         let mut t =
             Transcriber::new(engine, AudioSourceKind::Microphone).with_rolling_context(true);
 
-        t.transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
-            .unwrap();
-        t.transcribe_utterance(1, &utterance(0), SegmentStatus::Partial)
-            .unwrap();
-        t.transcribe_utterance(2, &utterance(0), SegmentStatus::Final)
-            .unwrap();
+        t.transcribe_utterance(
+            0,
+            AudioSourceKind::Microphone,
+            &utterance(0),
+            SegmentStatus::Final,
+        )
+        .unwrap();
+        t.transcribe_utterance(
+            1,
+            AudioSourceKind::Microphone,
+            &utterance(0),
+            SegmentStatus::Partial,
+        )
+        .unwrap();
+        t.transcribe_utterance(
+            2,
+            AudioSourceKind::Microphone,
+            &utterance(0),
+            SegmentStatus::Final,
+        )
+        .unwrap();
 
         // set_context fires only on finals, accumulating recent text; the partial never contributes.
         assert_eq!(
@@ -453,8 +511,13 @@ mod tests {
         let mut t =
             Transcriber::new(engine, AudioSourceKind::Microphone).with_rolling_context(true);
 
-        t.transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
-            .unwrap();
+        t.transcribe_utterance(
+            0,
+            AudioSourceKind::Microphone,
+            &utterance(0),
+            SegmentStatus::Final,
+        )
+        .unwrap();
 
         let seen = contexts.lock().unwrap();
         assert_eq!(seen.len(), 1);
@@ -471,10 +534,20 @@ mod tests {
         let mut t =
             Transcriber::new(engine, AudioSourceKind::Microphone).with_rolling_context(false);
 
-        t.transcribe_utterance(0, &utterance(0), SegmentStatus::Final)
-            .unwrap();
-        t.transcribe_utterance(1, &utterance(0), SegmentStatus::Final)
-            .unwrap();
+        t.transcribe_utterance(
+            0,
+            AudioSourceKind::Microphone,
+            &utterance(0),
+            SegmentStatus::Final,
+        )
+        .unwrap();
+        t.transcribe_utterance(
+            1,
+            AudioSourceKind::Microphone,
+            &utterance(0),
+            SegmentStatus::Final,
+        )
+        .unwrap();
 
         assert!(contexts.lock().unwrap().is_empty());
     }

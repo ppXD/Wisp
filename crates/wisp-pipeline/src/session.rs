@@ -20,14 +20,27 @@ use crate::transcriber::Transcriber;
 /// A boxed, `Send` consumer of transcript events (e.g. one that forwards them to the UI).
 pub type EventSink = Box<dyn FnMut(TranscriptEvent) + Send>;
 
-/// A unit of work handed from the (real-time) capture thread to the (slow) transcription thread.
+/// A unit of work handed from a (real-time) capture thread to the (slow) transcription thread. Each
+/// job carries the [`AudioSourceKind`] of the stream that produced it, so the shared transcriber
+/// labels the resulting segment by source even though mic and system audio share one engine.
 #[derive(Debug)]
 enum Job {
     /// A provisional decode of the still-open utterance, sharing the final's id so the UI updates
     /// one row in place. Dropped if a newer partial or the final supersedes it before it runs.
-    Partial(u64, Utterance),
+    Partial(u64, AudioSourceKind, Utterance),
     /// The closed, authoritative utterance.
-    Final(u64, Utterance),
+    Final(u64, AudioSourceKind, Utterance),
+}
+
+/// One live audio stream feeding a shared-engine session: its capture source, the segmenter that
+/// turns its frames into utterances, an optional per-stream denoiser, and the [`AudioSourceKind`]
+/// every segment cut from it is tagged with. [`Session::spawn_live_multi`] runs one capture thread
+/// per stream against a single shared [`Transcriber`].
+pub struct LiveStream {
+    pub segmenter: Box<dyn Segmenter>,
+    pub source: Box<dyn AudioSource>,
+    pub denoiser: Option<Box<dyn Denoiser>>,
+    pub kind: AudioSourceKind,
 }
 
 /// Bounds on how much captured audio to accumulate between provisional partial decodes. The actual
@@ -38,8 +51,9 @@ const PARTIAL_FLOOR: Duration = Duration::from_millis(300);
 const PARTIAL_CEIL: Duration = Duration::from_millis(1_500);
 const PARTIAL_DEFAULT: Duration = Duration::from_millis(500);
 
-/// An utterance paired with the id its segment will carry — the unit a transcribe pass consumes.
-type Decode = (u64, Utterance);
+/// An utterance paired with the id its segment will carry and the kind it was captured from — the
+/// unit a transcribe pass consumes.
+type Decode = (u64, AudioSourceKind, Utterance);
 
 /// A transcription run executing on background thread(s).
 ///
@@ -75,96 +89,129 @@ impl Session {
         }
     }
 
-    /// Spawns a *decoupled* live session: a capture+segmentation thread feeds complete utterances
-    /// over a queue to a separate transcription thread.
-    ///
-    /// The capture thread runs at real-time — it converts frames to 16 kHz mono, segments them
-    /// with `segmenter`, and hands each finished [`Utterance`] to the queue — so a slow engine
-    /// can never stall capture or cause dropped audio mid-sentence. The transcription thread
-    /// drains the queue, runs `transcriber`, and forwards segments to `sink`. On stop the capture
-    /// thread flushes its buffered utterance and closes the queue; the transcription thread then
-    /// finishes the backlog before the session joins.
-    /// `denoiser`, when present, cleans every captured frame before segmentation, so both the VAD
-    /// and the engine see noise-suppressed audio. It is stateful and runs on the capture thread.
+    /// Spawns a *decoupled* live session over one audio stream — the common single-stream case (just
+    /// the mic, or just system audio), tagged with the transcriber's
+    /// [`source_kind`](Transcriber::source_kind). A thin wrapper over [`spawn_live_multi`].
     pub fn spawn_live(
-        mut segmenter: Box<dyn Segmenter>,
-        mut transcriber: Transcriber,
-        mut source: Box<dyn AudioSource>,
-        mut sink: EventSink,
+        segmenter: Box<dyn Segmenter>,
+        transcriber: Transcriber,
+        source: Box<dyn AudioSource>,
+        sink: EventSink,
         denoiser: Option<Box<dyn Denoiser>>,
     ) -> Self {
+        let kind = transcriber.source_kind();
+        Self::spawn_live_multi(
+            vec![LiveStream {
+                segmenter,
+                source,
+                denoiser,
+                kind,
+            }],
+            transcriber,
+            sink,
+        )
+    }
+
+    /// Spawns a *decoupled* live session over N audio streams sharing **one** ASR engine.
+    ///
+    /// Each stream runs its own capture+segmentation thread at real-time — converting frames to 16 kHz
+    /// mono, segmenting (and optionally denoising) them — and hands each finished [`Utterance`] over a
+    /// shared queue to a *single* transcription thread, so a slow engine can never stall capture or
+    /// drop audio. Running mic + system audio through one model halves the memory of two engines and
+    /// gives one coherent rolling-context and one consistent language; each job is stamped with its
+    /// stream's [`AudioSourceKind`] so the segment is still labelled by source. Ids come from one
+    /// shared counter, so a partial and its final share an id across all streams and the UI updates a
+    /// single row in place. On stop each capture thread flushes its buffered utterance and drops its
+    /// sender; the transcription thread finishes the backlog once every capture thread has.
+    pub fn spawn_live_multi(
+        streams: Vec<LiveStream>,
+        mut transcriber: Transcriber,
+        mut sink: EventSink,
+    ) -> Self {
         let stop = Arc::new(AtomicBool::new(false));
-        let stop_for_capture = Arc::clone(&stop);
-        let stop_for_transcribe = Arc::clone(&stop);
         let (job_tx, job_rx) = mpsc::channel::<Job>();
 
-        // Most-recent partial-decode time (ms), shared so the capture thread can pace partials to
+        // Most-recent partial-decode time (ms), shared so the capture threads can pace partials to
         // what this machine actually decodes — snappier on a fast Mac, backing off on a slow one.
         let decode_ms = Arc::new(AtomicU64::new(PARTIAL_DEFAULT.as_millis() as u64));
-        let decode_ms_for_capture = Arc::clone(&decode_ms);
+        // One id space across all streams, so ids stay globally unique on the shared sink.
+        let next_id = Arc::new(AtomicU64::new(0));
 
-        // Transcription thread: drains jobs and forwards segments. Ends when the capture thread
-        // drops its sender (stop or source exhausted). A transcription error on one job is logged
-        // and skipped rather than killing the session. Each burst is coalesced first so the engine
-        // never wastes work on a provisional partial that a newer partial or its final supersedes.
+        // Transcription thread: drains jobs and forwards segments, tagging each with the kind its
+        // capture thread stamped on the job. Ends when every capture thread has dropped its sender. A
+        // transcription error on one job is logged and skipped rather than killing the session. Each
+        // burst is coalesced first — per id, so two streams' open utterances never evict each other.
+        let stop_for_transcribe = Arc::clone(&stop);
+        let decode_ms_for_transcribe = Arc::clone(&decode_ms);
         let transcribe_handle = thread::spawn(move || {
             while let Ok(first) = job_rx.recv() {
                 let mut batch = vec![first];
                 while let Ok(next) = job_rx.try_recv() {
                     batch.push(next);
                 }
-                let (finals, partial) = coalesce(batch);
+                let (finals, partials) = coalesce(batch);
 
                 // Finals are the authoritative transcript — always transcribe them, even on stop. The
-                // capture thread flushes the trailing utterance as a Final on stop; dropping it (and any
-                // backlog of real finals a slow engine fell behind on) would silently lose the last
-                // sentence(s) of the recording.
-                for (id, utterance) in finals {
-                    match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Final) {
+                // capture threads flush their trailing utterance as a Final on stop; dropping it (and
+                // any backlog of real finals a slow engine fell behind on) would silently lose the
+                // last sentence(s) of the recording.
+                for (id, kind, utterance) in finals {
+                    match transcriber.transcribe_utterance(
+                        id,
+                        kind,
+                        &utterance,
+                        SegmentStatus::Final,
+                    ) {
                         Ok(Some(segment)) => sink(TranscriptEvent::Segment(segment)),
                         Ok(None) => {}
                         Err(e) => eprintln!("wisp: transcription error: {e}"),
                     }
                 }
 
-                // On stop, skip the provisional partial — a final supersedes it and decoding it would
-                // only slow the shutdown — and stop pulling new work: drain the queued finals above,
-                // then exit when the capture thread drops the sender.
+                // On stop, skip provisional partials — a final supersedes them and decoding would only
+                // slow the shutdown — and stop pulling new work: drain the queued finals above, then
+                // exit when the capture threads drop their senders.
                 if stop_for_transcribe.load(Ordering::Relaxed) {
                     continue;
                 }
 
-                if let Some((id, utterance)) = partial {
+                for (id, kind, utterance) in partials {
                     let started = Instant::now();
-                    match transcriber.transcribe_utterance(id, &utterance, SegmentStatus::Partial) {
+                    match transcriber.transcribe_utterance(
+                        id,
+                        kind,
+                        &utterance,
+                        SegmentStatus::Partial,
+                    ) {
                         Ok(Some(segment)) => sink(TranscriptEvent::Segment(segment)),
                         Ok(None) => {}
                         Err(e) => eprintln!("wisp: partial transcription error: {e}"),
                     }
-                    // Feed the measured decode cost back to the capture thread's pacing.
-                    decode_ms.store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
+                    // Feed the measured decode cost back to the capture threads' pacing.
+                    decode_ms_for_transcribe
+                        .store(started.elapsed().as_millis() as u64, Ordering::Relaxed);
                 }
             }
             Ok(())
         });
 
-        // Capture + segmentation thread: never blocks on the engine.
-        let capture_handle = thread::spawn(move || {
-            run_capture(
-                &mut *segmenter,
-                &mut *source,
-                denoiser,
-                &job_tx,
-                &decode_ms_for_capture,
-                &stop_for_capture,
-            )
-            // `job_tx` drops here, signalling the transcription thread to finish.
-        });
-
-        Self {
-            stop,
-            handles: vec![capture_handle, transcribe_handle],
+        // One capture + segmentation thread per stream; none ever blocks on the engine. Each clones
+        // the job sender, the pacing gauge, the stop flag, and the shared id counter.
+        let mut handles = vec![transcribe_handle];
+        for stream in streams {
+            let job_tx = job_tx.clone();
+            let decode_ms = Arc::clone(&decode_ms);
+            let stop = Arc::clone(&stop);
+            let next_id = Arc::clone(&next_id);
+            handles.push(thread::spawn(move || {
+                run_capture(stream, &job_tx, &decode_ms, &stop, &next_id)
+            }));
         }
+        // Drop the original sender so the transcription thread ends once every capture thread's clone
+        // has dropped (all sources exhausted or stopped).
+        drop(job_tx);
+
+        Self { stop, handles }
     }
 
     /// Spawns a *streaming* live session: a single thread feeds captured audio chunk-by-chunk to an
@@ -241,23 +288,30 @@ impl Session {
     }
 }
 
-/// Capture loop for [`Session::spawn_live`]: pull frames, segment them, and queue closed utterances
-/// as `Final` jobs until `stop` is set or the source ends; then flush any buffered utterance.
+/// Capture loop for one [`LiveStream`] in [`Session::spawn_live_multi`]: pull frames, segment them,
+/// and queue closed utterances as `Final` jobs until `stop` is set or the source ends; then flush any
+/// buffered utterance. Every job is tagged with the stream's [`AudioSourceKind`] so the shared
+/// transcriber labels each segment by source.
 ///
 /// Between finals, on an interval that adapts to the engine's measured decode speed (bounded by
 /// [`PARTIAL_FLOOR`]/[`PARTIAL_CEIL`] via `decode_ms`), it also queues a `Partial` job of the
 /// still-open utterance (when the segmenter exposes one), so the UI can show provisional text before
-/// the speaker pauses. The capture thread owns utterance ids: a `Partial` and the `Final` that
-/// closes the same utterance share one id, so the UI updates a single row in place.
+/// the speaker pauses. Ids come from the session's shared `next_id`, so a `Partial` and the `Final`
+/// that closes the same utterance share one id — unique across sibling streams — and the UI updates a
+/// single row in place.
 fn run_capture(
-    segmenter: &mut dyn Segmenter,
-    source: &mut dyn AudioSource,
-    mut denoiser: Option<Box<dyn Denoiser>>,
+    stream: LiveStream,
     job_tx: &Sender<Job>,
     decode_ms: &AtomicU64,
     stop: &AtomicBool,
+    next_id: &AtomicU64,
 ) -> Result<()> {
-    let mut next_id: u64 = 0;
+    let LiveStream {
+        mut segmenter,
+        mut source,
+        mut denoiser,
+        kind,
+    } = stream;
     let mut open_id: Option<u64> = None;
     let mut since_partial = Duration::ZERO;
     let mut resampler = Resampler::new(TARGET_SAMPLE_RATE);
@@ -275,8 +329,8 @@ fn run_capture(
                 };
 
                 for utterance in segmenter.push(&mono, frame.timestamp, frame.duration()) {
-                    let id = open_id.take().unwrap_or_else(|| alloc_id(&mut next_id));
-                    let _ = job_tx.send(Job::Final(id, utterance));
+                    let id = open_id.take().unwrap_or_else(|| alloc_id(next_id));
+                    let _ = job_tx.send(Job::Final(id, kind, utterance));
                     since_partial = Duration::ZERO;
                 }
 
@@ -284,10 +338,10 @@ fn run_capture(
                 if since_partial >= partial_target(decode_ms) {
                     since_partial = Duration::ZERO;
                     if let Some(utterance) = segmenter.partial() {
-                        let id = *open_id.get_or_insert_with(|| alloc_id(&mut next_id));
+                        let id = *open_id.get_or_insert_with(|| alloc_id(next_id));
                         let utterance =
                             cap_partial(utterance, max_partial_samples, TARGET_SAMPLE_RATE);
-                        let _ = job_tx.send(Job::Partial(id, utterance));
+                        let _ = job_tx.send(Job::Partial(id, kind, utterance));
                     }
                 }
             }
@@ -295,8 +349,8 @@ fn run_capture(
         }
     }
     for utterance in segmenter.flush() {
-        let id = open_id.take().unwrap_or_else(|| alloc_id(&mut next_id));
-        let _ = job_tx.send(Job::Final(id, utterance));
+        let id = open_id.take().unwrap_or_else(|| alloc_id(next_id));
+        let _ = job_tx.send(Job::Final(id, kind, utterance));
     }
     Ok(())
 }
@@ -420,30 +474,36 @@ fn partial_target(decode_ms: &AtomicU64) -> Duration {
     Duration::from_millis(ms)
 }
 
-/// Returns the current id and advances the counter.
-fn alloc_id(next_id: &mut u64) -> u64 {
-    let id = *next_id;
-    *next_id += 1;
-    id
+/// Returns the next id and advances the shared counter. Sharing one counter across a session's
+/// capture threads keeps ids globally unique, so a partial and its final still meet on one id while
+/// sibling streams never collide.
+fn alloc_id(next_id: &AtomicU64) -> u64 {
+    next_id.fetch_add(1, Ordering::Relaxed)
 }
 
-/// Collapses a drained burst of jobs into the finals to transcribe (in order) and at most one
-/// surviving partial — the newest one not followed by a final. A partial that a later final closes,
-/// or that a newer partial replaces, is stale and dropped, so the engine only ever decodes the
-/// latest provisional view of the open utterance.
-fn coalesce(batch: Vec<Job>) -> (Vec<Decode>, Option<Decode>) {
+/// Collapses a drained burst of jobs into the finals to transcribe (in order) and the surviving
+/// partials — at most one per id, the newest not yet closed by a final. Sibling streams share the
+/// queue but hold globally-unique ids, so keying by id keeps each open utterance's latest
+/// provisional view alive while a partial that its own final closes, or that a newer partial for the
+/// same id replaces, is stale and dropped.
+fn coalesce(batch: Vec<Job>) -> (Vec<Decode>, Vec<Decode>) {
     let mut finals = Vec::new();
-    let mut partial = None;
+    let mut partials: Vec<Decode> = Vec::new();
     for job in batch {
         match job {
-            Job::Final(id, utterance) => {
-                partial = None;
-                finals.push((id, utterance));
+            Job::Final(id, kind, utterance) => {
+                partials.retain(|(pid, _, _)| *pid != id);
+                finals.push((id, kind, utterance));
             }
-            Job::Partial(id, utterance) => partial = Some((id, utterance)),
+            Job::Partial(id, kind, utterance) => {
+                match partials.iter_mut().find(|(pid, _, _)| *pid == id) {
+                    Some(slot) => *slot = (id, kind, utterance),
+                    None => partials.push((id, kind, utterance)),
+                }
+            }
         }
     }
-    (finals, partial)
+    (finals, partials)
 }
 
 impl Drop for Session {
@@ -664,6 +724,79 @@ mod tests {
             })
             .collect();
         assert_eq!(segments, vec![(0, "one".to_owned()), (1, "two".to_owned())]);
+    }
+
+    #[test]
+    fn spawn_live_multi_tags_each_stream_with_its_own_kind_and_unique_ids() {
+        // Two streams — mic and system — share one engine and one sink. Each yields a single final;
+        // spawn_live_multi must tag every segment with its own stream's kind (overriding the shared
+        // transcriber's default) and hand out globally-unique ids from the shared counter, even
+        // though both drain through one transcribe thread in non-deterministic order.
+        let one_utterance = || {
+            vec![
+                frame(0.5, 0),
+                frame(0.5, 100),
+                frame(0.0, 200),
+                frame(0.0, 300),
+            ]
+        };
+        let mic = LiveStream {
+            segmenter: segmenter(),
+            source: Box::new(MockAudioSource::new(one_utterance())),
+            denoiser: None,
+            kind: AudioSourceKind::Microphone,
+        };
+        let system = LiveStream {
+            segmenter: segmenter(),
+            source: Box::new(MockAudioSource::new(one_utterance())),
+            denoiser: None,
+            kind: AudioSourceKind::System,
+        };
+
+        let (tx, rx) = mpsc::channel();
+        let sink: EventSink = Box::new(move |event| {
+            let _ = tx.send(event);
+        });
+
+        let session = Session::spawn_live_multi(
+            vec![mic, system],
+            transcriber(vec![canned("one"), canned("two")]),
+            sink,
+        );
+        session.join().unwrap();
+
+        let mut segments: Vec<(u64, AudioSourceKind)> = rx
+            .try_iter()
+            .map(|event| match event {
+                TranscriptEvent::Segment(s) => (s.id, s.source),
+                _ => panic!("unexpected event"),
+            })
+            .collect();
+        segments.sort_by_key(|(id, _)| *id);
+
+        let ids: Vec<u64> = segments.iter().map(|(id, _)| *id).collect();
+        assert_eq!(
+            ids,
+            vec![0, 1],
+            "ids stay globally unique across both streams"
+        );
+
+        let mic_count = segments
+            .iter()
+            .filter(|(_, k)| *k == AudioSourceKind::Microphone)
+            .count();
+        let system_count = segments
+            .iter()
+            .filter(|(_, k)| *k == AudioSourceKind::System)
+            .count();
+        assert_eq!(
+            mic_count, 1,
+            "the mic stream's segment is tagged Microphone"
+        );
+        assert_eq!(
+            system_count, 1,
+            "the system stream's segment is tagged System"
+        );
     }
 
     #[test]
@@ -950,43 +1083,71 @@ mod tests {
 
     #[test]
     fn coalesce_keeps_only_the_newest_partial() {
-        let (finals, partial) = coalesce(vec![Job::Partial(0, utt(1)), Job::Partial(0, utt(2))]);
+        let (finals, partials) = coalesce(vec![
+            Job::Partial(0, AudioSourceKind::Microphone, utt(1)),
+            Job::Partial(0, AudioSourceKind::Microphone, utt(2)),
+        ]);
         assert!(finals.is_empty());
-        assert_eq!(
-            partial.unwrap().1.audio.len(),
-            2,
-            "the older partial is dropped"
-        );
+        assert_eq!(partials.len(), 1);
+        assert_eq!(partials[0].2.audio.len(), 2, "the older partial is dropped");
     }
 
     #[test]
     fn coalesce_drops_a_partial_superseded_by_its_final() {
-        let (finals, partial) = coalesce(vec![Job::Partial(0, utt(1)), Job::Final(0, utt(3))]);
+        let (finals, partials) = coalesce(vec![
+            Job::Partial(0, AudioSourceKind::Microphone, utt(1)),
+            Job::Final(0, AudioSourceKind::Microphone, utt(3)),
+        ]);
         assert_eq!(finals.len(), 1);
         assert_eq!(finals[0].0, 0);
         assert!(
-            partial.is_none(),
+            partials.is_empty(),
             "the final supersedes the provisional partial"
         );
     }
 
     #[test]
     fn coalesce_keeps_a_partial_that_follows_the_last_final() {
-        let (finals, partial) = coalesce(vec![Job::Final(0, utt(3)), Job::Partial(1, utt(1))]);
+        let (finals, partials) = coalesce(vec![
+            Job::Final(0, AudioSourceKind::Microphone, utt(3)),
+            Job::Partial(1, AudioSourceKind::Microphone, utt(1)),
+        ]);
         assert_eq!(finals.len(), 1);
-        assert_eq!(
-            partial.unwrap().0,
-            1,
-            "the next utterance's partial survives"
-        );
+        assert_eq!(partials.len(), 1);
+        assert_eq!(partials[0].0, 1, "the next utterance's partial survives");
     }
 
     #[test]
     fn coalesce_preserves_final_order() {
-        let (finals, partial) = coalesce(vec![Job::Final(0, utt(1)), Job::Final(1, utt(2))]);
-        let ids: Vec<u64> = finals.iter().map(|(id, _)| *id).collect();
+        let (finals, partials) = coalesce(vec![
+            Job::Final(0, AudioSourceKind::Microphone, utt(1)),
+            Job::Final(1, AudioSourceKind::Microphone, utt(2)),
+        ]);
+        let ids: Vec<u64> = finals.iter().map(|(id, _, _)| *id).collect();
         assert_eq!(ids, vec![0, 1]);
-        assert!(partial.is_none());
+        assert!(partials.is_empty());
+    }
+
+    #[test]
+    fn coalesce_keeps_a_partial_per_stream_and_only_its_own_final_clears_it() {
+        // Two streams share the queue with globally-unique ids: a mic partial (id 0) and a system
+        // partial (id 1) coexist; the mic's final closes only id 0, leaving the system partial alive
+        // and still tagged with its own source kind.
+        let (finals, partials) = coalesce(vec![
+            Job::Partial(0, AudioSourceKind::Microphone, utt(1)),
+            Job::Partial(1, AudioSourceKind::System, utt(2)),
+            Job::Final(0, AudioSourceKind::Microphone, utt(3)),
+        ]);
+        assert_eq!(finals.len(), 1);
+        assert_eq!(finals[0].0, 0);
+        assert_eq!(finals[0].1, AudioSourceKind::Microphone);
+        assert_eq!(
+            partials.len(),
+            1,
+            "the sibling stream's partial is untouched"
+        );
+        assert_eq!(partials[0].0, 1);
+        assert_eq!(partials[0].1, AudioSourceKind::System);
     }
 
     #[test]
@@ -1017,8 +1178,8 @@ mod tests {
 
         // Seven 100 ms frames cross the 600 ms partial interval exactly once before the source ends.
         let frames: Vec<AudioFrame> = (0u64..7).map(|i| frame(0.5, i * 100)).collect();
-        let mut source = MockAudioSource::new(frames);
-        let mut seg = OpenSegmenter {
+        let source = MockAudioSource::new(frames);
+        let seg = OpenSegmenter {
             partial_len: 800,
             final_len: 1_600,
         };
@@ -1027,7 +1188,14 @@ mod tests {
         let stop = AtomicBool::new(false);
         // No transcribe thread here, so the decode time stays at the default (500 ms cadence).
         let decode_ms = AtomicU64::new(PARTIAL_DEFAULT.as_millis() as u64);
-        run_capture(&mut seg, &mut source, None, &tx, &decode_ms, &stop).unwrap();
+        let next_id = AtomicU64::new(0);
+        let stream = LiveStream {
+            segmenter: Box::new(seg),
+            source: Box::new(source),
+            denoiser: None,
+            kind: AudioSourceKind::Microphone,
+        };
+        run_capture(stream, &tx, &decode_ms, &stop, &next_id).unwrap();
         drop(tx);
 
         let jobs: Vec<Job> = rx.try_iter().collect();
@@ -1037,15 +1205,17 @@ mod tests {
             "one partial (one interval) then the closing final"
         );
         match &jobs[0] {
-            Job::Partial(id, u) => {
+            Job::Partial(id, kind, u) => {
                 assert_eq!(*id, 0);
+                assert_eq!(*kind, AudioSourceKind::Microphone);
                 assert_eq!(u.audio.len(), 800);
             }
             other => panic!("expected a partial first, got {other:?}"),
         }
         match &jobs[1] {
-            Job::Final(id, u) => {
+            Job::Final(id, kind, u) => {
                 assert_eq!(*id, 0, "the final reuses the open partial's id");
+                assert_eq!(*kind, AudioSourceKind::Microphone);
                 assert_eq!(u.audio.len(), 1_600);
             }
             other => panic!("expected a final second, got {other:?}"),
