@@ -570,24 +570,96 @@ struct RealtimeEngine {
 /// OpenAI-compatible realtime gateway. Unset uses [`DEFAULT_REALTIME_URL`].
 pub const REALTIME_URL_ENV: &str = "WISP_OPENAI_REALTIME_URL";
 
+/// Server/semantic-VAD endpointing knobs shared by every OpenAI realtime session (transcription,
+/// model, assist): how a turn is detected and when it ends. Server-VAD fields are inert under semantic
+/// VAD and vice-versa, but exposing both keeps the panel one generic list.
+fn realtime_endpointing_specs() -> Vec<ParamSpec> {
+    vec![
+        ParamSpec::enumerated(
+            "vad_type",
+            "Turn detection",
+            "How the server decides an utterance ended. Server VAD uses a silence timer (fast, \
+             predictable); Semantic VAD lets a model judge completion (fewer mid-sentence cuts).",
+            &[
+                ("server_vad", "Server VAD (fast)"),
+                ("semantic_vad", "Semantic VAD (smart)"),
+            ],
+            "server_vad",
+        )
+        .basic(),
+        ParamSpec::float(
+            "vad_threshold",
+            "Voice sensitivity",
+            "Server VAD only: how clearly speech must stand out to count as voice. Higher = \
+             stricter (fewer false starts in noise).",
+            0.0,
+            1.0,
+            0.05,
+            0.5,
+        ),
+        ParamSpec::int(
+            "vad_silence_ms",
+            "End-of-speech silence",
+            "Server VAD only: how long a pause (ms) ends an utterance. Lower feels snappier; \
+             higher avoids cutting mid-sentence.",
+            100,
+            2000,
+            500,
+        ),
+        ParamSpec::int(
+            "vad_prefix_padding_ms",
+            "Lead-in padding",
+            "Server VAD only: audio kept before speech starts (ms), so the first word isn't \
+             clipped.",
+            0,
+            1000,
+            300,
+        ),
+        ParamSpec::enumerated(
+            "vad_eagerness",
+            "Semantic eagerness",
+            "Semantic VAD only: how soon to end a turn. Low waits longer (≤8s), high responds \
+             fast (≤2s), auto = medium (≤4s).",
+            &[
+                ("auto", "Auto (medium)"),
+                ("low", "Low (patient)"),
+                ("medium", "Medium"),
+                ("high", "High (snappy)"),
+            ],
+            "auto",
+        ),
+    ]
+}
+
+/// Server-side noise reduction applied before the model hears the input audio.
+fn noise_reduction_spec() -> ParamSpec {
+    ParamSpec::enumerated(
+        "noise_reduction",
+        "Noise reduction",
+        "Server-side denoise before transcription.",
+        &[
+            ("off", "Off"),
+            ("near_field", "Near-field (headset)"),
+            ("far_field", "Far-field (room mic)"),
+        ],
+        "near_field",
+    )
+}
+
+/// The advanced params the **realtime assist** exposes: turn-detection endpointing (when the assist
+/// responds) + noise reduction — exactly the knobs [`build_assist_update`] already consumes. The
+/// model's behaviour rides in the prompt (the session `instructions`), so it isn't repeated here;
+/// language and biasing are transcription concerns that don't apply to the assist.
+pub fn assist_realtime_param_specs() -> Vec<ParamSpec> {
+    let mut specs = realtime_endpointing_specs();
+    specs.push(noise_reduction_spec());
+    specs
+}
+
 /// The tunable knobs an OpenAI realtime `model` exposes, each with a smart default — rendered by the
 /// generic advanced-parameters UI. Per-model: a model session is steered by free-form `instructions`;
 /// a transcription session takes a `language` + `prompt`. Both share VAD endpointing + noise knobs.
 fn openai_param_specs(model: &str) -> Vec<ParamSpec> {
-    let noise = || {
-        ParamSpec::enumerated(
-            "noise_reduction",
-            "Noise reduction",
-            "Server-side denoise before transcription.",
-            &[
-                ("off", "Off"),
-                ("near_field", "Near-field (headset)"),
-                ("far_field", "Far-field (room mic)"),
-            ],
-            "near_field",
-        )
-    };
-
     // Shared by the transcription and model sessions: the spoken (source) language hint. Both run
     // gpt-4o-transcribe for the verbatim text, and a hint sharply improves accuracy on CJK — e.g.
     // Cantonese auto-detects as romanised gibberish, but `yue` transcribes proper characters.
@@ -630,7 +702,7 @@ fn openai_param_specs(model: &str) -> Vec<ParamSpec> {
                 "en",
             )
             .basic(),
-            noise(),
+            noise_reduction_spec(),
         ];
     }
 
@@ -660,64 +732,8 @@ fn openai_param_specs(model: &str) -> Vec<ParamSpec> {
         ],
     };
 
-    specs.push(
-            ParamSpec::enumerated(
-                "vad_type",
-                "Turn detection",
-                "How the server decides an utterance ended. Server VAD uses a silence timer (fast, \
-                 predictable); Semantic VAD lets a model judge completion (fewer mid-sentence cuts).",
-                &[
-                    ("server_vad", "Server VAD (fast)"),
-                    ("semantic_vad", "Semantic VAD (smart)"),
-                ],
-                "server_vad",
-            )
-            .basic(),
-        );
-    specs.extend([
-        ParamSpec::float(
-            "vad_threshold",
-            "Voice sensitivity",
-            "Server VAD only: how clearly speech must stand out to count as voice. Higher = \
-                 stricter (fewer false starts in noise).",
-            0.0,
-            1.0,
-            0.05,
-            0.5,
-        ),
-        ParamSpec::int(
-            "vad_silence_ms",
-            "End-of-speech silence",
-            "Server VAD only: how long a pause (ms) ends an utterance. Lower feels snappier; \
-                 higher avoids cutting mid-sentence.",
-            100,
-            2000,
-            500,
-        ),
-        ParamSpec::int(
-            "vad_prefix_padding_ms",
-            "Lead-in padding",
-            "Server VAD only: audio kept before speech starts (ms), so the first word isn't \
-                 clipped.",
-            0,
-            1000,
-            300,
-        ),
-        ParamSpec::enumerated(
-            "vad_eagerness",
-            "Semantic eagerness",
-            "Semantic VAD only: how soon to end a turn. Low waits longer (≤8s), high responds \
-                 fast (≤2s), auto = medium (≤4s).",
-            &[
-                ("auto", "Auto (medium)"),
-                ("low", "Low (patient)"),
-                ("medium", "Medium"),
-                ("high", "High (snappy)"),
-            ],
-            "auto",
-        ),
-    ]);
-    specs.push(noise());
+    specs.extend(realtime_endpointing_specs());
+    specs.push(noise_reduction_spec());
 
     specs
 }
@@ -1635,6 +1651,34 @@ mod tests {
             "noise_reduction",
         ] {
             assert!(keys.iter().any(|k| k == expected), "missing {expected}");
+        }
+    }
+
+    #[test]
+    fn assist_realtime_specs_are_endpointing_and_noise_only() {
+        // The realtime assist exposes turn-detection + noise reduction — exactly the knobs
+        // build_assist_update consumes — and NOT transcription-only concepts (language/prompt/
+        // instructions), since the assist's behaviour rides in the prompt instructions instead.
+        let keys = assist_realtime_param_specs()
+            .into_iter()
+            .map(|s| s.key)
+            .collect::<Vec<_>>();
+
+        for expected in [
+            "vad_type",
+            "vad_threshold",
+            "vad_silence_ms",
+            "vad_prefix_padding_ms",
+            "vad_eagerness",
+            "noise_reduction",
+        ] {
+            assert!(keys.iter().any(|k| k == expected), "missing {expected}");
+        }
+        for absent in ["language", "prompt", "instructions", "target_language"] {
+            assert!(
+                !keys.iter().any(|k| k == absent),
+                "should not expose {absent}"
+            );
         }
     }
 

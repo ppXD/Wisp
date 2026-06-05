@@ -13,6 +13,7 @@
     runAssistStream,
     openEndpointsModal,
     assistParams,
+    assistRealtimeParams,
     defaultParamValues,
     changedParamValues,
     loadParamValues,
@@ -177,24 +178,26 @@ checking. Bullet list, in the spoken language, no preamble.";
     if (promptKey === loadedPromptKey) localStorage.setItem(promptKey, prompt);
   });
 
-  // Advanced model params (temperature / top_p / max reply tokens) — the same generic schema + panel
-  // the transcription picker uses, so a new knob is backend-only. Specs are vendor-agnostic; values
-  // persist per (provider, model). Chat only — realtime tuning rides its own path.
+  // Advanced model params — the same generic schema + panel the transcription picker uses, so a new
+  // knob is backend-only. A chat model exposes its sampling knobs; a realtime model exposes its
+  // turn-detection + noise knobs. Specs are picked by the model's kind; values persist per
+  // (provider, model).
   let assistParamSpecs = $state<ParamSpec[]>([]);
   let assistParamValues = $state<Record<string, ParamValue>>({});
   let advancedOpen = $state(false);
 
-  // Load the specs + this (provider, model)'s saved values whenever the model changes; empty specs
-  // (non-chat, or none configured) hide the Advanced disclosure.
+  // Load the kind-appropriate specs + this (provider, model)'s saved values whenever the model
+  // changes; empty specs (none configured) hide the Advanced disclosure.
   $effect(() => {
     const p = providerId,
-      m = modelId;
-    if (selectedKind !== "chat" || !p || !m) {
+      m = modelId,
+      kind = selectedKind;
+    if (!p || !m) {
       assistParamSpecs = [];
       assistParamValues = {};
       return;
     }
-    assistParams().then((specs) => {
+    (kind === "realtime" ? assistRealtimeParams() : assistParams()).then((specs) => {
       assistParamSpecs = specs;
       assistParamValues = { ...defaultParamValues(specs), ...loadParamValues(p, m, "assist") };
     });
@@ -411,6 +414,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
         provider: provider.id,
         model: model.id,
         instructions: prompt,
+        params: assistOverrides,
       });
       runningRealtime = true;
       liveOn = true;
@@ -628,10 +632,10 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
       placeholder="What should the assistant do with the transcript? Pick a template above or write your own."
     ></textarea>
 
-    <!-- Advanced model params (temperature / top_p / max tokens), rendered from the generic schema —
-         grouped with the prompt as configuration, above the action. Chat models only; a knob left at
-         its default isn't sent (the model uses its own optimum). -->
-    {#if selectedKind === "chat" && assistParamSpecs.length}
+    <!-- Advanced model params, rendered from the generic schema — a chat model's sampling knobs, or a
+         realtime model's turn-detection/noise knobs. Grouped with the prompt as configuration, above
+         the action. A knob left at its default isn't sent (the model uses its own optimum). -->
+    {#if assistParamSpecs.length}
       <div class="adv">
         <button class="adv-trigger" class:open={advancedOpen} onclick={() => (advancedOpen = !advancedOpen)}>
           <span class="caret"></span> Advanced

@@ -36,8 +36,8 @@ use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
 use wisp_core::task::run_within;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::{
-    assist_param_specs, batch_param_specs as cloud_batch_param_specs, build_assist_engine,
-    build_realtime_engine, chat_completion, chat_completion_stream,
+    assist_param_specs, assist_realtime_param_specs, batch_param_specs as cloud_batch_param_specs,
+    build_assist_engine, build_realtime_engine, chat_completion, chat_completion_stream,
     streaming_param_specs as cloud_streaming_param_specs, ChatRequest, CloudEngine,
 };
 use wisp_engine_sherpa::{
@@ -1882,6 +1882,17 @@ fn assist_params() -> Vec<ParamSpecDto> {
     assist_param_specs().iter().map(param_spec_dto).collect()
 }
 
+/// The advanced parameter specs the **realtime** assist exposes (turn-detection endpointing + noise
+/// reduction) — the realtime counterpart of [`assist_params`]. OpenAI-realtime-only, like the realtime
+/// assist itself, so it takes no provider/model.
+#[tauri::command]
+fn assist_realtime_params() -> Vec<ParamSpecDto> {
+    assist_realtime_param_specs()
+        .iter()
+        .map(param_spec_dto)
+        .collect()
+}
+
 /// Runs a one-shot LLM task (summary, action items, or a custom prompt) over `transcript` using the
 /// chat model of cloud `provider` — typically a user's custom OpenAI-compatible endpoint (their
 /// gateway, a local Ollama, …). Runs off the main thread (the call is a slow HTTP round-trip).
@@ -3404,9 +3415,10 @@ async fn start_assist_realtime(
     provider: String,
     model: String,
     instructions: String,
+    params: HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        start_assist_realtime_blocking(app, provider, model, instructions)
+        start_assist_realtime_blocking(app, provider, model, instructions, params)
     })
     .await
     .map_err(|e| format!("assist start task failed: {e}"))?
@@ -3421,6 +3433,7 @@ fn start_assist_realtime_blocking(
     provider: String,
     model: String,
     instructions: String,
+    params: HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
     let state = app.state::<AppState>();
 
@@ -3451,17 +3464,17 @@ fn start_assist_realtime_blocking(
         let _ = app_err.emit(ASSIST_ERROR_EVENT, msg.to_owned());
     });
 
-    let engine =
-        match build_assist_engine(&model, &key, &instructions, &ParamValues::new(), on_error) {
-            Ok(engine) => engine,
-            Err(e) => {
-                *state
-                    .assist_audio
-                    .lock()
-                    .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
-                return Err(e.to_string());
-            }
-        };
+    let assist_params = build_param_values(&assist_realtime_param_specs(), &params);
+    let engine = match build_assist_engine(&model, &key, &instructions, &assist_params, on_error) {
+        Ok(engine) => engine,
+        Err(e) => {
+            *state
+                .assist_audio
+                .lock()
+                .map_err(|_| "state lock poisoned".to_owned())? = Some(source);
+            return Err(e.to_string());
+        }
+    };
 
     // Open the finals channel so the live sink starts feeding the assist its diarized anchors.
     let (finals_tx, finals_rx) = std::sync::mpsc::channel::<String>();
@@ -4058,6 +4071,7 @@ pub fn run() {
             streaming_params,
             batch_params,
             assist_params,
+            assist_realtime_params,
             run_llm_task,
             run_assist_stream,
             download_model,
