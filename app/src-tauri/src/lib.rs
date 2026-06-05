@@ -17,7 +17,7 @@ use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 #[cfg(target_os = "macos")]
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
-    normalize_for_asr, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
+    normalize_for_asr_in_place, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
     MeetingMixer, MicSource, MutedSource, Resampler, RnnoiseDenoiser, Tee, FRAME_CHUNK_MS,
     TARGET_SAMPLE_RATE,
 };
@@ -3629,7 +3629,14 @@ async fn transcribe_file(
 
             // Decode the whole clip to 16 kHz mono — no VAD chunking, so the engine sees the full
             // audio with cross-window context (much more accurate than per-utterance chunks).
-            let mut audio = Vec::new();
+            //
+            // Pre-size to the reported duration so the buffer rarely reallocate-and-copies as it grows
+            // (each doubling transiently holds ~2× the clip). Cap the *speculative* reserve so a bogus
+            // duration in a malformed header can't force a huge up-front allocation — `extend` still
+            // grows past the hint for genuinely long files.
+            const MAX_PRESIZE_SAMPLES: usize = TARGET_SAMPLE_RATE as usize * 3600; // 1 hour
+            let hint = (source.duration().as_secs_f64() * TARGET_SAMPLE_RATE as f64) as usize;
+            let mut audio: Vec<f32> = Vec::with_capacity(hint.min(MAX_PRESIZE_SAMPLES));
             while let Some(frame) = source.next_frame()? {
                 audio.extend_from_slice(&to_mono_16k(&frame));
             }
@@ -3644,8 +3651,9 @@ async fn transcribe_file(
             }
 
             // Clean up level and rumble before the engine sees the clip — quiet or hot recordings
-            // decode more reliably at a consistent, healthy level.
-            let audio = normalize_for_asr(&audio, TARGET_SAMPLE_RATE);
+            // decode more reliably at a consistent, healthy level. In place, so we never hold a second
+            // clip-sized copy of `audio` through the (long) transcription and diarization below.
+            normalize_for_asr_in_place(&mut audio, TARGET_SAMPLE_RATE);
 
             // Optionally drop non-speech (silence/music) so the engine can't hallucinate in the
             // gaps: transcribe the gap-free speech, then map timestamps back to the original
