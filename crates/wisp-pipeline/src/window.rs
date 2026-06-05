@@ -8,6 +8,7 @@
 //! [`transcribe_in_windows`] drives an engine over those windows and stitches the result back onto
 //! the clip timeline.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use wisp_core::engine::{AsrEngine, ClipOptions};
@@ -85,9 +86,8 @@ pub fn transcribe_in_windows(
     engine: &mut dyn AsrEngine,
     audio: &[f32],
     sample_rate: u32,
-    timestamps: bool,
-    beam: bool,
-    prompt: &str,
+    clip: ClipOptions,
+    cancel: &AtomicBool,
     on_progress: &dyn Fn(u8),
 ) -> Result<Vec<TranscriptSegment>> {
     let target = sample_rate as usize * WINDOW_SECS;
@@ -97,12 +97,13 @@ pub fn transcribe_in_windows(
 
     let mut collected = Vec::new();
     for (i, &(start, end)) in bounds.iter().enumerate() {
+        // A cancelled File transcription stops at the next window boundary, returning what was
+        // decoded so far; the caller owns the flag and discards the partial.
+        if cancel.load(Ordering::Relaxed) {
+            break;
+        }
         let offset = Duration::from_secs_f64(start as f64 / sample_rate as f64);
-        let result = engine.transcribe_clip(
-            &audio[start..end],
-            sample_rate,
-            ClipOptions::new(timestamps, beam, prompt),
-        )?;
+        let result = engine.transcribe_clip(&audio[start..end], sample_rate, clip)?;
         for mut segment in result.segments {
             segment.start += offset;
             segment.end += offset;
@@ -212,9 +213,15 @@ mod tests {
         let audio = vec![0.3f32; 1_000];
         let pcts = RefCell::new(Vec::new());
 
-        let segs = transcribe_in_windows(&mut engine, &audio, 10, true, false, "", &|p| {
-            pcts.borrow_mut().push(p)
-        })
+        let cancel = AtomicBool::new(false);
+        let segs = transcribe_in_windows(
+            &mut engine,
+            &audio,
+            10,
+            ClipOptions::new(true, false, ""),
+            &cancel,
+            &|p| pcts.borrow_mut().push(p),
+        )
         .unwrap();
 
         assert!(
@@ -247,13 +254,73 @@ mod tests {
         let audio = vec![0.3f32; 50]; // smaller than one 300-sample window
         let pcts = RefCell::new(Vec::new());
 
-        let segs = transcribe_in_windows(&mut engine, &audio, 10, false, false, "", &|p| {
-            pcts.borrow_mut().push(p)
-        })
+        let cancel = AtomicBool::new(false);
+        let segs = transcribe_in_windows(
+            &mut engine,
+            &audio,
+            10,
+            ClipOptions::new(false, false, ""),
+            &cancel,
+            &|p| pcts.borrow_mut().push(p),
+        )
         .unwrap();
 
         assert_eq!(segs.len(), 1);
         assert_eq!(segs[0].start, Duration::ZERO);
         assert_eq!(*pcts.borrow(), vec![100]);
+    }
+
+    #[test]
+    fn a_pre_cancelled_run_decodes_nothing() {
+        let mut engine = PerWindowEngine {
+            calls: Cell::new(0),
+        };
+        let audio = vec![0.3f32; 1_000]; // several 300-sample windows
+        let cancel = AtomicBool::new(true); // already cancelled before the first window
+        let segs = transcribe_in_windows(
+            &mut engine,
+            &audio,
+            10,
+            ClipOptions::new(false, false, ""),
+            &cancel,
+            &|_| {},
+        )
+        .unwrap();
+        assert!(
+            segs.is_empty(),
+            "nothing is decoded when cancelled up front"
+        );
+        assert_eq!(engine.calls.get(), 0, "the engine was never called");
+    }
+
+    #[test]
+    fn cancelling_mid_run_stops_at_the_next_window_boundary() {
+        let mut engine = PerWindowEngine {
+            calls: Cell::new(0),
+        };
+        let audio = vec![0.3f32; 1_000];
+        // The progress callback fires after each window; flip the flag once the first one completes.
+        let cancel = AtomicBool::new(false);
+        let segs = transcribe_in_windows(
+            &mut engine,
+            &audio,
+            10,
+            ClipOptions::new(false, false, ""),
+            &cancel,
+            &|_| {
+                cancel.store(true, Ordering::Relaxed);
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            segs.len(),
+            1,
+            "decoded one window, then stopped at the boundary"
+        );
+        assert_eq!(
+            engine.calls.get(),
+            1,
+            "the engine decoded exactly one window"
+        );
     }
 }
