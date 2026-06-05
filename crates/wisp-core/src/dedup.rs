@@ -16,7 +16,7 @@
 use std::collections::VecDeque;
 use std::time::Duration;
 
-use crate::transcript::{AudioSourceKind, TranscriptSegment};
+use crate::transcript::{AudioSourceKind, SegmentStatus, TranscriptSegment};
 
 /// How far back a meeting segment can be and still count as the echo source for a mic segment.
 const DEFAULT_WINDOW: Duration = Duration::from_secs(5);
@@ -64,8 +64,11 @@ impl CrossStreamEchoFilter {
 
     /// Records `segment` and returns whether it should be emitted.
     ///
-    /// System segments are always admitted and remembered as echo candidates; microphone segments
-    /// are dropped (returns `false`) when they closely match a recent meeting segment.
+    /// System segments are always admitted; a committed meeting **final** is remembered as an echo
+    /// candidate (a provisional partial is incomplete and would cause false drops). A microphone
+    /// segment — **partial or final** — is dropped (returns `false`) when it closely matches a
+    /// remembered meeting line, so a residual echo never even flickers on screen as a partial. Mic
+    /// text is never remembered, so checking partials can't prime a mic line against itself.
     pub fn admit(&mut self, segment: &TranscriptSegment) -> bool {
         self.now = self.now.max(segment.end);
         self.evict_expired();
@@ -74,7 +77,7 @@ impl CrossStreamEchoFilter {
 
         match segment.source {
             AudioSourceKind::System => {
-                if normalized.len() >= self.min_chars {
+                if segment.status == SegmentStatus::Final && normalized.len() >= self.min_chars {
                     self.recent_meeting.push_back((segment.end, normalized));
                 }
                 true
@@ -239,6 +242,50 @@ mod tests {
             2,
             "先出现的麦克风回音内容",
             AudioSourceKind::System,
+            1100
+        )));
+    }
+
+    fn partial(id: u64, text: &str, source: AudioSourceKind, end_ms: u64) -> TranscriptSegment {
+        let mut s = seg(id, text, source, end_ms);
+        s.status = SegmentStatus::Partial;
+        s
+    }
+
+    #[test]
+    fn suppresses_a_mic_partial_echo() {
+        let mut f = CrossStreamEchoFilter::new();
+        f.admit(&seg(
+            1,
+            "做了一份AD，你要不要先看一下？",
+            AudioSourceKind::System,
+            1000,
+        ));
+        // The same phrase re-heard by the mic while still provisional is an echo too — drop it so it
+        // never flickers on screen ahead of (or instead of) its final.
+        assert!(!f.admit(&partial(
+            2,
+            "做了一份AD，你要不要先看一下？",
+            AudioSourceKind::Microphone,
+            1100
+        )));
+    }
+
+    #[test]
+    fn a_meeting_partial_is_not_remembered_as_an_echo_source() {
+        let mut f = CrossStreamEchoFilter::new();
+        // A provisional meeting partial must not become an echo source — it can be garbled or
+        // incomplete, which would wrongly drop genuine mic speech that resembles it.
+        f.admit(&partial(
+            1,
+            "这是一段会议内容啊",
+            AudioSourceKind::System,
+            1000,
+        ));
+        assert!(f.admit(&seg(
+            2,
+            "这是一段会议内容啊",
+            AudioSourceKind::Microphone,
             1100
         )));
     }
