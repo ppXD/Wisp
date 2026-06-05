@@ -36,9 +36,9 @@ use wisp_core::params::{ParamKind, ParamSpec, ParamValue, ParamValues};
 use wisp_core::task::run_within;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptEvent, TranscriptSegment};
 use wisp_engine_cloud::{
-    batch_param_specs as cloud_batch_param_specs, build_assist_engine, build_realtime_engine,
-    chat_completion, chat_completion_stream, streaming_param_specs as cloud_streaming_param_specs,
-    ChatRequest, CloudEngine,
+    assist_param_specs, batch_param_specs as cloud_batch_param_specs, build_assist_engine,
+    build_realtime_engine, chat_completion, chat_completion_stream,
+    streaming_param_specs as cloud_streaming_param_specs, ChatRequest, CloudEngine,
 };
 use wisp_engine_sherpa::{
     GtcrnDenoiser, ParaformerEngine, ParakeetEngine, SenseVoiceEngine, SherpaDiarizer,
@@ -1874,6 +1874,14 @@ fn batch_params(
         .collect())
 }
 
+/// The advanced parameter specs the chat assist exposes (temperature / top_p / max reply tokens), for
+/// the generic settings panel — the assist-side counterpart of [`batch_params`]. Vendor-agnostic (every
+/// assist provider speaks the same OpenAI-compatible chat tuning), so it takes no provider/model.
+#[tauri::command]
+fn assist_params() -> Vec<ParamSpecDto> {
+    assist_param_specs().iter().map(param_spec_dto).collect()
+}
+
 /// Runs a one-shot LLM task (summary, action items, or a custom prompt) over `transcript` using the
 /// chat model of cloud `provider` — typically a user's custom OpenAI-compatible endpoint (their
 /// gateway, a local Ollama, …). Runs off the main thread (the call is a slow HTTP round-trip).
@@ -1884,9 +1892,10 @@ async fn run_llm_task(
     model: String,
     system_prompt: String,
     transcript: String,
+    params: HashMap<String, serde_json::Value>,
 ) -> Result<String, String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_llm_task_blocking(app, &provider, &model, &system_prompt, &transcript)
+        run_llm_task_blocking(app, &provider, &model, &system_prompt, &transcript, &params)
     })
     .await
     .map_err(|e| format!("LLM task failed: {e}"))?
@@ -1900,6 +1909,7 @@ fn run_llm_task_blocking(
     model: &str,
     system_prompt: &str,
     transcript: &str,
+    params: &HashMap<String, serde_json::Value>,
 ) -> Result<String, String> {
     if transcript.trim().is_empty() {
         return Err("there's no transcript to work on yet".to_owned());
@@ -1907,6 +1917,7 @@ fn run_llm_task_blocking(
 
     let state = app.state::<AppState>();
     let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
+    let assist = overlay_assist_params(assist, &build_param_values(&assist_param_specs(), params));
 
     // Prepend the endpoint's standing instruction (persona / language / style) to the task prompt.
     let system = combine_system(&assist.system_prompt, system_prompt);
@@ -1947,6 +1958,30 @@ fn resolve_assist_target(
     Ok((provider, key, assist))
 }
 
+/// Overlays the user's advanced assist params (from the settings panel) onto the resolved endpoint
+/// tuning: a knob the user moved off its default is present in `params` and overrides; one left at its
+/// default isn't present, so the endpoint's own value (often "unset" → the model's own optimum) stands.
+/// Each override is clamped here, since these bypass the save-time [`normalize_assist`]. A `max_tokens`
+/// of 0 means "no cap" (its default), so it's treated as unset.
+fn overlay_assist_params(mut assist: AssistParams, params: &ParamValues) -> AssistParams {
+    if params.contains("temperature") {
+        assist.temperature = Some(params.float("temperature", 1.0).clamp(0.0, 2.0));
+    }
+
+    if params.contains("top_p") {
+        assist.top_p = Some(params.float("top_p", 1.0).clamp(0.0, 1.0));
+    }
+
+    if params.contains("max_tokens") {
+        let n = params.int("max_tokens", 0).clamp(0, i64::from(u32::MAX));
+        if n > 0 {
+            assist.max_tokens = Some(n as u32);
+        }
+    }
+
+    assist
+}
+
 /// Streams a chat assist task into the feed: resolve the provider, then run a single chat call with
 /// `stream: true`, emitting each chunk as [`ASSIST_DELTA_EVENT`] and the full reply as
 /// [`ASSIST_TEXT_EVENT`]. A transcript too long for one call falls back to (non-streamed) map-reduce and
@@ -1958,9 +1993,10 @@ async fn run_assist_stream(
     model: String,
     system_prompt: String,
     transcript: String,
+    params: HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
-        run_assist_stream_blocking(app, &provider, &model, &system_prompt, &transcript)
+        run_assist_stream_blocking(app, &provider, &model, &system_prompt, &transcript, &params)
     })
     .await
     .map_err(|e| format!("assist stream task failed: {e}"))?
@@ -1972,6 +2008,7 @@ fn run_assist_stream_blocking(
     model: &str,
     system_prompt: &str,
     transcript: &str,
+    params: &HashMap<String, serde_json::Value>,
 ) -> Result<(), String> {
     if transcript.trim().is_empty() {
         return Err("there's no transcript to work on yet".to_owned());
@@ -1979,6 +2016,8 @@ fn run_assist_stream_blocking(
 
     let state = app.state::<AppState>();
     let (provider, key, assist) = resolve_assist_target(&state, provider_id)?;
+    let assist = overlay_assist_params(assist, &build_param_values(&assist_param_specs(), params));
+
     let system = combine_system(&assist.system_prompt, system_prompt);
 
     // A transcript that fits one call streams token-by-token; one too long map-reduces (each chunk
@@ -4018,6 +4057,7 @@ pub fn run() {
             remove_cloud_endpoint,
             streaming_params,
             batch_params,
+            assist_params,
             run_llm_task,
             run_assist_stream,
             download_model,
@@ -4165,6 +4205,45 @@ mod tests {
         assert_eq!(n.max_tokens, None);
         assert_eq!(n.context_tokens, Some(8000));
         assert_eq!(n.system_prompt, "hi");
+    }
+
+    #[test]
+    fn overlay_assist_params_applies_only_set_knobs_and_clamps() {
+        let base = AssistParams {
+            temperature: None,
+            max_tokens: None,
+            context_tokens: Some(8000),
+            top_p: None,
+            system_prompt: "persona".to_owned(),
+        };
+
+        // A knob the user set overrides; unset knobs leave the resolved value untouched.
+        let mut set = ParamValues::new();
+        set.set("temperature", ParamValue::Float(0.3));
+        let out = overlay_assist_params(base.clone(), &set);
+        assert_eq!(out.temperature, Some(0.3), "set temperature overrides");
+        assert_eq!(out.top_p, None, "unset top_p stays unset");
+        assert_eq!(out.context_tokens, Some(8000), "untouched fields preserved");
+        assert_eq!(out.system_prompt, "persona");
+
+        // Empty overrides leave every field as resolved — so an unset temperature is still omitted.
+        let untouched = overlay_assist_params(base.clone(), &ParamValues::new());
+        assert_eq!(untouched.temperature, None);
+
+        // Overrides bypass the save-time normaliser, so the overlay clamps them itself.
+        let mut wild = ParamValues::new();
+        wild.set("temperature", ParamValue::Float(5.0));
+        wild.set("top_p", ParamValue::Float(2.0));
+        wild.set("max_tokens", ParamValue::Int(512));
+        let clamped = overlay_assist_params(base.clone(), &wild);
+        assert_eq!(clamped.temperature, Some(2.0), "temperature clamped to 2");
+        assert_eq!(clamped.top_p, Some(1.0), "top_p clamped to 1");
+        assert_eq!(clamped.max_tokens, Some(512));
+
+        // A max_tokens of 0 is the neutral default ("no cap") → treated as unset.
+        let mut zero = ParamValues::new();
+        zero.set("max_tokens", ParamValue::Int(0));
+        assert_eq!(overlay_assist_params(base, &zero).max_tokens, None);
     }
 
     #[test]

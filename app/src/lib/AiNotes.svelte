@@ -7,7 +7,20 @@
   // then Run once over the whole transcript, or — in `live` mode — turn on Live for a rolling prompter.
   // Every result is appended to a scrolling feed (newest at the bottom, like live subtitles). The
   // assist has its own Stop (halt the rolling) and Clear (empty the feed), separate from the session.
-  import { cloudState, runLlmTask, runAssistStream, openEndpointsModal } from "$lib/cloud.svelte";
+  import {
+    cloudState,
+    runLlmTask,
+    runAssistStream,
+    openEndpointsModal,
+    assistParams,
+    defaultParamValues,
+    changedParamValues,
+    loadParamValues,
+    saveParamValues,
+    type ParamSpec,
+    type ParamValue,
+  } from "$lib/cloud.svelte";
+  import ParamsPanel from "$lib/ParamsPanel.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -164,6 +177,38 @@ checking. Bullet list, in the spoken language, no preamble.";
     if (promptKey === loadedPromptKey) localStorage.setItem(promptKey, prompt);
   });
 
+  // Advanced model params (temperature / top_p / max reply tokens) — the same generic schema + panel
+  // the transcription picker uses, so a new knob is backend-only. Specs are vendor-agnostic; values
+  // persist per (provider, model). Chat only — realtime tuning rides its own path.
+  let assistParamSpecs = $state<ParamSpec[]>([]);
+  let assistParamValues = $state<Record<string, ParamValue>>({});
+  let advancedOpen = $state(false);
+
+  // Load the specs + this (provider, model)'s saved values whenever the model changes; empty specs
+  // (non-chat, or none configured) hide the Advanced disclosure.
+  $effect(() => {
+    const p = providerId,
+      m = modelId;
+    if (selectedKind !== "chat" || !p || !m) {
+      assistParamSpecs = [];
+      assistParamValues = {};
+      return;
+    }
+    assistParams().then((specs) => {
+      assistParamSpecs = specs;
+      assistParamValues = { ...defaultParamValues(specs), ...loadParamValues(p, m, "assist") };
+    });
+  });
+  // Persist edits for the active (provider, model).
+  $effect(() => {
+    if (assistParamSpecs.length && providerId && modelId) {
+      saveParamValues(providerId, modelId, assistParamValues, "assist");
+    }
+  });
+  // Only the knobs the user moved off their default — an untouched knob is omitted so the model
+  // applies its own optimum (and a reasoning model that rejects a non-default value isn't sent one).
+  const assistOverrides = $derived(changedParamValues(assistParamValues, assistParamSpecs));
+
   let modelOpen = $state(false);
   let templatesOpen = $state(false);
   let running = $state(false);
@@ -249,7 +294,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     running = true;
     error = "";
     try {
-      await runAssistStream(provider.id, model.id, prompt, text);
+      await runAssistStream(provider.id, model.id, prompt, text, assistOverrides);
     } catch (e) {
       error = String(e);
       closeDanglingStream();
@@ -280,7 +325,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     if (!provider || !model) return null;
     const input = prior ? `Existing summary:\n${prior}\n\nNew turns to fold in:\n${newText}` : newText;
     try {
-      return (await runLlmTask(provider.id, model.id, SUMMARY_PROMPT, input)).trim();
+      return (await runLlmTask(provider.id, model.id, SUMMARY_PROMPT, input, assistOverrides)).trim();
     } catch {
       return null;
     }
@@ -323,7 +368,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
         : recent;
       if (!context.trim()) return;
 
-      await runAssistStream(provider.id, model.id, prompt, context);
+      await runAssistStream(provider.id, model.id, prompt, context, assistOverrides);
     } catch (e) {
       error = String(e);
       closeDanglingStream();
@@ -595,6 +640,21 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
       </button>
       <button class="clear act-clear" onclick={clearFeed} disabled={!feed.length}>Clear</button>
     </div>
+
+    <!-- Advanced model params (temperature / top_p / max tokens), rendered from the generic schema.
+         Chat models only; a knob left at its default isn't sent (the model uses its own optimum). -->
+    {#if selectedKind === "chat" && assistParamSpecs.length}
+      <div class="adv">
+        <button class="adv-trigger" class:open={advancedOpen} onclick={() => (advancedOpen = !advancedOpen)}>
+          <span class="caret"></span> Advanced
+        </button>
+        {#if advancedOpen}
+          <div class="adv-body">
+            <ParamsPanel specs={assistParamSpecs} bind:values={assistParamValues} />
+          </div>
+        {/if}
+      </div>
+    {/if}
 
     {#if realtimeNeedsSession}
       <p class="rt-note">⚡ Real-time assist listens to live audio — use it in a running Live session.</p>
@@ -1052,6 +1112,40 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     font-size: 12px;
     line-height: 1.4;
     color: var(--muted);
+  }
+
+  /* ── Advanced model params disclosure ── */
+  .adv {
+    margin: 10px 14px 0;
+  }
+
+  .adv-trigger {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    padding: 2px 0;
+    cursor: pointer;
+  }
+
+  .adv-trigger:hover {
+    color: var(--text);
+  }
+
+  .adv-trigger.open .caret {
+    transform: rotate(180deg);
+  }
+
+  .adv-body {
+    margin-top: 10px;
+    padding: 12px;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    background: var(--surface);
   }
 
   /* ── Scrolling output feed ── */
