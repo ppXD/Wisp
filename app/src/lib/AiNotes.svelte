@@ -628,21 +628,9 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
       placeholder="What should the assistant do with the transcript? Pick a template above or write your own."
     ></textarea>
 
-    <!-- One generic Start, dispatched by the model's kind: a chat model runs/rolls over the transcript,
-         a real-time model opens the live-audio WebSocket. Real-time needs a running session to listen to. -->
-    <div class="actions">
-      <button
-        class="run"
-        disabled={connecting || running || !provider?.keySet || !model || !prompt.trim() || realtimeNeedsSession}
-        onclick={start}
-      >
-        {#if connecting || running}<span class="btn-spin"></span>{connecting ? "Connecting…" : "Working…"}{:else}{selectedKind === "realtime" ? "⚡ Start" : "▸ Start"}{/if}
-      </button>
-      <button class="clear act-clear" onclick={clearFeed} disabled={!feed.length}>Clear</button>
-    </div>
-
-    <!-- Advanced model params (temperature / top_p / max tokens), rendered from the generic schema.
-         Chat models only; a knob left at its default isn't sent (the model uses its own optimum). -->
+    <!-- Advanced model params (temperature / top_p / max tokens), rendered from the generic schema —
+         grouped with the prompt as configuration, above the action. Chat models only; a knob left at
+         its default isn't sent (the model uses its own optimum). -->
     {#if selectedKind === "chat" && assistParamSpecs.length}
       <div class="adv">
         <button class="adv-trigger" class:open={advancedOpen} onclick={() => (advancedOpen = !advancedOpen)}>
@@ -655,6 +643,19 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
         {/if}
       </div>
     {/if}
+
+    <!-- One generic Start, dispatched by the model's kind: a chat model runs/rolls over the transcript,
+         a real-time model opens the live-audio WebSocket. Real-time needs a running session to listen to. -->
+    <div class="actions">
+      <button
+        class="run"
+        disabled={connecting || running || !provider?.keySet || !model || !prompt.trim() || realtimeNeedsSession}
+        onclick={start}
+      >
+        {#if connecting || running}<span class="btn-spin"></span>{connecting ? "Connecting…" : "Working…"}{:else}{selectedKind === "realtime" ? "⚡ Start" : "▸ Start"}{/if}
+      </button>
+      <button class="clear act-clear" onclick={clearFeed} disabled={!feed.length}>Clear</button>
+    </div>
 
     {#if realtimeNeedsSession}
       <p class="rt-note">⚡ Real-time assist listens to live audio — use it in a running Live session.</p>
