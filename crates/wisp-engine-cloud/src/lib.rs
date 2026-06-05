@@ -704,14 +704,42 @@ fn parse_chat_completion(json: &str) -> Result<String> {
 /// Works for any OpenAI-compatible chat endpoint (OpenAI, a custom endpoint, a local Ollama). Not for
 /// the Gemini `generateContent` shape — pick an OpenAI-compatible chat model for LLM tasks.
 /// A chat-completion request to an OpenAI-compatible endpoint: the two messages plus optional tuning
-/// knobs. `max_tokens` / `top_p` are omitted from the wire request when `None`, so a provider that
-/// doesn't accept them isn't sent them.
+/// knobs. `temperature` / `max_tokens` / `top_p` are each omitted from the wire request when `None`,
+/// so a provider that doesn't accept them — e.g. a reasoning model that only allows the default
+/// temperature — isn't sent them.
 pub struct ChatRequest<'a> {
     pub system: &'a str,
     pub user: &'a str,
-    pub temperature: f64,
+    pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub top_p: Option<f64>,
+}
+
+/// The JSON body for a chat-completion POST: the two messages plus any *set* tuning knob. Each of
+/// temperature / max_tokens / top_p is included only when `req` carries one, so a model that rejects
+/// a non-default value (e.g. a reasoning model fixed at temperature 1) isn't sent it. `stream` adds
+/// `"stream": true` for the SSE variant.
+fn build_chat_body(model: &str, req: &ChatRequest, stream: bool) -> String {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [
+            { "role": "system", "content": req.system },
+            { "role": "user", "content": req.user },
+        ],
+    });
+    if stream {
+        body["stream"] = serde_json::json!(true);
+    }
+    if let Some(temperature) = req.temperature {
+        body["temperature"] = serde_json::json!(temperature);
+    }
+    if let Some(max_tokens) = req.max_tokens {
+        body["max_tokens"] = serde_json::json!(max_tokens);
+    }
+    if let Some(top_p) = req.top_p {
+        body["top_p"] = serde_json::json!(top_p);
+    }
+    body.to_string()
 }
 
 pub fn chat_completion(
@@ -724,21 +752,7 @@ pub fn chat_completion(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    let mut body = serde_json::json!({
-        "model": model,
-        "temperature": req.temperature,
-        "messages": [
-            { "role": "system", "content": req.system },
-            { "role": "user", "content": req.user },
-        ],
-    });
-    if let Some(max_tokens) = req.max_tokens {
-        body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-    if let Some(top_p) = req.top_p {
-        body["top_p"] = serde_json::json!(top_p);
-    }
-    let body = body.to_string();
+    let body = build_chat_body(model, req, false);
 
     let sent = ureq::post(&endpoint)
         .set(&provider.auth.header, &provider.auth.header_value(api_key))
@@ -763,22 +777,7 @@ pub fn chat_completion_stream(
         "{}/chat/completions",
         provider.base_url.trim_end_matches('/')
     );
-    let mut body = serde_json::json!({
-        "model": model,
-        "temperature": req.temperature,
-        "stream": true,
-        "messages": [
-            { "role": "system", "content": req.system },
-            { "role": "user", "content": req.user },
-        ],
-    });
-    if let Some(max_tokens) = req.max_tokens {
-        body["max_tokens"] = serde_json::json!(max_tokens);
-    }
-    if let Some(top_p) = req.top_p {
-        body["top_p"] = serde_json::json!(top_p);
-    }
-    let body = body.to_string();
+    let body = build_chat_body(model, req, true);
 
     let sent = ureq::post(&endpoint)
         .set(&provider.auth.header, &provider.auth.header_value(api_key))
@@ -1359,6 +1358,48 @@ mod tests {
             chat.get("temperature").is_none(),
             "no temperature field when unset"
         );
+    }
+
+    #[test]
+    fn chat_body_sends_tuning_only_when_set() {
+        // A reasoning model (e.g. GPT-5) rejects a non-default temperature, so an unset knob must be
+        // omitted — the body carries only the knobs the caller actually set.
+        let bare = ChatRequest {
+            system: "sys",
+            user: "hi",
+            temperature: None,
+            max_tokens: None,
+            top_p: None,
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&build_chat_body("gpt-5", &bare, false)).unwrap();
+        assert_eq!(body["model"], "gpt-5");
+        assert_eq!(body["messages"][0]["content"], "sys");
+        assert_eq!(body["messages"][1]["content"], "hi");
+        assert!(
+            body.get("temperature").is_none(),
+            "unset temperature omitted"
+        );
+        assert!(body.get("max_tokens").is_none(), "unset max_tokens omitted");
+        assert!(body.get("top_p").is_none(), "unset top_p omitted");
+        assert!(
+            body.get("stream").is_none(),
+            "non-stream body has no stream flag"
+        );
+
+        let tuned = ChatRequest {
+            system: "sys",
+            user: "hi",
+            temperature: Some(0.7),
+            max_tokens: Some(256),
+            top_p: Some(0.9),
+        };
+        let body: serde_json::Value =
+            serde_json::from_str(&build_chat_body("gpt-4o", &tuned, true)).unwrap();
+        assert_eq!(body["temperature"], 0.7);
+        assert_eq!(body["max_tokens"], 256);
+        assert_eq!(body["top_p"], 0.9);
+        assert_eq!(body["stream"], true, "stream variant sets the stream flag");
     }
 
     #[test]
