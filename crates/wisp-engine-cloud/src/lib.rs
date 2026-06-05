@@ -30,7 +30,8 @@ const OPENAI_DIARIZE_MODEL: &str = "gpt-4o-transcribe-diarize";
 
 mod streaming;
 pub use streaming::{
-    build_assist_engine, build_realtime_engine, streaming_param_specs, ErrorSink, REALTIME_URL_ENV,
+    assist_realtime_param_specs, build_assist_engine, build_realtime_engine, streaming_param_specs,
+    ErrorSink, REALTIME_URL_ENV,
 };
 
 /// The advanced File (batch) parameters a cloud `protocol` exposes for `model`, mirroring

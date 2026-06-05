@@ -199,6 +199,16 @@ export async function assistParams(): Promise<ParamSpec[]> {
   }
 }
 
+/** The advanced parameter specs the **realtime** assist exposes (turn-detection + noise reduction) —
+ *  the realtime counterpart of {@link assistParams}, rendered by the same generic <ParamsPanel>. */
+export async function assistRealtimeParams(): Promise<ParamSpec[]> {
+  try {
+    return await invoke<ParamSpec[]>("assist_realtime_params");
+  } catch {
+    return [];
+  }
+}
+
 /** Each spec's smart default, as a flat key→value map. */
 export function defaultParamValues(specs: ParamSpec[]): Record<string, ParamValue> {
   return Object.fromEntries(specs.map((s) => [s.key, s.default]));
