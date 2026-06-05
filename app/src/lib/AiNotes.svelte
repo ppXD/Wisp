@@ -41,13 +41,12 @@
   type AssistModel = { id: string; label: string; kind: "chat" | "realtime" };
   const ASSIST_CATALOG: Record<string, AssistModel[]> = {
     openai: [
-      { id: "gpt-4o-mini", label: "GPT-4o mini", kind: "chat" },
-      { id: "gpt-4o", label: "GPT-4o", kind: "chat" },
-      { id: "gpt-4.1-mini", label: "GPT-4.1 mini", kind: "chat" },
-      { id: "gpt-4.1", label: "GPT-4.1", kind: "chat" },
-      { id: "gpt-5-mini", label: "GPT-5 mini", kind: "chat" },
-      { id: "gpt-5", label: "GPT-5", kind: "chat" },
-      { id: "o4-mini", label: "o4-mini", kind: "chat" },
+      // Current frontier chat lineup (verified against developers.openai.com/api/docs/models): gpt-5.5
+      // is the flagship, gpt-5.4 / -mini / -nano the cost-tiered variants.
+      { id: "gpt-5.5", label: "GPT-5.5", kind: "chat" },
+      { id: "gpt-5.4", label: "GPT-5.4", kind: "chat" },
+      { id: "gpt-5.4-mini", label: "GPT-5.4 mini", kind: "chat" },
+      { id: "gpt-5.4-nano", label: "GPT-5.4 nano", kind: "chat" },
       // GA realtime models (the `session: { type: realtime }` shape the assist WebSocket speaks).
       { id: "gpt-realtime-mini", label: "GPT Realtime mini", kind: "realtime" },
       { id: "gpt-realtime", label: "GPT Realtime", kind: "realtime" },
