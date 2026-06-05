@@ -438,6 +438,9 @@
   // default (mic → system default; system → one-click system audio).
   const micOn = $derived(micDevice !== micOffId);
   const systemOn = $derived(!!systemDevice);
+  // Both streams are live (You + Them), so each row should say which side it came from — even before
+  // the quieter side has produced its first line (when `multiSource` alone wouldn't fire yet).
+  const dualStream = $derived(micOn && systemOn);
 
   function toggleMic() {
     micDevice = micOn ? micOffId : "";
@@ -522,6 +525,14 @@
     if (source === "Microphone") return "mic";
     if (source === "System") return "system";
     return source.toLowerCase();
+  }
+
+  // Who a live row's audio came from, in meeting terms: your mic is "You", system audio is "Them".
+  // The per-speaker number (when "Identify speakers" is on) is shown separately, tinted, beside it.
+  function whoLabel(source: string): string {
+    if (source === "Microphone") return "You";
+    if (source === "System") return "Them";
+    return sourceLabel(source);
   }
 
   async function download(id: string) {
@@ -1686,10 +1697,14 @@
           <li class:partial={!seg.isFinal} class:system={seg.source === "System"}>
             <span class="meta">
               <span class="time">{fmtTime(seg.startMs)}</span>
-              {#if multiSource}<span class="who">{sourceLabel(seg.source)}</span>{/if}
+              {#if dualStream || multiSource}<span class="who">{whoLabel(seg.source)}</span>{/if}
             </span>
             <span class="body">
-              <span class="text">{seg.text}</span>
+              <span class="text"
+                >{#if seg.speaker !== null}<span
+                    class="speaker"
+                    style="--spk: {speakerColor(seg.speaker)}">{speakerLabel(seg.speaker)}</span
+                  >{/if}{seg.text}</span>
               {#if seg.auxText}<span class="aux-text">{seg.auxText}</span>{/if}
             </span>
           </li>
