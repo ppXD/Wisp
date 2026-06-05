@@ -1390,6 +1390,7 @@
                     <button
                       class="picker-cat"
                       class:active={pickerCat === c.key}
+                      class:rec={c.star}
                       onclick={() => (pickerCat = c.key)}
                     >
                       {#if c.star}<span class="picker-cat-star">✦</span>{/if}
@@ -1401,6 +1402,7 @@
                     <button
                       class="picker-cat"
                       class:active={pickerCat === c.key}
+                      class:rec={c.star}
                       onclick={() => (pickerCat = c.key)}
                     >
                       {#if c.star}<span class="picker-cat-star">✦</span>{/if}
@@ -2848,9 +2850,13 @@
     max-height: 56vh;
   }
 
-  /* Tabbed two-pane variant: tabs on top, then categories | models. The panes own padding + scroll. */
+  /* Tabbed two-pane variant: tabs on top, then categories | models. The panes own padding + scroll.
+     Centered under the trigger (not left-aligned), so the wider menu stays balanced beneath it and
+     re-centers as the trigger resizes. margin-left (not transform) keeps the fly transition intact. */
   .picker-menu.wide {
+    left: 50%;
     right: auto;
+    margin-left: calc(min(520px, 92vw) * -0.5);
     width: 520px;
     max-width: 92vw;
     padding: 0;
@@ -2973,6 +2979,25 @@
   .picker-cat.active {
     background: var(--surface-active);
     color: var(--accent);
+  }
+
+  /* The pinned ✦ Recommended row: always accent-labelled, and set off from the family / provider list
+     below it by a hairline — so it reads as a deliberate, featured recommendation, not a stray entry. */
+  .picker-cat.rec {
+    position: relative;
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 7px;
+  }
+
+  .picker-cat.rec::after {
+    content: "";
+    position: absolute;
+    left: 9px;
+    right: 9px;
+    bottom: -4px;
+    height: 1px;
+    background: var(--border);
   }
 
   .picker-cat-name {
