@@ -217,6 +217,13 @@ impl ParamValues {
             _ => default.to_owned(),
         }
     }
+
+    /// Whether `key` was explicitly set. Lets a request builder **omit** an unset parameter rather
+    /// than send a fabricated default a model might reject — the value then falls through to the
+    /// provider's own (optimal) default instead.
+    pub fn contains(&self, key: &str) -> bool {
+        self.values.contains_key(key)
+    }
 }
 
 #[cfg(test)]

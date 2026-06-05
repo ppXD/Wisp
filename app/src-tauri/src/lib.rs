@@ -435,14 +435,17 @@ fn batch_param_specs(provider: &CloudProvider, model: &str) -> Vec<ParamSpec> {
     cloud_batch_param_specs(provider.protocol, model)
 }
 
-/// Builds a [`ParamValues`] from an engine's `specs` (smart defaults) overlaid with the user's raw
-/// JSON `overrides`. Each override is coerced to its spec's kind; unknown keys and wrong types are
-/// ignored, so a stale or malformed override never breaks a session.
+/// Builds a [`ParamValues`] from the user's raw JSON `overrides`, coercing each to its spec's kind.
+///
+/// Only params the user actually set are included — spec defaults are **not** seeded — so an unset
+/// param is omitted from the provider request and falls through to that model's own (optimal) default
+/// rather than a fabricated value the model might reject. Unknown keys and type mismatches are
+/// dropped, so a stale or malformed override never breaks a session.
 fn build_param_values(
     specs: &[ParamSpec],
     overrides: &HashMap<String, serde_json::Value>,
 ) -> ParamValues {
-    let mut values = ParamValues::from_specs(specs);
+    let mut values = ParamValues::new();
 
     for spec in specs {
         if let Some(value) = overrides

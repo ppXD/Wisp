@@ -193,6 +193,19 @@ export function defaultParamValues(specs: ParamSpec[]): Record<string, ParamValu
   return Object.fromEntries(specs.map((s) => [s.key, s.default]));
 }
 
+/** Only the params whose value differs from its spec default — what we actually send to the provider.
+ *  A param left at its default is omitted, so the model applies its own (optimal) default rather than
+ *  a fabricated value it might reject (e.g. a model that only accepts temperature = 1). */
+export function changedParamValues(
+  values: Record<string, ParamValue>,
+  specs: ParamSpec[],
+): Record<string, ParamValue> {
+  const defaults = new Map(specs.map((s) => [s.key, s.default]));
+  return Object.fromEntries(
+    Object.entries(values).filter(([k, v]) => !defaults.has(k) || v !== defaults.get(k)),
+  );
+}
+
 const PARAMS_KEY = "wisp.params";
 
 /** Storage key for a (provider, model); `scope` ("live"/"file") namespaces it so the two surfaces
