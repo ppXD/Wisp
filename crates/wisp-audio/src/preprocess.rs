@@ -35,40 +35,56 @@ const GATE_REL_MS: f32 = 3.16e-3;
 
 /// Normalize `samples` (mono `f32`) for ASR: remove DC/rumble, then bring the speech level to a
 /// consistent target without clipping. Returns the cleaned signal; silent or empty input is
-/// returned essentially unchanged.
+/// returned essentially unchanged. Allocates a copy — for a whole-clip buffer the caller owns and can
+/// mutate, prefer [`normalize_for_asr_in_place`], which skips the extra clip-sized allocation.
 pub fn normalize_for_asr(samples: &[f32], sample_rate: u32) -> Vec<f32> {
+    let mut out = samples.to_vec();
+    normalize_for_asr_in_place(&mut out, sample_rate);
+    out
+}
+
+/// In-place [`normalize_for_asr`]: removes DC/rumble and normalizes the speech level **without**
+/// allocating a second full-length buffer — the high-pass and the gain are written straight into
+/// `samples`. Decoding a long file to one big `Vec<f32>` and normalizing it in place avoids holding a
+/// redundant clip-sized copy through the (long) transcription and diarization that follow. Empty or
+/// zero-rate input is left untouched.
+pub fn normalize_for_asr_in_place(samples: &mut [f32], sample_rate: u32) {
     if samples.is_empty() || sample_rate == 0 {
-        return samples.to_vec();
+        return;
     }
 
-    let filtered = high_pass(samples, HPF_CUTOFF_HZ, sample_rate);
+    high_pass_in_place(samples, HPF_CUTOFF_HZ, sample_rate);
 
-    let Some(rms) = gated_rms(&filtered, sample_rate) else {
-        return filtered; // no speech-level content — leave it alone
+    let Some(rms) = gated_rms(samples, sample_rate) else {
+        return; // no speech-level content — leave the (now de-rumbled) signal alone
     };
 
     let gain = (TARGET_RMS / rms).min(MAX_GAIN);
-    apply_gain_capped(filtered, gain)
+    apply_gain_capped_in_place(samples, gain);
 }
 
-/// One-pole high-pass filter. Removes DC and frequencies below `cutoff_hz` with a gentle 6 dB/oct
-/// slope — enough to clear rumble without touching speech.
-fn high_pass(samples: &[f32], cutoff_hz: f32, sample_rate: u32) -> Vec<f32> {
+/// One-pole high-pass filter, in place. Removes DC and frequencies below `cutoff_hz` with a gentle
+/// 6 dB/oct slope — enough to clear rumble without touching speech. The recurrence reads each sample's
+/// original value, so the previous input is stashed in a scalar before its slot is overwritten.
+fn high_pass_in_place(samples: &mut [f32], cutoff_hz: f32, sample_rate: u32) {
+    if samples.is_empty() {
+        return;
+    }
+
     let dt = 1.0 / sample_rate as f32;
     let rc = 1.0 / (std::f32::consts::TAU * cutoff_hz);
     let alpha = rc / (rc + dt);
 
-    let mut out = Vec::with_capacity(samples.len());
-    out.push(0.0); // start from rest; the first sample's DC is dropped
     let mut prev_in = samples[0];
     let mut prev_out = 0.0;
-    for &x in &samples[1..] {
+    samples[0] = 0.0; // start from rest; the first sample's DC is dropped
+    for s in samples.iter_mut().skip(1) {
+        let x = *s;
         let y = alpha * (prev_out + x - prev_in);
-        out.push(y);
+        *s = y;
         prev_out = y;
         prev_in = x;
     }
-    out
 }
 
 /// Speech-gated RMS: measures the level over 20 ms frames, counting only frames within
@@ -93,19 +109,18 @@ fn gated_rms(samples: &[f32], sample_rate: u32) -> Option<f32> {
     Some(mean.sqrt())
 }
 
-/// Apply `gain`, but if that would push the peak above [`PEAK_CEILING`], scale the whole signal
-/// down so the peak lands exactly on the ceiling instead. Never clips.
-fn apply_gain_capped(mut samples: Vec<f32>, gain: f32) -> Vec<f32> {
+/// Apply `gain` in place, but if that would push the peak above [`PEAK_CEILING`], scale the whole
+/// signal down so the peak lands exactly on the ceiling instead. Never clips.
+fn apply_gain_capped_in_place(samples: &mut [f32], gain: f32) {
     let peak = samples.iter().fold(0.0_f32, |m, &x| m.max(x.abs()));
     let gain = if peak * gain > PEAK_CEILING {
         PEAK_CEILING / peak
     } else {
         gain
     };
-    for s in &mut samples {
+    for s in samples.iter_mut() {
         *s *= gain;
     }
-    samples
 }
 
 /// Mean of the squares of a frame (its energy / power).
@@ -199,5 +214,39 @@ mod tests {
         let out = normalize_for_asr(&tone(440.0, 0.2, 0.05), SR);
         assert!(out.iter().all(|v| v.is_finite()));
         assert_eq!(out.len(), SR as usize);
+    }
+
+    #[test]
+    fn in_place_matches_allocating() {
+        // The in-place path is the real implementation and the allocating one wraps it, so the two
+        // must stay bit-identical across every branch: quiet (boosted), hot (attenuated), DC-biased,
+        // pure silence (gate returns None), and a sub-window clip. This pins them together.
+        let cases = [
+            tone(300.0, 0.02, 0.0),
+            tone(300.0, 0.9, 0.0),
+            tone(300.0, 0.05, 0.3),
+            vec![0.0; SR as usize],
+            vec![0.25; 3],
+        ];
+        for signal in cases {
+            let expected = normalize_for_asr(&signal, SR);
+            let mut got = signal.clone();
+            normalize_for_asr_in_place(&mut got, SR);
+            assert_eq!(
+                got,
+                expected,
+                "in-place diverged for a {}-sample clip",
+                signal.len()
+            );
+        }
+
+        // Empty and zero-rate are left untouched, matching the allocating passthrough.
+        let mut empty: Vec<f32> = Vec::new();
+        normalize_for_asr_in_place(&mut empty, SR);
+        assert!(empty.is_empty());
+
+        let mut passthrough = vec![0.1, 0.2];
+        normalize_for_asr_in_place(&mut passthrough, 0);
+        assert_eq!(passthrough, vec![0.1, 0.2]);
     }
 }

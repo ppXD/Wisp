@@ -27,6 +27,6 @@ pub use media::MediaSource;
 #[cfg(feature = "mic")]
 pub use mic::{list_input_devices, MicSource};
 pub use mixer::MeetingMixer;
-pub use preprocess::normalize_for_asr;
+pub use preprocess::{normalize_for_asr, normalize_for_asr_in_place};
 pub use stream::{tee, ChannelSource, MutedSource, Tee};
 pub use wav::WavSource;
