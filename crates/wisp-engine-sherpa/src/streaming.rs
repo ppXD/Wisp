@@ -50,7 +50,11 @@ impl StreamingTransducerEngine {
         let decoder_c = path_cstring(decoder)?;
         let joiner_c = path_cstring(joiner)?;
         let tokens_c = path_cstring(tokens)?;
-        let provider_c = CString::new("cpu").expect("static str has no NUL");
+        // The execution provider (CPU by default) follows `WISP_ONNX_PROVIDER`, so a GPU host runs the
+        // streaming transducer on its accelerator too.
+        let provider = crate::execution_provider().unwrap_or_else(|| "cpu".to_owned());
+        let provider_c =
+            CString::new(provider).unwrap_or_else(|_| CString::new("cpu").expect("no NUL"));
         let decoding_c = CString::new("greedy_search").expect("static str has no NUL");
 
         // SAFETY: zero-init nulls every unused model sub-config (sherpa treats a null path as "not
