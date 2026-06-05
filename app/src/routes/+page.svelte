@@ -276,18 +276,22 @@
   const runnableCloudModels = (p: (typeof cloudState.providers)[number]) =>
     p.models.filter((m) => (cloudCapability === "streaming" ? m.streaming || m.batch : m.batch));
   const cloudProviders = $derived(cloudState.providers.filter((p) => runnableCloudModels(p).length));
-  // The cloud ★ Recommended set: each keyed provider's models flagged `recommended` that run in this
-  // mode (streaming for Live, batch for File), across providers — so Live surfaces the realtime
-  // transcribers and File the file ones. Each carries its provider for the cross-provider list.
+  // The cloud ★ Recommended set: each built-in provider's models flagged `recommended` that run in
+  // this mode (streaming for Live, batch for File), across providers — so Live surfaces the realtime
+  // transcribers and File the file ones. Custom endpoints are excluded (their model is auto-flagged
+  // recommended, but "Recommended" is the app's curated picks; they keep their own category). Each
+  // entry carries its provider for the cross-provider list.
   const recommendedCloud = $derived(
-    cloudProviders.flatMap((p) =>
-      p.models
-        .filter(
-          (m) =>
-            m.recommended && (cloudCapability === "streaming" ? m.streaming || m.batch : m.batch),
-        )
-        .map((m) => ({ provider: p, model: m })),
-    ),
+    cloudProviders
+      .filter((p) => !p.custom)
+      .flatMap((p) =>
+        p.models
+          .filter(
+            (m) =>
+              m.recommended && (cloudCapability === "streaming" ? m.streaming || m.batch : m.batch),
+          )
+          .map((m) => ({ provider: p, model: m })),
+      ),
   );
   const cloudCategories = $derived([
     ...(recommendedCloud.length ? [{ key: REC_CLOUD, label: "Recommended", keySet: true, star: true }] : []),
