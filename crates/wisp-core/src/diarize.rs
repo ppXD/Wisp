@@ -22,6 +22,105 @@ pub trait Diarizer: Send {
     fn identify(&mut self, audio: &[f32], sample_rate: u32) -> Result<SpeakerId>;
 }
 
+/// Online (incremental) speaker clustering for the live path: assigns each utterance embedding a
+/// stable numeric speaker by nearest **running centroid**. A speaker's centroid is the sum of the
+/// unit-normalized embeddings assigned to it, so its centre sharpens as more of that voice is heard —
+/// the same person stays one id instead of fragmenting, and distinct voices stay apart.
+///
+/// Pure vector math, independent of any embedding model (the caller supplies the embeddings), so the
+/// clustering policy is unit-tested here in the core rather than behind native inference.
+pub struct OnlineClusters {
+    threshold: f32,
+    speakers: Vec<Cluster>,
+    next_id: u32,
+}
+
+/// One speaker: its id and the running **sum** of the unit-normalized embeddings assigned to it (the
+/// sum's direction is the centroid; normalizing happens at comparison time).
+struct Cluster {
+    id: u32,
+    sum: Vec<f32>,
+}
+
+impl OnlineClusters {
+    /// Creates an empty clusterer that reuses a speaker when cosine similarity to its centroid is at
+    /// least `threshold`.
+    pub fn new(threshold: f32) -> Self {
+        Self {
+            threshold,
+            speakers: Vec::new(),
+            next_id: 0,
+        }
+    }
+
+    /// Assigns `embedding` to a speaker and returns its id.
+    ///
+    /// A confident match (cosine ≥ threshold) reuses that speaker, and — when `reliable` — refines its
+    /// centroid toward the new embedding. With no confident match, a *new* speaker is registered only
+    /// when `reliable` (e.g. the utterance was long enough to embed well); otherwise the nearest
+    /// existing speaker is reused **without** disturbing its centroid, so a brief, noisy clip can't
+    /// spawn a spurious speaker. The first embedding always seeds speaker 0.
+    pub fn assign(&mut self, embedding: &[f32], reliable: bool) -> u32 {
+        let unit = normalize(embedding);
+
+        let best = self
+            .speakers
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (i, cosine_unit_to_sum(&unit, &c.sum)))
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+
+        if let Some((idx, similarity)) = best {
+            if similarity >= self.threshold {
+                if reliable {
+                    add_in_place(&mut self.speakers[idx].sum, &unit);
+                }
+                return self.speakers[idx].id;
+            }
+            if !reliable {
+                return self.speakers[idx].id;
+            }
+        }
+
+        let id = self.next_id;
+        self.next_id += 1;
+        self.speakers.push(Cluster { id, sum: unit });
+        id
+    }
+
+    /// Number of distinct speakers registered so far.
+    pub fn speaker_count(&self) -> usize {
+        self.speakers.len()
+    }
+}
+
+/// Unit-normalizes a vector. An all-zero (or denormal) vector is returned as-is — it has no
+/// direction, and [`cosine_unit_to_sum`] scores it 0 against every centroid.
+fn normalize(v: &[f32]) -> Vec<f32> {
+    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm <= f32::EPSILON {
+        return v.to_vec();
+    }
+    v.iter().map(|x| x / norm).collect()
+}
+
+/// Cosine similarity between a unit vector and an unnormalized centroid sum: `dot(unit, sum) / |sum|`.
+fn cosine_unit_to_sum(unit: &[f32], sum: &[f32]) -> f32 {
+    let dot: f32 = unit.iter().zip(sum).map(|(a, b)| a * b).sum();
+    let norm = sum.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm <= f32::EPSILON {
+        return 0.0;
+    }
+    dot / norm
+}
+
+/// Folds a unit embedding into a centroid sum in place.
+fn add_in_place(sum: &mut [f32], unit: &[f32]) {
+    for (s, u) in sum.iter_mut().zip(unit) {
+        *s += u;
+    }
+}
+
 /// A contiguous span of audio attributed to a single speaker by diarization.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpeakerSpan {
@@ -399,5 +498,65 @@ mod tests {
         );
         let recombined: Vec<Word> = out.iter().flat_map(|s| s.words.clone()).collect();
         assert_eq!(recombined, words, "every word is preserved, in order");
+    }
+
+    #[test]
+    fn clusters_map_one_voice_to_one_speaker() {
+        let mut clusters = OnlineClusters::new(0.5);
+        let voice = [1.0, 0.0, 0.0];
+        let first = clusters.assign(&voice, true);
+        let again = clusters.assign(&voice, true);
+
+        assert_eq!(first, again);
+        assert_eq!(clusters.speaker_count(), 1);
+    }
+
+    #[test]
+    fn clusters_separate_distinct_voices_when_reliable() {
+        let mut clusters = OnlineClusters::new(0.5);
+        let a = clusters.assign(&[1.0, 0.0, 0.0], true);
+        // Orthogonal voice → cosine 0 < 0.5 → a genuinely new speaker.
+        let b = clusters.assign(&[0.0, 1.0, 0.0], true);
+
+        assert_ne!(a, b);
+        assert_eq!(clusters.speaker_count(), 2);
+    }
+
+    #[test]
+    fn an_unreliable_clip_never_mints_a_new_speaker() {
+        let mut clusters = OnlineClusters::new(0.5);
+        let known = clusters.assign(&[1.0, 0.0, 0.0], true);
+        // A dissimilar but unreliable (too-short) clip attaches to the nearest, never splitting off.
+        let labelled = clusters.assign(&[0.0, 1.0, 0.0], false);
+
+        assert_eq!(labelled, known);
+        assert_eq!(clusters.speaker_count(), 1);
+    }
+
+    #[test]
+    fn the_first_clip_seeds_a_speaker_even_when_unreliable() {
+        let mut clusters = OnlineClusters::new(0.5);
+        // Nothing to fall back to, so even an unreliable first clip must register a speaker.
+        let id = clusters.assign(&[0.0, 1.0, 0.0], false);
+
+        assert_eq!(id, 0);
+        assert_eq!(clusters.speaker_count(), 1);
+    }
+
+    #[test]
+    fn the_centroid_refines_toward_assigned_embeddings() {
+        // A strict threshold one off-axis embedding alone wouldn't clear; but after the centroid is
+        // refined by a run of that voice, a further drifted embedding still lands on the same speaker.
+        let mut clusters = OnlineClusters::new(0.9);
+        let s0 = clusters.assign(&[1.0, 0.0, 0.0], true);
+        let s1 = clusters.assign(&[0.92, 0.39, 0.0], true); // cosine ≈ 0.92 ≥ 0.9 → same, pulls centroid
+        let s2 = clusters.assign(&[0.80, 0.60, 0.0], true); // would be ≈ 0.80 vs the seed, but ≥ 0.9 vs the pulled centroid
+
+        assert_eq!(s0, s1);
+        assert_eq!(
+            s1, s2,
+            "the refined centroid keeps a drifting voice together"
+        );
+        assert_eq!(clusters.speaker_count(), 1);
     }
 }
