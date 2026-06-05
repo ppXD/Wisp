@@ -25,6 +25,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "Wisp"
 path = "src/main.rs"
 
+[features]
+# Build the DirectML-enabled onnxruntime for Windows GPU acceleration (one binary, runtime EP
+# selection + CPU fallback). Off by default → the shipped CPU build is unchanged; a Windows GPU
+# build enables it with `--features directml`.
+directml = ["wisp-engine-sherpa/directml"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 

@@ -15,5 +15,11 @@ sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["down
 # Physical-core detection for the ASR thread count (pure Rust; no native lib linked).
 num_cpus = "1"
 
+[features]
+# Build the DirectML-enabled onnxruntime so the sherpa engines can run on any Windows DX12 GPU
+# (one binary, runtime EP selection + CPU fallback). Off by default → the CPU build is unchanged;
+# enable on a Windows GPU build. Forwards to both sherpa deps so cargo unifies one sys build.
+directml = ["sherpa-rs/directml", "sherpa-rs-sys/directml"]
+
 [dev-dependencies]
 hound = "3.5"
