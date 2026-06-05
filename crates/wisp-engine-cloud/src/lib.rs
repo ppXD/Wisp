@@ -62,6 +62,45 @@ fn temperature_spec(max: f64) -> ParamSpec {
     )
 }
 
+/// The advanced parameters the chat **assist** (summary / notes / live hints) exposes, for the generic
+/// settings panel — the assist-side counterpart of [`batch_param_specs`]. These are the OpenAI-compatible
+/// `/chat/completions` tuning knobs every assist provider speaks. Each stays at a neutral default the
+/// settings panel treats as "unset", so an untouched knob is omitted from the request and the model
+/// applies its own optimum — a model that only accepts its default (e.g. a reasoning model) is never
+/// sent one.
+pub fn assist_param_specs() -> Vec<ParamSpec> {
+    vec![
+        ParamSpec::float(
+            "temperature",
+            "Temperature",
+            "Higher is more varied and creative, lower is more focused. Leave at 1 to use the model's \
+             own default — some models (e.g. reasoning models) only accept that.",
+            0.0,
+            2.0,
+            0.05,
+            1.0,
+        ),
+        ParamSpec::float(
+            "top_p",
+            "Top-p",
+            "Nucleus-sampling cutoff. Leave at 1 to use the model's default; lower it to keep only the \
+             most likely words. Usually tune either this or temperature, not both.",
+            0.0,
+            1.0,
+            0.05,
+            1.0,
+        ),
+        ParamSpec::int(
+            "max_tokens",
+            "Max reply tokens",
+            "Hard cap on the reply length, in tokens. 0 leaves it to the model (no explicit cap).",
+            0,
+            8192,
+            0,
+        ),
+    ]
+}
+
 /// An [`AsrEngine`] backed by a cloud transcription API. One engine spans several wire protocols —
 /// the OpenAI transcription endpoint, Gemini's `generateContent`, and OpenAI-compatible
 /// chat-with-audio — with the protocol choosing how a clip is uploaded and how the transcript reads
@@ -1307,6 +1346,31 @@ mod tests {
                 _ => panic!("temperature is a float slider"),
             }
         }
+    }
+
+    #[test]
+    fn assist_param_specs_expose_the_chat_tuning_knobs() {
+        // The assist panel surfaces temperature / top_p / max_tokens, each at a neutral default the UI
+        // treats as "unset" so an untouched knob is omitted (and the model uses its own optimum).
+        let specs = assist_param_specs();
+        let keys: Vec<&str> = specs.iter().map(|s| s.key.as_str()).collect();
+        assert_eq!(keys, ["temperature", "top_p", "max_tokens"]);
+
+        let temperature = specs.iter().find(|s| s.key == "temperature").unwrap();
+        assert!(
+            matches!(temperature.kind, ParamKind::Float { min, max, .. } if min == 0.0 && max == 2.0)
+        );
+        assert_eq!(temperature.default, ParamValue::Float(1.0));
+
+        let top_p = specs.iter().find(|s| s.key == "top_p").unwrap();
+        assert!(
+            matches!(top_p.kind, ParamKind::Float { min, max, .. } if min == 0.0 && max == 1.0)
+        );
+        assert_eq!(top_p.default, ParamValue::Float(1.0));
+
+        let max_tokens = specs.iter().find(|s| s.key == "max_tokens").unwrap();
+        assert!(matches!(max_tokens.kind, ParamKind::Int { .. }));
+        assert_eq!(max_tokens.default, ParamValue::Int(0));
     }
 
     #[test]
