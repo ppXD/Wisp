@@ -1438,6 +1438,12 @@ struct AssistParams {
     /// Nucleus sampling cutoff (omitted from the request when unset).
     #[serde(default)]
     top_p: Option<f64>,
+    /// Repetition penalty: positive discourages reusing the same words (omitted when unset).
+    #[serde(default)]
+    frequency_penalty: Option<f64>,
+    /// Topic-novelty penalty: positive pushes toward new subjects (omitted when unset).
+    #[serde(default)]
+    presence_penalty: Option<f64>,
     /// A standing instruction prepended to every assist task on this endpoint (persona, language,
     /// style). Empty for none.
     #[serde(default)]
@@ -1686,6 +1692,8 @@ fn add_cloud_endpoint(state: State<'_, AppState>, input: EndpointInput) -> Resul
 fn normalize_assist(mut assist: AssistParams) -> AssistParams {
     assist.temperature = assist.temperature.map(|t| t.clamp(0.0, 2.0));
     assist.top_p = assist.top_p.map(|p| p.clamp(0.0, 1.0));
+    assist.frequency_penalty = assist.frequency_penalty.map(|p| p.clamp(-2.0, 2.0));
+    assist.presence_penalty = assist.presence_penalty.map(|p| p.clamp(-2.0, 2.0));
     assist.max_tokens = assist.max_tokens.filter(|&n| n > 0);
     assist.context_tokens = assist.context_tokens.filter(|&n| n > 0);
     assist.system_prompt = assist.system_prompt.trim().to_owned();
@@ -1983,6 +1991,14 @@ fn overlay_assist_params(mut assist: AssistParams, params: &ParamValues) -> Assi
         assist.top_p = Some(params.float("top_p", 1.0).clamp(0.0, 1.0));
     }
 
+    if params.contains("frequency_penalty") {
+        assist.frequency_penalty = Some(params.float("frequency_penalty", 0.0).clamp(-2.0, 2.0));
+    }
+
+    if params.contains("presence_penalty") {
+        assist.presence_penalty = Some(params.float("presence_penalty", 0.0).clamp(-2.0, 2.0));
+    }
+
     if params.contains("max_tokens") {
         let n = params.int("max_tokens", 0).clamp(0, i64::from(u32::MAX));
         if n > 0 {
@@ -2045,6 +2061,8 @@ fn run_assist_stream_blocking(
                 temperature: assist.temperature,
                 max_tokens: assist.max_tokens,
                 top_p: assist.top_p,
+                frequency_penalty: assist.frequency_penalty,
+                presence_penalty: assist.presence_penalty,
             };
             chat_completion_stream(&provider, model, &key, &req, |chunk| {
                 let _ = app_delta.emit(ASSIST_DELTA_EVENT, chunk.to_owned());
@@ -2142,6 +2160,8 @@ fn chat_once(
             temperature: assist.temperature,
             max_tokens: assist.max_tokens,
             top_p: assist.top_p,
+            frequency_penalty: assist.frequency_penalty,
+            presence_penalty: assist.presence_penalty,
         },
     )
     .map_err(|e| e.to_string())
@@ -4212,10 +4232,14 @@ mod tests {
             max_tokens: Some(0),
             context_tokens: Some(8000),
             top_p: Some(-1.0),
+            frequency_penalty: Some(3.0),
+            presence_penalty: Some(-3.0),
             system_prompt: "  hi  ".to_owned(),
         });
         assert_eq!(n.temperature, Some(2.0));
         assert_eq!(n.top_p, Some(0.0));
+        assert_eq!(n.frequency_penalty, Some(2.0));
+        assert_eq!(n.presence_penalty, Some(-2.0));
         assert_eq!(n.max_tokens, None);
         assert_eq!(n.context_tokens, Some(8000));
         assert_eq!(n.system_prompt, "hi");
@@ -4228,6 +4252,8 @@ mod tests {
             max_tokens: None,
             context_tokens: Some(8000),
             top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
             system_prompt: "persona".to_owned(),
         };
 
@@ -4237,6 +4263,7 @@ mod tests {
         let out = overlay_assist_params(base.clone(), &set);
         assert_eq!(out.temperature, Some(0.3), "set temperature overrides");
         assert_eq!(out.top_p, None, "unset top_p stays unset");
+        assert_eq!(out.presence_penalty, None, "unset penalty stays unset");
         assert_eq!(out.context_tokens, Some(8000), "untouched fields preserved");
         assert_eq!(out.system_prompt, "persona");
 
@@ -4248,10 +4275,22 @@ mod tests {
         let mut wild = ParamValues::new();
         wild.set("temperature", ParamValue::Float(5.0));
         wild.set("top_p", ParamValue::Float(2.0));
+        wild.set("frequency_penalty", ParamValue::Float(9.0));
+        wild.set("presence_penalty", ParamValue::Float(-9.0));
         wild.set("max_tokens", ParamValue::Int(512));
         let clamped = overlay_assist_params(base.clone(), &wild);
         assert_eq!(clamped.temperature, Some(2.0), "temperature clamped to 2");
         assert_eq!(clamped.top_p, Some(1.0), "top_p clamped to 1");
+        assert_eq!(
+            clamped.frequency_penalty,
+            Some(2.0),
+            "frequency clamped to 2"
+        );
+        assert_eq!(
+            clamped.presence_penalty,
+            Some(-2.0),
+            "presence clamped to -2"
+        );
         assert_eq!(clamped.max_tokens, Some(512));
 
         // A max_tokens of 0 is the neutral default ("no cap") → treated as unset.

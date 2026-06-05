@@ -91,6 +91,26 @@ pub fn assist_param_specs() -> Vec<ParamSpec> {
             0.05,
             1.0,
         ),
+        ParamSpec::float(
+            "frequency_penalty",
+            "Frequency penalty",
+            "Discourages repeating the same words: positive values make the reply less repetitive, \
+             negative values let it repeat more. Leave at 0 for the model's default.",
+            -2.0,
+            2.0,
+            0.1,
+            0.0,
+        ),
+        ParamSpec::float(
+            "presence_penalty",
+            "Presence penalty",
+            "Encourages new topics: positive values push the reply toward fresh subjects, negative \
+             values keep it on the same ones. Leave at 0 for the model's default.",
+            -2.0,
+            2.0,
+            0.1,
+            0.0,
+        ),
         ParamSpec::int(
             "max_tokens",
             "Max reply tokens",
@@ -744,15 +764,16 @@ fn parse_chat_completion(json: &str) -> Result<String> {
 /// Works for any OpenAI-compatible chat endpoint (OpenAI, a custom endpoint, a local Ollama). Not for
 /// the Gemini `generateContent` shape — pick an OpenAI-compatible chat model for LLM tasks.
 /// A chat-completion request to an OpenAI-compatible endpoint: the two messages plus optional tuning
-/// knobs. `temperature` / `max_tokens` / `top_p` are each omitted from the wire request when `None`,
-/// so a provider that doesn't accept them — e.g. a reasoning model that only allows the default
-/// temperature — isn't sent them.
+/// knobs. Every knob is omitted from the wire request when `None`, so a provider that doesn't accept
+/// one — e.g. a reasoning model that only allows the default temperature — isn't sent it.
 pub struct ChatRequest<'a> {
     pub system: &'a str,
     pub user: &'a str,
     pub temperature: Option<f64>,
     pub max_tokens: Option<u32>,
     pub top_p: Option<f64>,
+    pub frequency_penalty: Option<f64>,
+    pub presence_penalty: Option<f64>,
 }
 
 /// The JSON body for a chat-completion POST: the two messages plus any *set* tuning knob. Each of
@@ -778,6 +799,12 @@ fn build_chat_body(model: &str, req: &ChatRequest, stream: bool) -> String {
     }
     if let Some(top_p) = req.top_p {
         body["top_p"] = serde_json::json!(top_p);
+    }
+    if let Some(frequency_penalty) = req.frequency_penalty {
+        body["frequency_penalty"] = serde_json::json!(frequency_penalty);
+    }
+    if let Some(presence_penalty) = req.presence_penalty {
+        body["presence_penalty"] = serde_json::json!(presence_penalty);
     }
     body.to_string()
 }
@@ -1355,7 +1382,16 @@ mod tests {
         // treats as "unset" so an untouched knob is omitted (and the model uses its own optimum).
         let specs = assist_param_specs();
         let keys: Vec<&str> = specs.iter().map(|s| s.key.as_str()).collect();
-        assert_eq!(keys, ["temperature", "top_p", "max_tokens"]);
+        assert_eq!(
+            keys,
+            [
+                "temperature",
+                "top_p",
+                "frequency_penalty",
+                "presence_penalty",
+                "max_tokens"
+            ]
+        );
 
         let temperature = specs.iter().find(|s| s.key == "temperature").unwrap();
         assert!(
@@ -1435,6 +1471,8 @@ mod tests {
             temperature: None,
             max_tokens: None,
             top_p: None,
+            frequency_penalty: None,
+            presence_penalty: None,
         };
         let body: serde_json::Value =
             serde_json::from_str(&build_chat_body("gpt-5", &bare, false)).unwrap();
@@ -1448,6 +1486,14 @@ mod tests {
         assert!(body.get("max_tokens").is_none(), "unset max_tokens omitted");
         assert!(body.get("top_p").is_none(), "unset top_p omitted");
         assert!(
+            body.get("frequency_penalty").is_none(),
+            "unset frequency_penalty omitted"
+        );
+        assert!(
+            body.get("presence_penalty").is_none(),
+            "unset presence_penalty omitted"
+        );
+        assert!(
             body.get("stream").is_none(),
             "non-stream body has no stream flag"
         );
@@ -1458,12 +1504,16 @@ mod tests {
             temperature: Some(0.7),
             max_tokens: Some(256),
             top_p: Some(0.9),
+            frequency_penalty: Some(0.5),
+            presence_penalty: Some(-0.5),
         };
         let body: serde_json::Value =
             serde_json::from_str(&build_chat_body("gpt-4o", &tuned, true)).unwrap();
         assert_eq!(body["temperature"], 0.7);
         assert_eq!(body["max_tokens"], 256);
         assert_eq!(body["top_p"], 0.9);
+        assert_eq!(body["frequency_penalty"], 0.5);
+        assert_eq!(body["presence_penalty"], -0.5);
         assert_eq!(body["stream"], true, "stream variant sets the stream flag");
     }
 
