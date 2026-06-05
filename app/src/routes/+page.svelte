@@ -220,6 +220,23 @@
   );
   const recommendTag = $derived(mode === "file" ? "best accuracy" : "for this machine");
 
+  // The pinned ★ Recommended category keys (a sentinel "family"/"provider" id the picker special-cases).
+  const REC_LOCAL = "local:__rec__";
+  const REC_CLOUD = "cloud:__rec__";
+  // The on-device ★ Recommended set: a few best-fit models for this machine — the mode's machine pick,
+  // the other mode's pick (so both Live + File picks show), and a pinned SenseVoice (the reliable
+  // non-autoregressive CPU default). Deduped, runnable only.
+  const recommendedLocal = $derived.by(() => {
+    const picks: ModelInfo[] = [];
+    const add = (m: ModelInfo | undefined) => {
+      if (m && m.fit !== "blocked" && !picks.some((p) => p.id === m.id)) picks.push(m);
+    };
+    add(models.find((m) => (mode === "file" ? m.recommendedFile : m.recommendedLive)));
+    add(models.find((m) => (mode === "file" ? m.recommendedLive : m.recommendedFile)));
+    add(models.find((m) => m.family === "SenseVoice"));
+    return picks;
+  });
+
   // ── On-device categories: group local models by engine family (the left column's "On-device" rows) ─
   const FAMILY_ORDER = ["Apple", "Whisper", "SenseVoice", "Paraformer", "Parakeet", "Streaming"];
   // Map a raw engine family ("AppleSpeech"/"WhisperCpp"/…) to its user-facing category label.
@@ -231,13 +248,16 @@
     if (family === "StreamingTransducer") return "Streaming";
     return "Whisper";
   }
-  const localCategories = $derived(
-    FAMILY_ORDER.filter((label) => models.some((m) => familyLabel(m.family) === label)).map(
-      (label) => ({ key: `local:${label}`, label }),
+  const localCategories = $derived([
+    ...(recommendedLocal.length ? [{ key: REC_LOCAL, label: "Recommended", star: true }] : []),
+    ...FAMILY_ORDER.filter((label) => models.some((m) => familyLabel(m.family) === label)).map(
+      (label) => ({ key: `local:${label}`, label, star: false }),
     ),
-  );
-  // Models in one on-device category, best first (recommended → installed → rest), blocked last.
+  ]);
+  // Models in one on-device category, best first (recommended → installed → rest), blocked last; the
+  // ★ Recommended sentinel returns the curated cross-family pick instead.
   function localModelsFor(label: string): ModelInfo[] {
+    if (label === "__rec__") return recommendedLocal;
     const rank = (m: ModelInfo) =>
       (m.fit === "blocked" ? 100 : 0) +
       (m.id === recommendedId ? 0 : m.installed ? 1 : isRedundant(m) ? 3 : 2);
@@ -256,9 +276,23 @@
   const runnableCloudModels = (p: (typeof cloudState.providers)[number]) =>
     p.models.filter((m) => (cloudCapability === "streaming" ? m.streaming || m.batch : m.batch));
   const cloudProviders = $derived(cloudState.providers.filter((p) => runnableCloudModels(p).length));
-  const cloudCategories = $derived(
-    cloudProviders.map((p) => ({ key: `cloud:${p.id}`, label: p.name, keySet: p.keySet })),
+  // The cloud ★ Recommended set: each keyed provider's models flagged `recommended` that run in this
+  // mode (streaming for Live, batch for File), across providers — so Live surfaces the realtime
+  // transcribers and File the file ones. Each carries its provider for the cross-provider list.
+  const recommendedCloud = $derived(
+    cloudProviders.flatMap((p) =>
+      p.models
+        .filter(
+          (m) =>
+            m.recommended && (cloudCapability === "streaming" ? m.streaming || m.batch : m.batch),
+        )
+        .map((m) => ({ provider: p, model: m })),
+    ),
   );
+  const cloudCategories = $derived([
+    ...(recommendedCloud.length ? [{ key: REC_CLOUD, label: "Recommended", keySet: true, star: true }] : []),
+    ...cloudProviders.map((p) => ({ key: `cloud:${p.id}`, label: p.name, keySet: p.keySet, star: false })),
+  ]);
 
   // The category that owns the current selection — the picker opens focused on it.
   const currentCat = $derived(
@@ -1358,6 +1392,7 @@
                       class:active={pickerCat === c.key}
                       onclick={() => (pickerCat = c.key)}
                     >
+                      {#if c.star}<span class="picker-cat-star">✦</span>{/if}
                       <span class="picker-cat-name">{c.label}</span>
                     </button>
                   {/each}
@@ -1368,6 +1403,7 @@
                       class:active={pickerCat === c.key}
                       onclick={() => (pickerCat = c.key)}
                     >
+                      {#if c.star}<span class="picker-cat-star">✦</span>{/if}
                       <span class="picker-cat-name">{c.label}</span>
                       {#if !c.keySet}<span class="picker-cat-dot" title="API key needed"></span>{/if}
                     </button>
@@ -1396,6 +1432,17 @@
                         {#if m.fit === "heavy"}<span class="picker-opt-note">{m.fitReason}</span>{/if}
                       </button>
                     {/if}
+                  {/each}
+                {:else if pickerCat === REC_CLOUD}
+                  {#each recommendedCloud as { provider: p, model: m } (p.id + ":" + m.id)}
+                    <button
+                      class="picker-opt"
+                      class:sel={cloudSelected(p.id, m.id)}
+                      onclick={() => chooseCloud(p.id, m.id)}
+                    >
+                      <span class="picker-opt-name">{p.name} · {m.name}</span>
+                      {#if !p.keySet}<span class="picker-opt-note">needs key</span>{/if}
+                    </button>
                   {/each}
                 {:else if pickerCatProvider}
                   {#if !pickerCatProvider.keySet}
@@ -2943,6 +2990,14 @@
     height: 5px;
     border-radius: 50%;
     background: var(--muted);
+  }
+
+  /* ✦ marker on the pinned "Recommended" category. */
+  .picker-cat-star {
+    flex: none;
+    font-size: 11px;
+    line-height: 1;
+    color: var(--accent);
   }
 
   /* Right column: the selected category's models. */
