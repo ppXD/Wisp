@@ -30,6 +30,7 @@ use sherpa_rs::paraformer::{ParaformerConfig, ParaformerRecognizer};
 use sherpa_rs::sense_voice::{SenseVoiceConfig, SenseVoiceRecognizer};
 use sherpa_rs::transducer::{TransducerConfig, TransducerRecognizer};
 use sherpa_rs::whisper::{WhisperConfig, WhisperRecognizer};
+use wisp_core::align::words_from_token_timestamps;
 use wisp_core::engine::{AsrEngine, EngineInfo, TranscriptionResult};
 use wisp_core::error::{Result, WispError};
 use wisp_core::transcript::{AudioSourceKind, TranscriptSegment};
@@ -56,20 +57,29 @@ fn strip_whisper_annotation(raw: &str) -> &str {
     }
 }
 
-/// Wraps recognized `text` (spanning `audio` at `rate`) as a single-segment result; empty → empty.
-fn to_result(text: &str, audio: &[f32], rate: u32) -> TranscriptionResult {
+/// Wraps recognized `text` as a single whole-clip segment spanning `clip_secs`. When the recognizer
+/// also exposes per-token `tokens` + `timestamps`, they're grouped into the segment's
+/// [`words`](TranscriptSegment::words) for word-level speaker attribution and subtitle timing; a
+/// recognizer that returns text only (empty `tokens`) yields a word-less segment. Empty text → empty.
+fn to_result(
+    text: &str,
+    tokens: &[String],
+    timestamps: &[f32],
+    clip_secs: f32,
+) -> TranscriptionResult {
     let text = text.trim();
     if text.is_empty() {
         return TranscriptionResult::empty();
     }
 
-    let secs = audio.len() as f32 / rate as f32;
-    let segment = TranscriptSegment::new(
+    let mut segment = TranscriptSegment::new(
         0,
         text,
-        Duration::ZERO..Duration::from_secs_f32(secs),
+        Duration::ZERO..Duration::from_secs_f32(clip_secs.max(0.0)),
         AudioSourceKind::Microphone,
     );
+    segment.words = words_from_token_timestamps(tokens, timestamps, clip_secs);
+
     TranscriptionResult {
         segments: vec![segment],
     }
@@ -123,7 +133,13 @@ impl AsrEngine for SenseVoiceEngine {
             sample_rate
         };
         let result = self.recognizer.transcribe(rate, audio);
-        Ok(to_result(&result.text, audio, rate))
+        let secs = audio.len() as f32 / rate as f32;
+        Ok(to_result(
+            &result.text,
+            &result.tokens,
+            &result.timestamps,
+            secs,
+        ))
     }
 }
 
@@ -169,10 +185,12 @@ impl AsrEngine for WhisperEngine {
             sample_rate
         };
         let result = self.recognizer.transcribe(rate, audio);
+        let secs = audio.len() as f32 / rate as f32;
         Ok(to_result(
             strip_whisper_annotation(&result.text),
-            audio,
-            rate,
+            &result.tokens,
+            &result.timestamps,
+            secs,
         ))
     }
 }
@@ -215,7 +233,13 @@ impl AsrEngine for ParaformerEngine {
             sample_rate
         };
         let result = self.recognizer.transcribe(rate, audio);
-        Ok(to_result(&result.text, audio, rate))
+        let secs = audio.len() as f32 / rate as f32;
+        Ok(to_result(
+            &result.text,
+            &result.tokens,
+            &result.timestamps,
+            secs,
+        ))
     }
 }
 
@@ -262,13 +286,15 @@ impl AsrEngine for ParakeetEngine {
             sample_rate
         };
         let text = self.recognizer.transcribe(rate, audio);
-        Ok(to_result(&text, audio, rate))
+        let secs = audio.len() as f32 / rate as f32;
+        // The transducer wrapper returns text only (no per-token timings), so the segment is word-less.
+        Ok(to_result(&text, &[], &[], secs))
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::strip_whisper_annotation;
+    use super::{strip_whisper_annotation, to_result};
 
     #[test]
     fn drops_whisper_non_speech_annotations() {
@@ -280,5 +306,37 @@ mod tests {
         assert_eq!(strip_whisper_annotation("[BLANK"), "");
         assert_eq!(strip_whisper_annotation("聽不聽到"), "聽不聽到");
         assert_eq!(strip_whisper_annotation("  Hello, "), "Hello,");
+    }
+
+    #[test]
+    fn to_result_attaches_word_timings_from_tokens() {
+        // A recognizer that exposes per-token timings (SenseVoice/Whisper/Paraformer) yields a
+        // segment whose words carry real spans for diarization and subtitle timing.
+        let tokens = vec!["\u{2581}hello".to_owned(), "\u{2581}world".to_owned()];
+        let timestamps = vec![0.0_f32, 0.5];
+
+        let result = to_result("hello world", &tokens, &timestamps, 1.0);
+
+        assert_eq!(result.segments.len(), 1);
+        let segment = &result.segments[0];
+        assert_eq!(segment.text, "hello world");
+        assert_eq!(segment.words.len(), 2);
+        assert_eq!(segment.words[0].text.trim(), "hello");
+        assert_eq!(segment.words[1].text.trim(), "world");
+    }
+
+    #[test]
+    fn to_result_without_token_timings_is_word_less() {
+        // The transducer wrapper returns text only; the segment carries text but no words, exactly
+        // as before this change.
+        let result = to_result("hello", &[], &[], 1.0);
+
+        assert_eq!(result.segments.len(), 1);
+        assert!(result.segments[0].words.is_empty());
+    }
+
+    #[test]
+    fn to_result_empty_text_is_empty() {
+        assert!(to_result("   ", &[], &[], 1.0).segments.is_empty());
     }
 }

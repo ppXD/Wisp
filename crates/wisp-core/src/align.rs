@@ -66,6 +66,59 @@ pub fn merge_tokens_into_words(tokens: &[TokenTiming]) -> Vec<Word> {
     words
 }
 
+/// Build [`Word`]s from an engine's per-token output: `tokens[i]` is the i-th decoder token's text
+/// and `timestamps[i]` its start offset (seconds) from the clip start. Each token's end is the next
+/// token's start (the last runs to `clip_secs`). SentencePiece (`▁`, U+2581) and GPT-2 (`Ġ`, U+0120)
+/// word-boundary markers at a token's start are normalized to a leading space so word splitting
+/// fires, then [`merge_tokens_into_words`] groups sub-word tokens and isolates CJK characters.
+///
+/// Returns no words when `tokens`/`timestamps` are empty or their lengths disagree — i.e. the engine
+/// didn't emit per-token timings — so the caller can fall back to a word-less segment.
+pub fn words_from_token_timestamps(
+    tokens: &[String],
+    timestamps: &[f32],
+    clip_secs: f32,
+) -> Vec<Word> {
+    if tokens.is_empty() || tokens.len() != timestamps.len() {
+        return Vec::new();
+    }
+
+    let timings: Vec<TokenTiming> = tokens
+        .iter()
+        .enumerate()
+        .map(|(i, text)| {
+            let start = timestamps[i].max(0.0);
+            let end = timestamps
+                .get(i + 1)
+                .copied()
+                .unwrap_or(clip_secs)
+                .max(start);
+            TokenTiming::new(normalize_word_marker(text), secs(start), secs(end))
+        })
+        .collect();
+
+    merge_tokens_into_words(&timings)
+}
+
+/// Replace a leading SentencePiece (`▁`) or GPT-2 (`Ġ`) space marker with an ASCII space so the
+/// word-boundary detection in [`merge_tokens_into_words`] treats the token as a new word. Other
+/// tokens (sub-word continuations, CJK characters) are returned unchanged.
+fn normalize_word_marker(token: &str) -> String {
+    match token
+        .strip_prefix('\u{2581}')
+        .or_else(|| token.strip_prefix('\u{0120}'))
+    {
+        Some(rest) => format!(" {rest}"),
+        None => token.to_owned(),
+    }
+}
+
+/// Seconds (clamped non-negative; `NaN` → 0) as a [`Duration`], so a stray timestamp can't panic
+/// [`Duration::from_secs_f32`].
+fn secs(s: f32) -> Duration {
+    Duration::from_secs_f32(s.max(0.0))
+}
+
 /// Whether the first non-space character of `s` is CJK.
 fn starts_with_cjk(s: &str) -> bool {
     s.trim_start().chars().next().is_some_and(is_cjk)
@@ -147,5 +200,65 @@ mod tests {
     #[test]
     fn empty_input_yields_no_words() {
         assert!(merge_tokens_into_words(&[]).is_empty());
+    }
+
+    #[test]
+    fn words_from_tokens_derive_ends_from_next_start_and_clip_end() {
+        // SentencePiece "▁" marks word starts; each token's end is the next token's start, and the
+        // final token runs to the clip end.
+        let tokens = vec!["\u{2581}hello".to_owned(), "\u{2581}world".to_owned()];
+        let timestamps = vec![0.0_f32, 0.5];
+        let words = words_from_token_timestamps(&tokens, &timestamps, 1.0);
+
+        assert_eq!(words.len(), 2);
+        assert_eq!(words[0].text.trim(), "hello");
+        assert_eq!(words[0].start, Duration::from_secs_f32(0.0));
+        assert_eq!(
+            words[0].end,
+            Duration::from_secs_f32(0.5),
+            "end = next token's start"
+        );
+        assert_eq!(words[1].text.trim(), "world");
+        assert_eq!(
+            words[1].end,
+            Duration::from_secs_f32(1.0),
+            "last word runs to the clip end"
+        );
+    }
+
+    #[test]
+    fn words_from_tokens_merge_subword_pieces() {
+        // A continuation token with no leading marker joins the current word.
+        let tokens = vec!["\u{2581}trans".to_owned(), "cription".to_owned()];
+        let timestamps = vec![0.0_f32, 0.3];
+        let words = words_from_token_timestamps(&tokens, &timestamps, 0.6);
+
+        assert_eq!(words.len(), 1);
+        assert_eq!(words[0].text.trim(), "transcription");
+        assert_eq!(words[0].start, Duration::from_secs_f32(0.0));
+        assert_eq!(words[0].end, Duration::from_secs_f32(0.6));
+    }
+
+    #[test]
+    fn words_from_tokens_handle_gpt2_marker_and_cjk() {
+        // GPT-2 "Ġ" marker for a Latin word; CJK characters are each their own word regardless.
+        let latin = words_from_token_timestamps(&["\u{0120}hi".to_owned()], &[0.0], 0.4);
+        assert_eq!(latin.len(), 1);
+        assert_eq!(latin[0].text.trim(), "hi");
+
+        let cjk =
+            words_from_token_timestamps(&["你".to_owned(), "好".to_owned()], &[0.0, 0.2], 0.4);
+        assert_eq!(cjk.len(), 2);
+        assert_eq!(cjk[0].text, "你");
+        assert_eq!(cjk[1].text, "好");
+        assert_eq!(cjk[1].start, Duration::from_secs_f32(0.2));
+    }
+
+    #[test]
+    fn words_from_tokens_are_empty_when_timings_missing_or_mismatched() {
+        assert!(words_from_token_timestamps(&[], &[], 1.0).is_empty());
+        // An engine that returned text but no timestamps (length mismatch) yields no words, so the
+        // caller keeps a word-less segment instead of fabricating spans.
+        assert!(words_from_token_timestamps(&["hi".to_owned()], &[], 1.0).is_empty());
     }
 }
