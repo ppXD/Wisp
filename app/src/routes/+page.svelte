@@ -2804,7 +2804,7 @@
   /* Tabbed two-pane variant: tabs on top, then categories | models. The panes own padding + scroll. */
   .picker-menu.wide {
     right: auto;
-    width: 460px;
+    width: 520px;
     max-width: 92vw;
     padding: 0;
     max-height: none;
@@ -3045,12 +3045,13 @@
     font-weight: 500;
   }
 
+  /* Show the full model name: wrap rather than truncate, so even a long name (or a custom id) reads in
+     full. The wider menu keeps common names on one line; this is the safety net for the rest. */
   .picker-opt-name {
     flex: 1;
     min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
   }
 
   .picker-opt-size {
