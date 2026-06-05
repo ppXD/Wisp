@@ -66,6 +66,34 @@ fn parse_provider(raw: Option<String>) -> Option<String> {
     (!trimmed.is_empty()).then_some(trimmed)
 }
 
+/// Builds a recognizer with the `requested` execution provider, **falling back to CPU** if it can't
+/// initialize on that provider — so a GPU provider (DirectML/CUDA) that's configured but unavailable
+/// at runtime (no GPU, driver gap, an onnxruntime that lacks the EP) degrades to CPU instead of
+/// failing the whole engine. `create` builds the recognizer for a given provider string.
+///
+/// No retry when the request is already CPU (or unset, which sherpa-rs treats as CPU) — there's
+/// nothing safer to fall back to, so the original error stands.
+fn with_cpu_fallback<R>(
+    requested: Option<String>,
+    mut create: impl FnMut(Option<String>) -> Result<R>,
+) -> Result<R> {
+    match create(requested.clone()) {
+        Ok(recognizer) => Ok(recognizer),
+        Err(primary) => {
+            if requested
+                .as_deref()
+                .is_none_or(|p| p.eq_ignore_ascii_case("cpu"))
+            {
+                return Err(primary);
+            }
+            eprintln!(
+                "wisp: ASR execution provider {requested:?} unavailable ({primary}); falling back to CPU"
+            );
+            create(Some("cpu".to_owned()))
+        }
+    }
+}
+
 /// Whisper emits non-speech annotations like `[BLANK_AUDIO]` or `(speaking in foreign language)` on
 /// silence/noise. Treat any segment that is purely such an annotation as empty so it isn't shown.
 fn strip_whisper_annotation(raw: &str) -> &str {
@@ -120,20 +148,21 @@ impl SenseVoiceEngine {
         } else {
             language
         };
-        let config = SenseVoiceConfig {
-            model: model.to_string_lossy().into_owned(),
-            tokens: tokens.to_string_lossy().into_owned(),
-            language: language.to_owned(),
-            use_itn: true,
-            // Without this sherpa-rs runs SenseVoice single-threaded — the biggest cross-platform
-            // speed loss, since SenseVoice is the default engine off macOS.
-            num_threads: Some(asr_threads()),
-            provider: execution_provider(),
-            ..Default::default()
-        };
-
-        let recognizer = SenseVoiceRecognizer::new(config)
-            .map_err(|e| WispError::Engine(format!("sense-voice init: {e}")))?;
+        let recognizer = with_cpu_fallback(execution_provider(), |provider| {
+            let config = SenseVoiceConfig {
+                model: model.to_string_lossy().into_owned(),
+                tokens: tokens.to_string_lossy().into_owned(),
+                language: language.to_owned(),
+                use_itn: true,
+                // Without this sherpa-rs runs SenseVoice single-threaded — the biggest cross-platform
+                // speed loss, since SenseVoice is the default engine off macOS.
+                num_threads: Some(asr_threads()),
+                provider,
+                ..Default::default()
+            };
+            SenseVoiceRecognizer::new(config)
+                .map_err(|e| WispError::Engine(format!("sense-voice init: {e}")))
+        })?;
 
         Ok(Self { recognizer })
     }
@@ -175,18 +204,19 @@ impl WhisperEngine {
     /// `language` is a Whisper language code (e.g. `"yue"` for Cantonese); an empty string lets
     /// Whisper auto-detect.
     pub fn new(encoder: &Path, decoder: &Path, tokens: &Path, language: &str) -> Result<Self> {
-        let config = WhisperConfig {
-            encoder: encoder.to_string_lossy().into_owned(),
-            decoder: decoder.to_string_lossy().into_owned(),
-            tokens: tokens.to_string_lossy().into_owned(),
-            language: language.to_owned(),
-            num_threads: Some(asr_threads()),
-            provider: execution_provider(),
-            ..Default::default()
-        };
-
-        let recognizer = WhisperRecognizer::new(config)
-            .map_err(|e| WispError::Engine(format!("whisper init: {e}")))?;
+        let recognizer = with_cpu_fallback(execution_provider(), |provider| {
+            let config = WhisperConfig {
+                encoder: encoder.to_string_lossy().into_owned(),
+                decoder: decoder.to_string_lossy().into_owned(),
+                tokens: tokens.to_string_lossy().into_owned(),
+                language: language.to_owned(),
+                num_threads: Some(asr_threads()),
+                provider,
+                ..Default::default()
+            };
+            WhisperRecognizer::new(config)
+                .map_err(|e| WispError::Engine(format!("whisper init: {e}")))
+        })?;
 
         Ok(Self { recognizer })
     }
@@ -226,16 +256,17 @@ pub struct ParaformerEngine {
 impl ParaformerEngine {
     /// Loads a Paraformer model (`model.onnx` or `model.int8.onnx`) and its `tokens.txt`.
     pub fn new(model: &Path, tokens: &Path) -> Result<Self> {
-        let config = ParaformerConfig {
-            model: model.to_string_lossy().into_owned(),
-            tokens: tokens.to_string_lossy().into_owned(),
-            num_threads: Some(asr_threads()),
-            provider: execution_provider(),
-            ..Default::default()
-        };
-
-        let recognizer = ParaformerRecognizer::new(config)
-            .map_err(|e| WispError::Engine(format!("paraformer init: {e}")))?;
+        let recognizer = with_cpu_fallback(execution_provider(), |provider| {
+            let config = ParaformerConfig {
+                model: model.to_string_lossy().into_owned(),
+                tokens: tokens.to_string_lossy().into_owned(),
+                num_threads: Some(asr_threads()),
+                provider,
+                ..Default::default()
+            };
+            ParaformerRecognizer::new(config)
+                .map_err(|e| WispError::Engine(format!("paraformer init: {e}")))
+        })?;
 
         Ok(Self { recognizer })
     }
@@ -275,21 +306,22 @@ pub struct ParakeetEngine {
 impl ParakeetEngine {
     /// Loads a NeMo Parakeet transducer from its `encoder`/`decoder`/`joiner` ONNX files + `tokens.txt`.
     pub fn new(encoder: &Path, decoder: &Path, joiner: &Path, tokens: &Path) -> Result<Self> {
-        let config = TransducerConfig {
-            encoder: encoder.to_string_lossy().into_owned(),
-            decoder: decoder.to_string_lossy().into_owned(),
-            joiner: joiner.to_string_lossy().into_owned(),
-            tokens: tokens.to_string_lossy().into_owned(),
-            // A NeMo-exported transducer decoded greedily — the standard sherpa-onnx setup for Parakeet.
-            model_type: "nemo_transducer".to_owned(),
-            decoding_method: "greedy_search".to_owned(),
-            num_threads: asr_threads(),
-            provider: execution_provider(),
-            ..Default::default()
-        };
-
-        let recognizer = TransducerRecognizer::new(config)
-            .map_err(|e| WispError::Engine(format!("parakeet init: {e}")))?;
+        let recognizer = with_cpu_fallback(execution_provider(), |provider| {
+            let config = TransducerConfig {
+                encoder: encoder.to_string_lossy().into_owned(),
+                decoder: decoder.to_string_lossy().into_owned(),
+                joiner: joiner.to_string_lossy().into_owned(),
+                tokens: tokens.to_string_lossy().into_owned(),
+                // A NeMo-exported transducer decoded greedily — the standard sherpa-onnx setup.
+                model_type: "nemo_transducer".to_owned(),
+                decoding_method: "greedy_search".to_owned(),
+                num_threads: asr_threads(),
+                provider,
+                ..Default::default()
+            };
+            TransducerRecognizer::new(config)
+                .map_err(|e| WispError::Engine(format!("parakeet init: {e}")))
+        })?;
 
         Ok(Self { recognizer })
     }
@@ -318,7 +350,11 @@ impl AsrEngine for ParakeetEngine {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_provider, strip_whisper_annotation, to_result, EXECUTION_PROVIDER_ENV};
+    use super::{
+        parse_provider, strip_whisper_annotation, to_result, with_cpu_fallback,
+        EXECUTION_PROVIDER_ENV,
+    };
+    use wisp_core::error::{Result, WispError};
 
     #[test]
     fn drops_whisper_non_speech_annotations() {
@@ -383,5 +419,57 @@ mod tests {
         assert_eq!(parse_provider(Some("   ".to_owned())), None);
         assert_eq!(parse_provider(Some(String::new())), None);
         assert_eq!(parse_provider(None), None);
+    }
+
+    #[test]
+    fn falls_back_to_cpu_when_the_requested_provider_fails() {
+        use std::cell::RefCell;
+        let attempts: RefCell<Vec<Option<String>>> = RefCell::new(Vec::new());
+
+        let built = with_cpu_fallback(Some("directml".to_owned()), |provider| {
+            attempts.borrow_mut().push(provider.clone());
+            match provider.as_deref() {
+                Some("cpu") => Ok("engine"),
+                _ => Err(WispError::Engine("provider unavailable".to_owned())),
+            }
+        });
+
+        assert_eq!(built.unwrap(), "engine");
+        assert_eq!(
+            *attempts.borrow(),
+            vec![Some("directml".to_owned()), Some("cpu".to_owned())],
+            "tries the requested provider, then falls back to CPU"
+        );
+    }
+
+    #[test]
+    fn does_not_retry_when_the_request_is_already_cpu_or_unset() {
+        use std::cell::Cell;
+
+        // Unset (sherpa treats this as CPU) → a single attempt, no fallback.
+        let unset_calls = Cell::new(0);
+        let unset: Result<()> = with_cpu_fallback(None, |_| {
+            unset_calls.set(unset_calls.get() + 1);
+            Err(WispError::Engine("boom".to_owned()))
+        });
+        assert!(unset.is_err());
+        assert_eq!(
+            unset_calls.get(),
+            1,
+            "no fallback when the request is unset"
+        );
+
+        // Explicit cpu → also no retry (nothing safer to fall back to).
+        let cpu_calls = Cell::new(0);
+        let cpu: Result<()> = with_cpu_fallback(Some("CPU".to_owned()), |_| {
+            cpu_calls.set(cpu_calls.get() + 1);
+            Err(WispError::Engine("boom".to_owned()))
+        });
+        assert!(cpu.is_err());
+        assert_eq!(
+            cpu_calls.get(),
+            1,
+            "no fallback when the request is already CPU"
+        );
     }
 }

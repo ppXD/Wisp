@@ -50,38 +50,46 @@ impl StreamingTransducerEngine {
         let decoder_c = path_cstring(decoder)?;
         let joiner_c = path_cstring(joiner)?;
         let tokens_c = path_cstring(tokens)?;
-        // The execution provider (CPU by default) follows `WISP_ONNX_PROVIDER`, so a GPU host runs the
-        // streaming transducer on its accelerator too.
-        let provider = crate::execution_provider().unwrap_or_else(|| "cpu".to_owned());
-        let provider_c =
-            CString::new(provider).unwrap_or_else(|_| CString::new("cpu").expect("no NUL"));
         let decoding_c = CString::new("greedy_search").expect("static str has no NUL");
 
-        // SAFETY: zero-init nulls every unused model sub-config (sherpa treats a null path as "not
-        // this model type"); we then fill only the transducer fields. All pointers reference the
-        // CStrings above, which outlive this call.
-        let recognizer = unsafe {
-            let mut config: sherpa_rs_sys::SherpaOnnxOnlineRecognizerConfig = std::mem::zeroed();
-            config.feat_config.sample_rate = 16_000;
-            config.feat_config.feature_dim = 80;
-            config.model_config.transducer.encoder = encoder_c.as_ptr();
-            config.model_config.transducer.decoder = decoder_c.as_ptr();
-            config.model_config.transducer.joiner = joiner_c.as_ptr();
-            config.model_config.tokens = tokens_c.as_ptr();
-            config.model_config.num_threads = crate::asr_threads();
-            config.model_config.provider = provider_c.as_ptr();
-            config.decoding_method = decoding_c.as_ptr();
-            config.enable_endpoint = 1;
-            config.rule1_min_trailing_silence = RULE1_MIN_TRAILING_SILENCE;
-            config.rule2_min_trailing_silence = RULE2_MIN_TRAILING_SILENCE;
-            config.rule3_min_utterance_length = RULE3_MIN_UTTERANCE_LENGTH;
-            sherpa_rs_sys::SherpaOnnxCreateOnlineRecognizer(&config)
-        };
-        if recognizer.is_null() {
-            return Err(WispError::Engine(
-                "streaming transducer: failed to create recognizer (check model files)".to_owned(),
-            ));
-        }
+        // The execution provider (CPU by default) follows `WISP_ONNX_PROVIDER`, so a GPU host runs the
+        // streaming transducer on its accelerator too — falling back to CPU if it can't initialize on
+        // the requested provider, so a misconfigured GPU never breaks the engine.
+        let recognizer = crate::with_cpu_fallback(crate::execution_provider(), |provider| {
+            let provider = provider.unwrap_or_else(|| "cpu".to_owned());
+            let provider_c =
+                CString::new(provider).unwrap_or_else(|_| CString::new("cpu").expect("no NUL"));
+
+            // SAFETY: zero-init nulls every unused model sub-config (sherpa treats a null path as "not
+            // this model type"); we then fill only the transducer fields. All pointers reference
+            // CStrings that outlive this call.
+            let recognizer = unsafe {
+                let mut config: sherpa_rs_sys::SherpaOnnxOnlineRecognizerConfig =
+                    std::mem::zeroed();
+                config.feat_config.sample_rate = 16_000;
+                config.feat_config.feature_dim = 80;
+                config.model_config.transducer.encoder = encoder_c.as_ptr();
+                config.model_config.transducer.decoder = decoder_c.as_ptr();
+                config.model_config.transducer.joiner = joiner_c.as_ptr();
+                config.model_config.tokens = tokens_c.as_ptr();
+                config.model_config.num_threads = crate::asr_threads();
+                config.model_config.provider = provider_c.as_ptr();
+                config.decoding_method = decoding_c.as_ptr();
+                config.enable_endpoint = 1;
+                config.rule1_min_trailing_silence = RULE1_MIN_TRAILING_SILENCE;
+                config.rule2_min_trailing_silence = RULE2_MIN_TRAILING_SILENCE;
+                config.rule3_min_utterance_length = RULE3_MIN_UTTERANCE_LENGTH;
+                sherpa_rs_sys::SherpaOnnxCreateOnlineRecognizer(&config)
+            };
+            if recognizer.is_null() {
+                Err(WispError::Engine(
+                    "streaming transducer: failed to create recognizer (check model files)"
+                        .to_owned(),
+                ))
+            } else {
+                Ok(recognizer)
+            }
+        })?;
 
         // SAFETY: `recognizer` is non-null (checked); on failure we free it before returning.
         let stream = unsafe { sherpa_rs_sys::SherpaOnnxCreateOnlineStream(recognizer) };
