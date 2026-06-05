@@ -647,12 +647,30 @@ fn noise_reduction_spec() -> ParamSpec {
 }
 
 /// The advanced params the **realtime assist** exposes: turn-detection endpointing (when the assist
-/// responds) + noise reduction — exactly the knobs [`build_assist_update`] already consumes. The
-/// model's behaviour rides in the prompt (the session `instructions`), so it isn't repeated here;
-/// language and biasing are transcription concerns that don't apply to the assist.
+/// responds), noise reduction, and the session-level sampling knobs (temperature, max response
+/// tokens). The model's behaviour rides in the prompt (the session `instructions`), so it isn't
+/// repeated here; language and biasing are transcription concerns that don't apply to the assist.
 pub fn assist_realtime_param_specs() -> Vec<ParamSpec> {
     let mut specs = realtime_endpointing_specs();
     specs.push(noise_reduction_spec());
+    specs.push(ParamSpec::float(
+        "temperature",
+        "Temperature",
+        "Sampling temperature for the model's replies. Leave at 0.8 (the realtime default) to send \
+         none; the realtime API accepts roughly 0.6–1.2.",
+        0.6,
+        1.2,
+        0.05,
+        0.8,
+    ));
+    specs.push(ParamSpec::int(
+        "max_output_tokens",
+        "Max response tokens",
+        "Cap on each reply's length, in tokens. 0 leaves it to the model (no explicit cap).",
+        0,
+        4096,
+        0,
+    ));
     specs
 }
 
@@ -1372,16 +1390,27 @@ fn build_model_update(params: &ParamValues) -> String {
 fn build_assist_update(params: &ParamValues) -> String {
     let instructions = params.text("instructions", DEFAULT_TRANSCRIBE_INSTRUCTIONS);
 
-    serde_json::json!({
-        "type": "session.update",
-        "session": {
-            "type": "realtime",
-            "output_modalities": ["text"],
-            "instructions": instructions,
-            "audio": { "input": audio_input(params, false) }
+    let mut session = serde_json::json!({
+        "type": "realtime",
+        "output_modalities": ["text"],
+        "instructions": instructions,
+        "audio": { "input": audio_input(params, false) }
+    });
+
+    // Session-level sampling knobs, sent only when the user moved them off their default — so the
+    // default session config stays byte-identical to before (a working assist depends on it), and an
+    // unset knob falls through to the realtime model's own value.
+    if params.contains("temperature") {
+        session["temperature"] = serde_json::json!(params.float("temperature", 0.8));
+    }
+    if params.contains("max_output_tokens") {
+        let max = params.int("max_output_tokens", 0);
+        if max > 0 {
+            session["max_output_tokens"] = serde_json::json!(max);
         }
-    })
-    .to_string()
+    }
+
+    serde_json::json!({ "type": "session.update", "session": session }).to_string()
 }
 
 /// The `session.update` for a translation session: the input is transcribed by gpt-realtime-whisper
@@ -1655,9 +1684,9 @@ mod tests {
     }
 
     #[test]
-    fn assist_realtime_specs_are_endpointing_and_noise_only() {
-        // The realtime assist exposes turn-detection + noise reduction — exactly the knobs
-        // build_assist_update consumes — and NOT transcription-only concepts (language/prompt/
+    fn assist_realtime_specs_cover_endpointing_noise_and_sampling() {
+        // The realtime assist exposes turn-detection + noise reduction + session-level sampling — the
+        // knobs build_assist_update consumes — and NOT transcription-only concepts (language/prompt/
         // instructions), since the assist's behaviour rides in the prompt instructions instead.
         let keys = assist_realtime_param_specs()
             .into_iter()
@@ -1671,6 +1700,8 @@ mod tests {
             "vad_prefix_padding_ms",
             "vad_eagerness",
             "noise_reduction",
+            "temperature",
+            "max_output_tokens",
         ] {
             assert!(keys.iter().any(|k| k == expected), "missing {expected}");
         }
@@ -1680,6 +1711,24 @@ mod tests {
                 "should not expose {absent}"
             );
         }
+    }
+
+    #[test]
+    fn assist_session_sends_sampling_only_when_set() {
+        // By default the session carries no temperature / max_output_tokens, so the config is
+        // unchanged from before these knobs existed (a working realtime assist depends on that).
+        let bare: serde_json::Value =
+            serde_json::from_str(&build_assist_update(&ParamValues::new())).unwrap();
+        assert!(bare["session"]["temperature"].is_null());
+        assert!(bare["session"]["max_output_tokens"].is_null());
+
+        // Set, they ride at the session level (the GA realtime shape).
+        let mut params = ParamValues::new();
+        params.set("temperature", ParamValue::Float(0.7));
+        params.set("max_output_tokens", ParamValue::Int(256));
+        let tuned: serde_json::Value = serde_json::from_str(&build_assist_update(&params)).unwrap();
+        assert_eq!(tuned["session"]["temperature"], 0.7);
+        assert_eq!(tuned["session"]["max_output_tokens"], 256);
     }
 
     #[test]
