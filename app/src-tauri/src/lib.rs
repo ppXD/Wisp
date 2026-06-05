@@ -144,6 +144,12 @@ struct AppState {
     assist_finals_tx: Mutex<Option<std::sync::mpsc::Sender<String>>>,
     /// Segments from the most recent file transcription, kept for export.
     file_segments: Mutex<Vec<TranscriptSegment>>,
+    /// Set by `cancel_file_transcription` to stop the running file transcription at the next window
+    /// boundary; reset at the start of each `transcribe_file`.
+    file_cancel: Arc<AtomicBool>,
+    /// True while a file transcription runs, so a second `transcribe_file` is rejected rather than
+    /// racing it (both would clobber `file_segments`). Cleared by an RAII guard on every return.
+    file_busy: Arc<AtomicBool>,
     /// Committed finals from the current/most-recent live session (both mic and system streams),
     /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
     live_segments: Mutex<Vec<TranscriptSegment>>,
@@ -3391,6 +3397,21 @@ async fn transcribe_file(
     path: String,
     options: FileTranscribeOptions,
 ) -> Result<(), String> {
+    // Reject a second file transcription while one runs (they'd clobber `file_segments`); the guard
+    // clears the flag on every return path. Arm a fresh cancel flag for this run.
+    struct FileBusyGuard(Arc<AtomicBool>);
+    impl Drop for FileBusyGuard {
+        fn drop(&mut self) {
+            self.0.store(false, Ordering::SeqCst);
+        }
+    }
+    if state.file_busy.swap(true, Ordering::SeqCst) {
+        return Err("a file transcription is already in progress".to_owned());
+    }
+    let _busy = FileBusyGuard(Arc::clone(&state.file_busy));
+    state.file_cancel.store(false, Ordering::Relaxed);
+    let cancel = Arc::clone(&state.file_cancel);
+
     let language = state
         .language
         .lock()
@@ -3579,12 +3600,17 @@ async fn transcribe_file(
                     engine.as_mut(),
                     asr_audio,
                     TARGET_SAMPLE_RATE,
-                    need_timestamps,
-                    options.accurate,
-                    &options.prompt,
+                    ClipOptions::new(need_timestamps, options.accurate, &options.prompt),
+                    &cancel,
                     &progress,
                 )?
             };
+
+            // A cancel mid-transcribe stopped the window loop early; skip the (expensive) diarization,
+            // per-segment emit, and store below — a cancelled run produces no result.
+            if cancel.load(Ordering::Relaxed) {
+                return Ok(Vec::new());
+            }
 
             let mut collected: Vec<TranscriptSegment> = raw_segments
                 .into_iter()
@@ -3628,12 +3654,26 @@ async fn transcribe_file(
         .map_err(|e| e.to_string())?
         .map_err(|e| e.to_string())?;
 
+    // A cancelled run stores no partial, but still signals "done" so the UI clears its transcribing
+    // state and the next run can start (the busy guard releases as this returns).
+    if state.file_cancel.load(Ordering::Relaxed) {
+        let _ = app.emit(FILE_DONE_EVENT, ());
+        return Ok(());
+    }
+
     *state
         .file_segments
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = segments;
     let _ = app.emit(FILE_DONE_EVENT, ());
     Ok(())
+}
+
+/// Signals the running file transcription to stop at the next window boundary and drop its partial
+/// result. A no-op when nothing is running.
+#[tauri::command]
+fn cancel_file_transcription(state: State<'_, AppState>) {
+    state.file_cancel.store(true, Ordering::Relaxed);
 }
 
 /// Runs offline diarization over `audio`, returning the speaker spans it found.
@@ -3806,6 +3846,8 @@ pub fn run() {
                 assist_worker: Mutex::new(None),
                 assist_finals_tx: Mutex::new(None),
                 file_segments: Mutex::new(Vec::new()),
+                file_cancel: Arc::new(AtomicBool::new(false)),
+                file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
                 mic_muted: Arc::new(AtomicBool::new(false)),
                 system_muted: Arc::new(AtomicBool::new(false)),
@@ -3861,6 +3903,7 @@ pub fn run() {
             stop_assist_realtime,
             assist_hint_now,
             transcribe_file,
+            cancel_file_transcription,
             export_transcript,
             dictation::dictation_status,
             dictation::set_dictation_enabled,

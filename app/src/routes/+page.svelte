@@ -767,6 +767,8 @@
   // The model this run is transcribing with, captured at submit so the running view shows it.
   let fileModelLabel = $state("");
   let fileTranscribing = $state(false);
+  // True from when Cancel is clicked until the backend confirms the run stopped (its file://done).
+  let fileCancelling = $state(false);
   // Decode progress 0–100; 0 means the engine hasn't reported yet (bar shows indeterminate).
   let fileProgress = $state(0);
   // Current pipeline phase ("decoding"/"reducing noise"/"transcribing"), shown while no % is
@@ -1053,6 +1055,18 @@
     fileName = "";
   }
 
+  // Stop the running file transcription at the next window boundary; the backend drops the partial and
+  // emits file://done, which clears the transcribing + cancelling state.
+  async function cancelFile() {
+    fileCancelling = true;
+    try {
+      await invoke("cancel_file_transcription");
+    } catch (e) {
+      error = String(e);
+      fileCancelling = false;
+    }
+  }
+
   async function pickFile() {
     if (fileEngine === "local" && !chosenModel?.installed) {
       error = `Download ${chosenModel?.name ?? "the model"} first.`;
@@ -1157,6 +1171,7 @@
     fileListeners.push(
       await listen("file://done", () => {
         fileTranscribing = false;
+        fileCancelling = false;
       }),
     );
     // Window-level drag-and-drop (Tauri core webview event) — only act on it in File mode.
@@ -1963,6 +1978,11 @@
                 : `${fileStage || "transcribing"}…`
               : "done"}
           </span>
+          {#if fileTranscribing}
+            <button class="file-cancel" onclick={cancelFile} disabled={fileCancelling}>
+              {fileCancelling ? "Cancelling…" : "Cancel"}
+            </button>
+          {/if}
         </div>
         {#if fileTranscribing}
           <div class="file-progress" class:indeterminate={fileProgress === 0}>
@@ -3308,6 +3328,29 @@
 
   /* Thin determinate progress bar under the file header; falls back to an indeterminate sweep
      until the engine reports its first percentage. */
+  .file-cancel {
+    margin-left: 8px;
+    flex: none;
+    font-family: inherit;
+    font-size: 12px;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border-strong);
+    border-radius: 7px;
+    padding: 3px 10px;
+    cursor: pointer;
+  }
+
+  .file-cancel:hover:not(:disabled) {
+    color: var(--text);
+    border-color: var(--accent);
+  }
+
+  .file-cancel:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
   .file-progress {
     flex: none;
     height: 3px;
