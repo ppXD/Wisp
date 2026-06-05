@@ -51,6 +51,7 @@
       { id: "gpt-5.1", label: "GPT-5.1", kind: "chat" },
       { id: "gpt-5", label: "GPT-5", kind: "chat" },
       { id: "gpt-5-mini", label: "GPT-5 mini", kind: "chat" },
+      { id: "gpt-5-nano", label: "GPT-5 nano", kind: "chat" },
       // GA realtime models (the `session: { type: realtime }` shape the assist WebSocket speaks).
       { id: "gpt-realtime-mini", label: "GPT Realtime mini", kind: "realtime" },
       { id: "gpt-realtime", label: "GPT Realtime", kind: "realtime" },
