@@ -48,8 +48,9 @@ jobs:
       - name: test
         run: cargo test --all --all-features
 
-  # Proves the Tauri shell + its cross-platform deps (sherpa-onnx, cpal) build on Windows, where the
-  # macOS-only bits (ScreenCaptureKit, WebRTC AEC, Metal whisper.cpp) are absent and degrade.
+  # Proves the Tauri shell + its cross-platform deps (sherpa-onnx, cpal) build on Windows, plus the
+  # WebRTC AEC3 echo canceller (bundled webrtc-audio-processing — meson/ninja + libclang + MSVC). The
+  # remaining macOS-only bits (ScreenCaptureKit, Metal whisper.cpp) are absent and degrade.
   #
   # No rust-cache here: sherpa-rs-sys downloads its prebuilt C library to a dir *outside* the cached
   # target/ + ~/.cargo (AppData\Local\sherpa-rs), then bakes that absolute path into the build
@@ -64,6 +65,16 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+      # wisp-aec builds the bundled webrtc-audio-processing: meson + ninja drive the C++ build, MSVC
+      # is the compiler (msvc-dev-cmd puts cl.exe on PATH so meson finds it), and bindgen needs
+      # libclang from the runner's preinstalled LLVM. Same AEC3 the macOS job builds via brew.
+      - name: Set up MSVC (meson needs cl.exe on PATH)
+        uses: ilammy/msvc-dev-cmd@v1
+      - name: Install meson + ninja
+        run: pip install --upgrade meson ninja
+      - name: Point bindgen at the runner's LLVM
+        shell: pwsh
+        run: echo "LIBCLANG_PATH=C:\Program Files\LLVM\bin" >> $env:GITHUB_ENV
       - name: Build the frontend (tauri-build needs the dist)
         working-directory: app
         run: |
