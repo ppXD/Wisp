@@ -353,7 +353,7 @@
     currentEngine === "cloud"
       ? (cloudProvider(currentCloudProvider)?.models.find((m) => m.id === currentCloudModel)?.name ??
           "Select a model")
-      : (chosenModel?.name ?? "Select a model"),
+      : (chosenModel?.name ?? i18n.t.picker.selectModel),
   );
 
   // Switch the top tab and land on a sensible category: the current selection's if it lives in this
@@ -717,7 +717,7 @@
     // A cloud-streaming error (bad key/model, server error, dropped connection) — surface it as a
     // notice rather than failing silently.
     liveErrorUnlisten = await listen<string>("live://error", (event) => {
-      liveNotice = `Cloud error: ${event.payload}`;
+      liveNotice = i18n.t.error.cloudError(String(event.payload));
     });
   }
 
@@ -754,11 +754,11 @@
     liveNotice = "";
     if (liveEngine === "cloud") {
       if (!liveCloudReady) {
-        error = "Pick a cloud model and save its API key first.";
+        error = i18n.t.error.pickCloudModel;
         return;
       }
     } else if (liveDiarize && !diarizeChosen?.installed) {
-      error = "Download the speaker model first.";
+      error = i18n.t.error.downloadSpeakerModel;
       return;
     }
     // Fresh session = fresh feed: the backend resets its segment ids to 0 and clears the export buffer
@@ -1042,7 +1042,7 @@
   // A distinct colour per speaker (cycled), and a 1-based label matching the export.
   const SPEAKER_COLORS = ["#c96442", "#3f7e6b", "#6a5acd", "#b58a2e", "#9c4d6b", "#4a7aa8"];
   const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
-  const speakerLabel = (n: number) => `Speaker ${n + 1}`;
+  const speakerLabel = (n: number) => i18n.t.common.speaker(n + 1);
 
   // Which File results tab is showing, and the transcript assembled as plain text for the AI tasks.
   let fileTab = $state<"transcript" | "ai">("transcript");
@@ -1113,7 +1113,7 @@
   async function transcribeFile(path: string) {
     if (fileTranscribing) return;
     if (fileEngine === "local" && !chosenModel?.installed) {
-      error = `Download ${chosenModel?.name ?? "the model"} first.`;
+      error = i18n.t.error.downloadModel(chosenModel?.name ?? "the model");
       return;
     }
     if (fileEngine === "cloud" && !fileCloudReady) {
@@ -1123,11 +1123,11 @@
       return;
     }
     if (diarizeOn && !fileModelSelfDiarizes && !diarizeChosen?.installed) {
-      error = "Download the speaker model first.";
+      error = i18n.t.error.downloadSpeakerModel;
       return;
     }
     if (fileDenoiser === denoiseModelId && !denoiseChosen?.installed) {
-      error = "Download the noise-reduction model first.";
+      error = i18n.t.error.downloadNoiseModel;
       return;
     }
     error = "";
@@ -1184,7 +1184,7 @@
 
   async function pickFile() {
     if (fileEngine === "local" && !chosenModel?.installed) {
-      error = `Download ${chosenModel?.name ?? "the model"} first.`;
+      error = i18n.t.error.downloadModel(chosenModel?.name ?? "the model");
       return;
     }
     if (fileEngine === "cloud" && !fileCloudReady) {
@@ -1895,12 +1895,12 @@
 
       <!-- Advanced parameters as a right-side drawer (OpenAI-Studio style). -->
       {#if !running && liveEngine === "cloud" && liveParamsOpen && liveParamSpecs.length}
-        <button class="drawer-scrim" aria-label="Close" onclick={() => (liveParamsOpen = false)}
+        <button class="drawer-scrim" aria-label={i18n.t.common.close} onclick={() => (liveParamsOpen = false)}
         ></button>
         <aside class="drawer" transition:fly={{ x: 340, duration: 180 }}>
           <div class="drawer-head">
             <span class="drawer-title">{liveProv?.name ?? "Cloud"} parameters</span>
-            <button class="drawer-x" aria-label="Close" onclick={() => (liveParamsOpen = false)}
+            <button class="drawer-x" aria-label={i18n.t.common.close} onclick={() => (liveParamsOpen = false)}
               >×</button
             >
           </div>
@@ -1948,7 +1948,7 @@
         {#if running && !stopping}
           <li class="listening" aria-live="polite">
             <span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
-            <span class="listening-text">Listening…</span>
+            <span class="listening-text">{i18n.t.transcript.listening}</span>
           </li>
         {:else if !liveSegments.length}
           <li class="empty">{i18n.t.live.empty.before}<em>{i18n.t.live.empty.action}</em>{i18n.t.live.empty.after}</li>
@@ -1963,22 +1963,22 @@
                   class:open={exportMenuOpen}
                   onclick={() => (exportMenuOpen = !exportMenuOpen)}
                 >
-                  Export<span class="export-caret"></span>
+                  {i18n.t.transcript.export}<span class="export-caret"></span>
                 </button>
                 {#if exportMenuOpen}
                   <button
                     class="export-backdrop"
-                    aria-label="Close"
+                    aria-label={i18n.t.common.close}
                     onclick={() => (exportMenuOpen = false)}
                   ></button>
                   <div class="export-menu up" transition:fly={{ y: 4, duration: 100 }}>
-                    <button onclick={() => exportPick("md")}>Markdown<span class="export-ext">.md</span></button>
-                    <button onclick={() => exportPick("txt")}>Plain text<span class="export-ext">.txt</span></button>
-                    <button onclick={() => exportPick("srt")}>Subtitles<span class="export-ext">.srt</span></button>
+                    <button onclick={() => exportPick("md")}>{i18n.t.transcript.markdown}<span class="export-ext">.md</span></button>
+                    <button onclick={() => exportPick("txt")}>{i18n.t.transcript.plainText}<span class="export-ext">.txt</span></button>
+                    <button onclick={() => exportPick("srt")}>{i18n.t.transcript.subtitles}<span class="export-ext">.srt</span></button>
                   </div>
                 {/if}
               </div>
-              <button class="pane-clear" onclick={clear}>Clear</button>
+              <button class="pane-clear" onclick={clear}>{i18n.t.common.clear}</button>
             </div>
           {/if}
         </div>
@@ -1986,12 +1986,12 @@
           <aside class="assist-panel" style:width="{assistWidth}px">
             <button
               class="assist-resize"
-              aria-label="Resize assist panel"
+              aria-label={i18n.t.transcript.resizeAssist}
               onmousedown={startAssistResize}
             ></button>
             <div class="assist-head">
-              <span class="assist-title">✦ AI Assist</span>
-              <button class="assist-x" aria-label="Close" onclick={() => (liveAssistOpen = false)}
+              <span class="assist-title">{i18n.t.transcript.assistTitle}</span>
+              <button class="assist-x" aria-label={i18n.t.common.close} onclick={() => (liveAssistOpen = false)}
                 >×</button
               >
             </div>
@@ -2066,115 +2066,110 @@
         </svg>
         {liveEngine === "cloud" ? i18n.t.live.advancedCloud : i18n.t.live.advanced}
       </button>
-      <Modal bind:open={liveAdvancedOpen} title={liveEngine === "cloud" ? "Audio" : "Advanced settings"}>
+      <Modal bind:open={liveAdvancedOpen} title={liveEngine === "cloud" ? i18n.t.advanced.audioTitle : i18n.t.advanced.title}>
           <section class="modal-section">
-            <span class="section-title">Audio</span>
+            <span class="section-title">{i18n.t.advanced.audio}</span>
             <label class="source-row">
-              <span class="source-name">Microphone <em>(you)</em></span>
+              <span class="source-name">{i18n.t.advanced.microphone} <em>{i18n.t.advanced.youParen}</em></span>
               <select bind:value={micDevice} onchange={applyDevices}>
-                <option value="">System default</option>
-                {#if micOffId}<option value={micOffId}>Off</option>{/if}
+                <option value="">{i18n.t.advanced.systemDefault}</option>
+                {#if micOffId}<option value={micOffId}>{i18n.t.advanced.off}</option>{/if}
                 {#each devices as d (d)}<option value={d}>{d}</option>{/each}
               </select>
             </label>
             <label class="source-row">
-              <span class="source-name">System audio <em>(everything playing)</em></span>
+              <span class="source-name">{i18n.t.advanced.systemAudio} <em>{i18n.t.advanced.everythingPlaying}</em></span>
               <select bind:value={systemDevice} onchange={applyDevices}>
-                <option value="">Off</option>
-                {#if systemAudioId}<option value={systemAudioId}>System audio — no setup</option>{/if}
+                <option value="">{i18n.t.advanced.off}</option>
+                {#if systemAudioId}<option value={systemAudioId}>{i18n.t.advanced.systemAudioNoSetup}</option>{/if}
                 {#each devices as d (d)}<option value={d}>{d}</option>{/each}
               </select>
             </label>
             {#if liveEngine !== "cloud"}
               <div class="source-row">
-                <span class="source-name">Reduce noise</span>
+                <span class="source-name">{i18n.t.advanced.reduceNoise}</span>
                 <div class="seg">
                   <button
                     class:active={liveDenoiser === null}
                     onclick={() => {
                       liveDenoiser = null;
                       applyDenoise();
-                    }}>Off</button
+                    }}>{i18n.t.advanced.off}</button
                   >
                   <button
                     class:active={liveDenoiser === "rnnoise"}
                     onclick={() => {
                       liveDenoiser = "rnnoise";
                       applyDenoise();
-                    }}>Light</button
+                    }}>{i18n.t.advanced.light}</button
                   >
                 </div>
               </div>
             {/if}
             <p class="opt-hint">
-              Defaults to your mic + all system audio with <strong>echo cancellation</strong>; for
-              system audio only, set Microphone to Off.{#if liveEngine !== "cloud"}
-                <strong>Light</strong> is the best fit for live.{:else} Cloud denoises server-side —
-                tune it under <strong>Advanced parameters</strong>.{/if}
+              {i18n.t.advanced.audioHint}{liveEngine !== "cloud"
+                ? i18n.t.advanced.audioHintLocal
+                : i18n.t.advanced.audioHintCloud}
             </p>
           </section>
 
           {#if liveEngine !== "cloud"}
             <section class="modal-section">
-              <span class="section-title">Transcription</span>
+              <span class="section-title">{i18n.t.advanced.transcription}</span>
               <label class="source-row">
-                <span class="source-name">Language</span>
+                <span class="source-name">{i18n.t.advanced.language}</span>
                 <select bind:value={language} onchange={applyLanguage}>
-                  <option value="">Auto-detect</option>
-                  <option value="yue">Cantonese</option>
-                  <option value="zh">Chinese (Mandarin)</option>
-                  <option value="en">English</option>
-                  <option value="ja">Japanese</option>
-                  <option value="ko">Korean</option>
+                  <option value="">{i18n.t.advanced.autoDetect}</option>
+                  <option value="yue">{i18n.t.advanced.cantonese}</option>
+                  <option value="zh">{i18n.t.advanced.mandarin}</option>
+                  <option value="en">{i18n.t.advanced.english}</option>
+                  <option value="ja">{i18n.t.advanced.japanese}</option>
+                  <option value="ko">{i18n.t.advanced.korean}</option>
                 </select>
               </label>
               <div class="source-row">
-                <span class="source-name">Mode</span>
+                <span class="source-name">{i18n.t.advanced.mode}</span>
                 <div class="seg">
                   <button
                     class:active={liveAccurate}
                     onclick={() => {
                       liveAccurate = true;
                       applyLiveDecode();
-                    }}>Accurate</button
+                    }}>{i18n.t.advanced.accurate}</button
                   >
                   <button
                     class:active={!liveAccurate}
                     onclick={() => {
                       liveAccurate = false;
                       applyLiveDecode();
-                    }}>Fast</button
+                    }}>{i18n.t.advanced.fast}</button
                   >
                 </div>
               </div>
               <div class="field">
-                <span class="field-label">Hints <em>(optional)</em></span>
+                <span class="field-label">{i18n.t.advanced.hints} <em>{i18n.t.advanced.optional}</em></span>
                 <input
                   class="prompt-input"
                   type="text"
                   bind:value={livePrompt}
                   onchange={applyLiveDecode}
-                  placeholder="names, jargon, acronyms…"
+                  placeholder={i18n.t.advanced.hintsPlaceholder}
                 />
               </div>
-              <p class="opt-hint">
-                Set a <strong>Language</strong> if auto-detect is wrong (recommended for Cantonese).
-                <strong>Fast</strong> keeps the lowest latency; <strong>Hints</strong> prime names &amp;
-                jargon.
-              </p>
+              <p class="opt-hint">{i18n.t.advanced.transcriptionHint}</p>
             </section>
           {/if}
 
           {#if liveEngine !== "cloud"}
           <section class="modal-section">
-            <span class="section-title">Speakers</span>
+            <span class="section-title">{i18n.t.advanced.speakers}</span>
             <label class="opt-toggle">
               <input type="checkbox" bind:checked={liveDiarize} onchange={applyLiveDiarize} />
-              <span>Identify speakers</span>
+              <span>{i18n.t.advanced.identifySpeakers}</span>
             </label>
             {#if liveDiarize}
               <div class="source-row">
-                <span class="source-name">Model</span>
+                <span class="source-name">{i18n.t.advanced.model}</span>
                 <div class="seg">
                   {#each diarizeModels as m (m.id)}
                     <button
@@ -2194,15 +2189,12 @@
                   disabled={downloading === diarizeId}
                 >
                   {downloading === diarizeId
-                    ? `Downloading… ${downloadPct}%`
-                    : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+                    ? i18n.t.advanced.downloading(downloadPct)
+                    : i18n.t.advanced.downloadSize(fmtSize(diarizeChosen.sizeBytes))}
                 </button>
               {/if}
             {/if}
-            <p class="opt-hint">
-              Labels each line by who's talking (Speaker 1, 2…). <strong>Accurate</strong> tells
-              similar-sounding voices apart better.
-            </p>
+            <p class="opt-hint">{i18n.t.advanced.speakersHint}</p>
           </section>
           {/if}
       </Modal>
@@ -2225,13 +2217,13 @@
           <span class="status" class:live={fileTranscribing}>
             <span class="status-dot"></span>{fileTranscribing
               ? fileProgress > 0
-                ? `${fileStage || "transcribing"}… ${fileProgress}%`
-                : `${fileStage || "transcribing"}…`
-              : "done"}
+                ? `${fileStage || i18n.t.fileResult.transcribing}… ${fileProgress}%`
+                : `${fileStage || i18n.t.fileResult.transcribing}…`
+              : i18n.t.fileResult.done}
           </span>
           {#if fileTranscribing}
             <button class="file-cancel" onclick={cancelFile} disabled={fileCancelling}>
-              {fileCancelling ? "Cancelling…" : "Cancel"}
+              {fileCancelling ? i18n.t.fileResult.cancelling : i18n.t.common.cancel}
             </button>
           {/if}
         </div>
@@ -2247,9 +2239,9 @@
         {#if fileSegments.length && !fileTranscribing}
           <div class="seg file-tabs">
             <button class:active={fileTab === "transcript"} onclick={() => (fileTab = "transcript")}>
-              Transcript
+              {i18n.t.common.transcript}
             </button>
-            <button class:active={fileTab === "ai"} onclick={() => (fileTab = "ai")}>✦ AI Notes</button>
+            <button class:active={fileTab === "ai"} onclick={() => (fileTab = "ai")}>{i18n.t.fileResult.aiNotes}</button>
           </div>
         {/if}
 
@@ -2269,14 +2261,14 @@
                   >{/if}{para.text}</span>
             </li>
           {:else}
-            <li class="empty">Transcribing… large files take a little while.</li>
+            <li class="empty">{i18n.t.fileResult.transcribingLarge}</li>
           {/each}
         </ul>
         {/if}
         <div class="box-foot">
           <div class="export-group">
             {#if fileSegments.length && !fileTranscribing}
-              <span class="export-label">Export</span>
+              <span class="export-label">{i18n.t.transcript.export}</span>
               <button class="btn outline sm" onclick={() => exportFile("md")}>MD</button>
               <button class="btn outline sm" onclick={() => exportFile("txt")}>TXT</button>
               {#if fileHasTimestamps}
@@ -2286,7 +2278,7 @@
             {/if}
           </div>
           <button class="btn ghost" onclick={resetFile} disabled={fileTranscribing}>
-            Transcribe another
+            {i18n.t.fileResult.transcribeAnother}
           </button>
         </div>
       {:else}
@@ -2297,29 +2289,29 @@
         {#if fileEngine === "cloud"}
           <div class="cloud-key-row">
             {#if fileProv?.keySet}
-              <span class="key-ok">✓ {fileProv.name} key saved on this device</span>
-              <button class="link-btn" onclick={openEndpointsModal}>Manage keys</button>
+              <span class="key-ok">{i18n.t.fileResult.keySaved(fileProv.name)}</span>
+              <button class="link-btn" onclick={openEndpointsModal}>{i18n.t.fileResult.manageKeys}</button>
             {:else}
-              <span class="key-missing">{fileProv?.name ?? "This provider"} needs your API key</span>
-              <button class="btn outline sm" onclick={openEndpointsModal}>Add API key</button>
+              <span class="key-missing">{i18n.t.fileResult.needsKey(fileProv?.name ?? "This provider")}</span>
+              <button class="btn outline sm" onclick={openEndpointsModal}>{i18n.t.fileResult.addApiKey}</button>
             {/if}
           </div>
         {/if}
 
         {#if fileEngine === "cloud" && fileParamSpecs.length}
           <button class="params-trigger file-params-trigger" onclick={() => (fileParamsOpen = true)}>
-            <span class="params-ico" aria-hidden="true"></span>Advanced parameters
+            <span class="params-ico" aria-hidden="true"></span>{i18n.t.notice.advancedParams}
           </button>
         {/if}
 
         <!-- Advanced parameters as a right-side drawer — same affordance as the live cloud picker. -->
         {#if fileEngine === "cloud" && fileParamsOpen && fileParamSpecs.length}
-          <button class="drawer-scrim" aria-label="Close" onclick={() => (fileParamsOpen = false)}
+          <button class="drawer-scrim" aria-label={i18n.t.common.close} onclick={() => (fileParamsOpen = false)}
           ></button>
           <aside class="drawer" transition:fly={{ x: 340, duration: 180 }}>
             <div class="drawer-head">
-              <span class="drawer-title">{fileProv?.name ?? "Cloud"} parameters</span>
-              <button class="drawer-x" aria-label="Close" onclick={() => (fileParamsOpen = false)}
+              <span class="drawer-title">{i18n.t.fileResult.paramsTitle(fileProv?.name ?? "Cloud")}</span>
+              <button class="drawer-x" aria-label={i18n.t.common.close} onclick={() => (fileParamsOpen = false)}
                 >×</button
               >
             </div>
@@ -2394,20 +2386,20 @@
           </svg>
           {fileEngine === "cloud" ? i18n.t.file.optionsCloud : i18n.t.file.options}
         </button>
-        <Modal bind:open={fileOptionsOpen} title="Options">
+        <Modal bind:open={fileOptionsOpen} title={i18n.t.advanced.optionsTitle}>
           <section class="modal-section">
-            <span class="section-title">Audio</span>
+            <span class="section-title">{i18n.t.advanced.audio}</span>
             <div class="opt-row">
-              <span class="opt-label">Reduce noise</span>
+              <span class="opt-label">{i18n.t.advanced.reduceNoise}</span>
               <div class="seg">
-                <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>Off</button>
+                <button class:active={fileDenoiser === null} onclick={() => (fileDenoiser = null)}>{i18n.t.advanced.off}</button>
                 <button
                   class:active={fileDenoiser === "rnnoise"}
-                  onclick={() => (fileDenoiser = "rnnoise")}>Light</button
+                  onclick={() => (fileDenoiser = "rnnoise")}>{i18n.t.advanced.light}</button
                 >
                 <button
                   class:active={fileDenoiser === denoiseModelId}
-                  onclick={() => (fileDenoiser = denoiseModelId)}>Balanced</button
+                  onclick={() => (fileDenoiser = denoiseModelId)}>{i18n.t.advanced.balanced}</button
                 >
               </div>
             </div>
@@ -2418,68 +2410,60 @@
                 disabled={downloading === denoiseModelId}
               >
                 {downloading === denoiseModelId
-                  ? `Downloading… ${downloadPct}%`
-                  : `Download ${fmtSize(denoiseChosen.sizeBytes)}`}
+                  ? i18n.t.advanced.downloading(downloadPct)
+                  : i18n.t.advanced.downloadSize(fmtSize(denoiseChosen.sizeBytes))}
               </button>
             {/if}
             <label class="opt-toggle">
               <input type="checkbox" bind:checked={fileGate} />
-              <span>Skip silence &amp; music</span>
+              <span>{i18n.t.advanced.skipSilence}</span>
             </label>
-            <p class="opt-hint">
-              Cleans background noise, and drops long non-speech so the model can't invent words in
-              the gaps. Leave off for clean recordings.
-            </p>
+            <p class="opt-hint">{i18n.t.advanced.fileAudioHint}</p>
           </section>
 
           <section class="modal-section">
-            <span class="section-title">Transcription</span>
+            <span class="section-title">{i18n.t.advanced.transcription}</span>
             {#if fileEngine !== "cloud"}
               <!-- Beam vs greedy is a local-decoder choice; cloud models decode server-side. -->
               <div class="opt-row">
-                <span class="opt-label">Mode</span>
+                <span class="opt-label">{i18n.t.advanced.mode}</span>
                 <div class="seg">
-                  <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>Accurate</button>
-                  <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>Fast</button>
+                  <button class:active={fileAccurate} onclick={() => (fileAccurate = true)}>{i18n.t.advanced.accurate}</button>
+                  <button class:active={!fileAccurate} onclick={() => (fileAccurate = false)}>{i18n.t.advanced.fast}</button>
                 </div>
               </div>
             {/if}
             <label class="opt-toggle">
               <input type="checkbox" bind:checked={fileTimestamps} />
-              <span>Timeline <em>— per-line timestamps for SRT/VTT</em></span>
+              <span>{i18n.t.advanced.timeline} <em>{i18n.t.advanced.timelineNote}</em></span>
             </label>
             <div class="field">
-              <span class="field-label">Hints <em>(optional)</em></span>
+              <span class="field-label">{i18n.t.advanced.hints} <em>{i18n.t.advanced.optional}</em></span>
               <input
                 id="file-prompt"
                 class="prompt-input"
                 type="text"
                 bind:value={filePrompt}
-                placeholder="names, jargon, acronyms…"
+                placeholder={i18n.t.advanced.hintsPlaceholder}
               />
             </div>
             <p class="opt-hint">
-              {#if fileEngine !== "cloud"}<strong>Accurate</strong> weighs several candidate sentences
-                (better wording, slower). {/if}<strong>Hints</strong> prime spellings the model might
-              otherwise miss.
+              {#if fileEngine !== "cloud"}{i18n.t.advanced.fileHintAccurate}{/if}{i18n.t.advanced.fileHintHints}
             </p>
           </section>
 
           <section class="modal-section">
-            <span class="section-title">Speakers</span>
+            <span class="section-title">{i18n.t.advanced.speakers}</span>
             {#if fileModelSelfDiarizes}
-              <p class="opt-hint">
-                <strong>{fileMod?.name}</strong> returns speaker labels itself — local diarization is
-                off for this model.
-              </p>
+              <p class="opt-hint">{i18n.t.advanced.fileSpeakersSelf(fileMod?.name ?? "This model")}</p>
             {:else}
               <label class="opt-toggle">
                 <input type="checkbox" bind:checked={diarizeOn} />
-                <span>Identify speakers</span>
+                <span>{i18n.t.advanced.identifySpeakers}</span>
               </label>
               {#if diarizeOn}
               <div class="opt-row">
-                <span class="opt-label">Model</span>
+                <span class="opt-label">{i18n.t.advanced.model}</span>
                 <div class="seg">
                   {#each diarizeModels as m (m.id)}
                     <button class:active={diarizeId === m.id} onclick={() => (diarizeId = m.id)}>
@@ -2495,15 +2479,12 @@
                   disabled={downloading === diarizeId}
                 >
                   {downloading === diarizeId
-                    ? `Downloading… ${downloadPct}%`
-                    : `Download ${fmtSize(diarizeChosen.sizeBytes)}`}
+                    ? i18n.t.advanced.downloading(downloadPct)
+                    : i18n.t.advanced.downloadSize(fmtSize(diarizeChosen.sizeBytes))}
                 </button>
               {/if}
             {/if}
-              <p class="opt-hint">
-                Labels each line by who's talking (Speaker 1, 2…). Runs locally after transcribing;
-                downloads a small model the first time.
-              </p>
+              <p class="opt-hint">{i18n.t.advanced.fileSpeakersHint}</p>
             {/if}
           </section>
         </Modal>
@@ -4646,11 +4627,6 @@
     font-size: 12.5px;
     color: var(--muted);
     line-height: 1.5;
-  }
-
-  .opt-hint strong {
-    color: var(--text);
-    font-weight: 600;
   }
 
   .prompt-input {

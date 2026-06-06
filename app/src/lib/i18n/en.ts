@@ -125,6 +125,7 @@ export const en = {
     importCustom: "Import custom model…",
     manageInSettings: "Manage models in Settings…",
     manageHint: "API keys · endpoints · custom models",
+    selectModel: "Select a model",
   },
 
   // Live box-aux: model download / CoreML hints, permission banners, cloud key notices. "Wisp",
@@ -152,6 +153,91 @@ export const en = {
     sentenceNote: (name: string): string =>
       `${name} transcribes each finished sentence — near-live, with no mid-sentence partials, billed per request.`,
     advancedParams: "Advanced parameters",
+  },
+
+  // Transcript pane controls + the assist drawer header. "Markdown" is a format name (stays English).
+  transcript: {
+    listening: "Listening…",
+    export: "Export",
+    markdown: "Markdown",
+    plainText: "Plain text",
+    subtitles: "Subtitles",
+    resizeAssist: "Resize assist panel",
+    assistTitle: "✦ AI Assist",
+  },
+
+  // Live "Advanced settings" + File "Options" modals (audio / transcription / speakers), shared by
+  // both. Help hints drop their <strong> emphasis so each is one translatable string. Language names
+  // are option labels (translated); "SRT/VTT" and "Speaker 1, 2…" stay as written.
+  advanced: {
+    title: "Advanced settings",
+    audioTitle: "Audio",
+    optionsTitle: "Options",
+    audio: "Audio",
+    microphone: "Microphone",
+    youParen: "(you)",
+    systemDefault: "System default",
+    off: "Off",
+    systemAudio: "System audio",
+    everythingPlaying: "(everything playing)",
+    systemAudioNoSetup: "System audio — no setup",
+    reduceNoise: "Reduce noise",
+    light: "Light",
+    balanced: "Balanced",
+    skipSilence: "Skip silence & music",
+    downloading: (pct: number): string => `Downloading… ${pct}%`,
+    downloadSize: (size: string): string => `Download ${size}`,
+    transcription: "Transcription",
+    language: "Language",
+    autoDetect: "Auto-detect",
+    cantonese: "Cantonese",
+    mandarin: "Chinese (Mandarin)",
+    english: "English",
+    japanese: "Japanese",
+    korean: "Korean",
+    mode: "Mode",
+    accurate: "Accurate",
+    fast: "Fast",
+    timeline: "Timeline",
+    timelineNote: "— per-line timestamps for SRT/VTT",
+    hints: "Hints",
+    optional: "(optional)",
+    hintsPlaceholder: "names, jargon, acronyms…",
+    speakers: "Speakers",
+    identifySpeakers: "Identify speakers",
+    model: "Model",
+    audioHint:
+      "Defaults to your mic + all system audio with echo cancellation; for system audio only, set Microphone to Off.",
+    audioHintLocal: " Light is the best fit for live.",
+    audioHintCloud: " Cloud denoises server-side — tune it under Advanced parameters.",
+    transcriptionHint:
+      "Set a Language if auto-detect is wrong (recommended for Cantonese). Fast keeps the lowest latency; Hints prime names & jargon.",
+    speakersHint:
+      "Labels each line by who's talking (Speaker 1, 2…). Accurate tells similar-sounding voices apart better.",
+    fileAudioHint:
+      "Cleans background noise, and drops long non-speech so the model can't invent words in the gaps. Leave off for clean recordings.",
+    fileHintAccurate: "Accurate weighs several candidate sentences (better wording, slower). ",
+    fileHintHints: "Hints prime spellings the model might otherwise miss.",
+    fileSpeakersSelf: (name: string): string =>
+      `${name} returns speaker labels itself — local diarization is off for this model.`,
+    fileSpeakersHint:
+      "Labels each line by who's talking (Speaker 1, 2…). Runs locally after transcribing; downloads a small model the first time.",
+  },
+
+  // File transcribing/results state + the cloud key row and params drawer. "MD/TXT/SRT/VTT" and
+  // provider names stay English.
+  fileResult: {
+    transcribing: "transcribing",
+    done: "done",
+    cancelling: "Cancelling…",
+    aiNotes: "✦ AI Notes",
+    transcribingLarge: "Transcribing… large files take a little while.",
+    transcribeAnother: "Transcribe another",
+    keySaved: (name: string): string => `✓ ${name} key saved on this device`,
+    manageKeys: "Manage keys",
+    needsKey: (name: string): string => `${name} needs your API key`,
+    addApiKey: "Add API key",
+    paramsTitle: (name: string): string => `${name} parameters`,
   },
 
   // Advanced parameters panel (ParamsPanel). The per-parameter labels come from the backend specs.
@@ -233,9 +319,19 @@ export const en = {
     intro: "Keys are stored only on this device, and sent only to the provider they belong to.",
   },
 
+  // User-facing error toasts (set in <script>).
+  error: {
+    cloudError: (msg: string): string => `Cloud error: ${msg}`,
+    pickCloudModel: "Pick a cloud model and save its API key first.",
+    downloadSpeakerModel: "Download the speaker model first.",
+    downloadModel: (name: string): string => `Download ${name} first.`,
+    downloadNoiseModel: "Download the noise-reduction model first.",
+  },
+
   common: {
     transcribeWith: "Transcribe with", // shared by the Live and File headers
     transcript: "Transcript",
+    speaker: (n: number): string => `Speaker ${n}`,
     close: "Close",
     cancel: "Cancel",
     save: "Save",
