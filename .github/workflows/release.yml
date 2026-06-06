@@ -47,9 +47,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # No --target: macos-15 is arm64, and tauri.conf.json's frameworks path is target/release
+          # (not target/<triple>/release), so a host build keeps the dylibs where the bundle looks.
           - os: macos-15
             label: macOS arm64
-            args: "--target aarch64-apple-darwin"
+            args: ""
           - os: windows-latest
             label: Windows x64
             args: ""
@@ -99,11 +101,11 @@ jobs:
           node -e "const f='app/package.json',fs=require('fs'),c=JSON.parse(fs.readFileSync(f));c.version='$VER';fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
           node -e "const f='app/src-tauri/Cargo.toml',fs=require('fs');let s=fs.readFileSync(f,'utf8');s=s.replace(/^version = \"[^\"]*\"/m,'version = \"$VER\"');fs.writeFileSync(f,s)"
 
-      # Windows: drop the sherpa / onnxruntime runtime DLLs into target/ before the app's build.rs runs
-      # (it stages them into the bundle resources). Cargo doesn't order one build script before a
-      # dependent's, so building the engine first removes that race for the installer.
-      - name: Stage sherpa runtime DLLs
-        if: runner.os == 'Windows'
+      # Build the sherpa engine first so its prebuilt libs land in target/release before the app's
+      # build.rs runs: Windows stages the onnxruntime/sherpa DLLs into the bundle resources, and macOS
+      # validates tauri.conf.json's frameworks (target/release/*.dylib) at compile time. Cargo doesn't
+      # order one build script before a dependent's, so building the engine first removes that race.
+      - name: Stage sherpa runtime libs
         run: cargo build --release --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
 
       - name: Build installers + draft Release
