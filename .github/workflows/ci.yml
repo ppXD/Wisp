@@ -77,3 +77,38 @@ jobs:
         run: cargo build --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
       - name: Build the app
         run: cargo build --manifest-path app/src-tauri/Cargo.toml
+
+  # Proves the macOS app builds — including the macOS-ONLY code no other CI job ever compiles:
+  # ScreenCaptureKit system audio, the WebRTC AEC3 echo canceller, Metal whisper.cpp, and Apple
+  # SpeechAnalyzer. Without this job a macOS-only regression slips past CI and only surfaces on a real
+  # Mac build/release. Same sherpa-rs-sys download-path caveat as the Windows job, so no rust-cache.
+  macos-app:
+    name: app builds (macos)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # whisper.cpp is vendored as a submodule
+      # Metal (via screencapture) needs the macOS 15 SDK; the runner's default Xcode is older.
+      - uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: latest-stable
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      # The WebRTC AEC crate's bundled build compiles vendored WebRTC with meson + ninja.
+      - name: Install meson + ninja
+        run: brew install meson ninja
+      - name: Build the frontend (tauri-build needs the dist)
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+      # Build sherpa in RELEASE so its prebuilt dylibs land in target/release — the exact path
+      # tauri.conf.json's `bundle.macOS.frameworks` points at, which tauri_build validates at compile
+      # time. The app itself still builds in debug (fast); only the dylib *location* needs release.
+      - name: Stage sherpa runtime libs
+        run: cargo build --release --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
+      - name: Build the app
+        run: cargo build --manifest-path app/src-tauri/Cargo.toml
