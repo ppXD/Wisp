@@ -189,6 +189,29 @@ fn google() -> CloudProvider {
             ),
             // ── File (batch) models ──
             model(
+                "gemini-3.5-flash",
+                "Gemini 3.5 Flash",
+                false,
+                true,
+                "Newest flagship Flash — smartest Gemini for accurate multilingual (incl. CJK) \
+                 transcription.",
+            )
+            .recommended(),
+            model(
+                "gemini-3.1-flash-lite",
+                "Gemini 3.1 Flash-Lite",
+                false,
+                true,
+                "Frontier accuracy at the lowest cost — quick everyday transcription.",
+            ),
+            model(
+                "gemini-2.5-pro",
+                "Gemini 2.5 Pro",
+                false,
+                true,
+                "Deep-reasoning Gemini — best for hard audio or nuanced multilingual transcription.",
+            ),
+            model(
                 "gemini-2.5-flash",
                 "Gemini 2.5 Flash",
                 false,
@@ -197,32 +220,11 @@ fn google() -> CloudProvider {
                  accuracy.",
             ),
             model(
-                "gemini-2.5-pro",
-                "Gemini 2.5 Pro",
-                false,
-                true,
-                "Most accurate Gemini — best for hard audio or nuanced multilingual transcription.",
-            ),
-            model(
                 "gemini-2.5-flash-lite",
                 "Gemini 2.5 Flash-Lite",
                 false,
                 true,
                 "Cheapest, fastest 2.5 — quick everyday transcription.",
-            ),
-            model(
-                "gemini-2.0-flash",
-                "Gemini 2.0 Flash",
-                false,
-                true,
-                "Faster, lower-cost multimodal model for everyday transcription.",
-            ),
-            model(
-                "gemini-1.5-flash",
-                "Gemini 1.5 Flash",
-                false,
-                true,
-                "Earlier fast model, broadly available.",
             ),
         ],
     }
@@ -332,5 +334,31 @@ mod tests {
             "exactly one recommended streaming model"
         );
         assert_eq!(recommended[0].id, "gpt-4o-transcribe");
+    }
+
+    #[test]
+    fn google_recommends_one_live_and_one_file_model_for_the_per_mode_picker() {
+        // The ★ Recommended category pre-selects a default per mode (Live vs File). Google must offer
+        // exactly one recommended streaming model and exactly one recommended batch model so each mode
+        // resolves to a single, unambiguous default.
+        let google = cloud_catalog()
+            .into_iter()
+            .find(|p| p.id == "google")
+            .expect("google is seeded");
+
+        let rec_live: Vec<_> = google
+            .models
+            .iter()
+            .filter(|m| m.streaming && m.recommended)
+            .collect();
+        let rec_file: Vec<_> = google
+            .models
+            .iter()
+            .filter(|m| m.batch && m.recommended)
+            .collect();
+
+        assert_eq!(rec_live.len(), 1, "exactly one recommended Live model");
+        assert_eq!(rec_file.len(), 1, "exactly one recommended File model");
+        assert_eq!(rec_file[0].id, "gemini-3.5-flash");
     }
 }

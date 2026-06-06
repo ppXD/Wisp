@@ -135,7 +135,7 @@ pub struct CloudEngine {
     auth_value: String,
     /// The raw key, for query-param-authed protocols (Gemini's `?key=`).
     api_key: String,
-    /// Wire model id, e.g. `gpt-4o-transcribe` / `gemini-2.0-flash` / `qwen3-asr-flash`.
+    /// Wire model id, e.g. `gpt-4o-transcribe` / `gemini-3.5-flash` / `qwen3-asr-flash`.
     model: String,
     /// Language code, or empty to let the provider auto-detect.
     language: String,
