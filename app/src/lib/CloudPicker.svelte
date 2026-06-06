@@ -7,6 +7,7 @@
     removeCloudCustomModel,
     openEndpointsModal,
   } from "$lib/cloud.svelte";
+  import { i18n } from "$lib/i18n.svelte";
 
   // Left dropdown picks the provider, right dropdown picks the model. `capability` filters the
   // model list to what this mode can actually run (File = batch, Live = streaming).
@@ -109,23 +110,23 @@
 <div class="cloud-pick">
   <div class="picker">
     <button class="trigger" class:open={provOpen} onclick={() => (provOpen = !provOpen)}>
-      <span class="lbl">{provider?.name ?? "Provider"}</span>
+      <span class="lbl">{provider?.name ?? i18n.t.picker.provider}</span>
       <span class="caret"></span>
     </button>
     {#if provOpen}
-      <button class="bg" aria-label="Close" onclick={() => (provOpen = false)}></button>
+      <button class="bg" aria-label={i18n.t.common.close} onclick={() => (provOpen = false)}></button>
       <div class="menu" transition:fly={{ y: -6, duration: 120 }}>
         {#each visibleProviders as p (p.id)}
           <div class="opt-row">
             <button class="opt" class:sel={p.id === providerId} onclick={() => pickProvider(p.id)}>
               <span class="opt-name">{p.name}</span>
-              {#if !p.keySet}<span class="tag">key needed</span>{/if}
+              {#if !p.keySet}<span class="tag">{i18n.t.picker.needsKey}</span>{/if}
             </button>
           </div>
         {/each}
 
         <div class="foot">
-          <button class="opt add-row" onclick={manageModels}>✦ Manage models &amp; endpoints…</button>
+          <button class="opt add-row" onclick={manageModels}>{i18n.t.picker.manageModels}</button>
         </div>
       </div>
     {/if}
@@ -138,21 +139,21 @@
       onclick={() => (modelOpen = !modelOpen)}
       disabled={!models.length && capability !== "batch"}
     >
-      <span class="lbl">{model?.name ?? (models.length ? "Model" : "No model")}</span>
+      <span class="lbl">{model?.name ?? (models.length ? i18n.t.picker.model : i18n.t.picker.noModel)}</span>
       <span class="caret"></span>
     </button>
     {#if modelOpen}
-      <button class="bg" aria-label="Close" onclick={() => (modelOpen = false)}></button>
+      <button class="bg" aria-label={i18n.t.common.close} onclick={() => (modelOpen = false)}></button>
       <div class="menu" transition:fly={{ y: -6, duration: 120 }}>
         {#each models as m (m.id)}
           <div class="opt-row">
             <button class="opt" class:sel={m.id === modelId} onclick={() => pickModel(m.id)}>
               <span class="opt-name">{m.name}</span>
-              {#if m.recommended}<span class="tag">recommended</span>{/if}
-              {#if m.custom}<span class="tag">custom</span>{/if}
+              {#if m.recommended}<span class="tag">{i18n.t.picker.recommended}</span>{/if}
+              {#if m.custom}<span class="tag">{i18n.t.picker.custom}</span>{/if}
             </button>
             {#if m.custom}
-              <button class="rm" aria-label={`Remove ${m.name}`} onclick={() => removeCustom(m.id)}
+              <button class="rm" aria-label={i18n.t.picker.removeModel(m.name)} onclick={() => removeCustom(m.id)}
                 >×</button
               >
             {/if}
@@ -171,18 +172,18 @@
                 />
                 <input
                   class="in"
-                  placeholder="Display name (optional)"
+                  placeholder={i18n.t.picker.displayName}
                   bind:value={customName}
                   onkeydown={(e) => e.key === "Enter" && confirmAdd()}
                 />
                 {#if addError}<span class="err">{addError}</span>{/if}
                 <div class="row">
-                  <button class="ghost" onclick={cancelAdd}>Cancel</button>
-                  <button class="add-btn" disabled={!customId.trim()} onclick={confirmAdd}>Add</button>
+                  <button class="ghost" onclick={cancelAdd}>{i18n.t.common.cancel}</button>
+                  <button class="add-btn" disabled={!customId.trim()} onclick={confirmAdd}>{i18n.t.common.add}</button>
                 </div>
               </div>
             {:else}
-              <button class="opt add-row" onclick={() => (adding = true)}>+ Custom model…</button>
+              <button class="opt add-row" onclick={() => (adding = true)}>{i18n.t.picker.addCustom}</button>
             {/if}
           </div>
         {/if}

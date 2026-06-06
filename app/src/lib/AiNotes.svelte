@@ -22,6 +22,7 @@
     type ParamValue,
   } from "$lib/cloud.svelte";
   import ParamsPanel from "$lib/ParamsPanel.svelte";
+  import { i18n } from "$lib/i18n.svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
   import { onMount } from "svelte";
@@ -124,17 +125,19 @@
   });
 
   // Built-in prompts are just starting points — pick one, then edit freely. "Summary" is one of many.
-  const TEMPLATES = [
+  // $derived so the menu labels follow the UI language. The prompts are the LLM instructions and
+  // stay as written (they tell the model to "reply in the spoken language").
+  const TEMPLATES = $derived([
     {
       icon: "✦",
-      label: "Summary",
+      label: i18n.t.assist.tmplSummary,
       prompt:
         "Summarize the conversation so far: a one or two sentence overview, then 3-8 bullet points of \
 the key topics, decisions, and outcomes. Reply in the spoken language. Markdown only, no preamble.",
     },
     {
       icon: "☑",
-      label: "Action items",
+      label: i18n.t.assist.tmplActionItems,
       prompt:
         "Extract concrete action items as a Markdown checklist in the spoken language. Format each as \
 '- [ ] <task> — <owner if named> (<due if mentioned>)'. Only real, actionable tasks; if none, reply \
@@ -142,7 +145,7 @@ the key topics, decisions, and outcomes. Reply in the spoken language. Markdown 
     },
     {
       icon: "◎",
-      label: "Live hints (coach)",
+      label: i18n.t.assist.tmplLiveHints,
       prompt:
         "You are a live meeting copilot. From the recent conversation, give 2-4 very brief, actionable \
 hints for the speaker right now — a question to ask next, a fact to verify, a point to clarify, or a \
@@ -150,18 +153,18 @@ risk to flag. Reply in the spoken language as a short bullet list, no preamble."
     },
     {
       icon: "⊞",
-      label: "Decisions & owners",
+      label: i18n.t.assist.tmplDecisions,
       prompt:
         "List every decision made and who owns it as a Markdown table with columns Decision | Owner | \
 Notes, in the spoken language. If there are no decisions, say so. No preamble.",
     },
     {
       icon: "⇄",
-      label: "Translate to English",
+      label: i18n.t.assist.tmplTranslate,
       prompt: "Translate the transcript into clear, natural English, preserving speaker turns. No preamble.",
     },
-    { icon: "✎", label: "Blank", prompt: "" },
-  ];
+    { icon: "✎", label: i18n.t.assist.tmplBlank, prompt: "" },
+  ]);
 
   // The realtime prompt ships with the full grounding rules visible + editable right here — there is NO
   // hidden backend instruction. A realtime voice model defaults to chatting (it will greet you and
@@ -578,8 +581,8 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
   <div class="empty">
     <span class="empty-icon">✦</span>
     <p>
-      Add an AI model for notes and live hints — your gateway, a local Ollama, or OpenAI.
-      <button class="link" onclick={openEndpointsModal}>Manage in ✦ Models</button>.
+      {i18n.t.assist.emptyText}
+      <button class="link" onclick={openEndpointsModal}>{i18n.t.assist.manageInModels}</button>.
     </p>
   </div>
 {:else}
@@ -591,7 +594,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
         <span class="caret"></span>
       </button>
       {#if modelOpen}
-        <button class="scrim" aria-label="Close" onclick={() => (modelOpen = false)}></button>
+        <button class="scrim" aria-label={i18n.t.common.close} onclick={() => (modelOpen = false)}></button>
         <!-- Two-pane picker: providers (left) → that provider's models (right), like the transcription
              picker — so the long flat list becomes a browsable per-vendor structure. -->
         <div class="menu two-pane">
@@ -604,7 +607,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
                   onclick={() => (mpProvider = g.provider.id)}
                 >
                   <span class="mp-cat-name">{g.provider.name}</span>
-                  {#if !g.provider.keySet}<span class="mp-cat-dot" title="API key needed"></span>{/if}
+                  {#if !g.provider.keySet}<span class="mp-cat-dot" title={i18n.t.assist.apiKeyNeeded}></span>{/if}
                 </button>
               {/each}
             </div>
@@ -633,10 +636,10 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     {#if collapsed}
       <div class="ctl-right">
         {#if runningRealtime}
-          <button class="hint" onclick={hintNow} title="Pull a reply now">✨ Hint</button>
+          <button class="hint" onclick={hintNow} title={i18n.t.assist.hintNow}>✨ {i18n.t.assist.hint}</button>
         {/if}
-        <button class="stop" onclick={stopAssist}>◼ Stop</button>
-        <button class="clear" onclick={clearFeed} disabled={!feed.length}>Clear</button>
+        <button class="stop" onclick={stopAssist}>◼ {i18n.t.assist.stop}</button>
+        <button class="clear" onclick={clearFeed} disabled={!feed.length}>{i18n.t.common.clear}</button>
       </div>
     {/if}
   </div>
@@ -647,17 +650,17 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
   <div class="body" class:scroll={!collapsed}>
     {#if !collapsed}
     {#if provider && !provider.keySet}
-      <button class="keyrow" onclick={openEndpointsModal}>⚠ {provider.name} needs an API key — add it</button>
+      <button class="keyrow" onclick={openEndpointsModal}>{i18n.t.assist.needsKey(provider.name)}</button>
     {/if}
 
     <div class="phead">
-      <span class="plabel">Prompt</span>
+      <span class="plabel">{i18n.t.assist.prompt}</span>
       <div class="tmpl">
         <button class="tmpl-trigger" class:open={templatesOpen} onclick={() => (templatesOpen = !templatesOpen)}>
-          Templates <span class="caret"></span>
+          {i18n.t.assist.templates} <span class="caret"></span>
         </button>
         {#if templatesOpen}
-          <button class="scrim" aria-label="Close" onclick={() => (templatesOpen = false)}></button>
+          <button class="scrim" aria-label={i18n.t.common.close} onclick={() => (templatesOpen = false)}></button>
           <div class="menu tmpl-menu">
             {#each TEMPLATES as t (t.label)}
               <button class="menu-opt" onclick={() => useTemplate(t.prompt)}>
@@ -673,7 +676,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
       class="prompt"
       rows="3"
       bind:value={prompt}
-      placeholder="What should the assistant do with the transcript? Pick a template above or write your own."
+      placeholder={i18n.t.assist.promptPlaceholder}
     ></textarea>
 
     <!-- Advanced model params, rendered from the generic schema — a chat model's sampling knobs, or a
@@ -682,7 +685,7 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     {#if assistParamSpecs.length}
       <div class="adv">
         <button class="adv-trigger" class:open={advancedOpen} onclick={() => (advancedOpen = !advancedOpen)}>
-          <span class="caret"></span> Advanced
+          <span class="caret"></span> {i18n.t.assist.advanced}
         </button>
         {#if advancedOpen}
           <div class="adv-body">
@@ -700,20 +703,20 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
         disabled={connecting || running || !provider?.keySet || !model || !prompt.trim() || realtimeNeedsSession}
         onclick={start}
       >
-        {#if connecting || running}<span class="btn-spin"></span>{connecting ? "Connecting…" : "Working…"}{:else}{selectedKind === "realtime" ? "⚡ Start" : "▸ Start"}{/if}
+        {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}
       </button>
-      <button class="clear act-clear" onclick={clearFeed} disabled={!feed.length}>Clear</button>
+      <button class="clear act-clear" onclick={clearFeed} disabled={!feed.length}>{i18n.t.common.clear}</button>
     </div>
 
     {#if realtimeNeedsSession}
-      <p class="rt-note">⚡ Real-time assist listens to live audio — use it in a running Live session.</p>
+      <p class="rt-note">{i18n.t.assist.realtimeNote}</p>
     {/if}
   {/if}
 
   {#if error}
     <div class="out-error">
       <span class="out-error-msg">{error}</span>
-      <button class="out-error-x" aria-label="Dismiss" onclick={() => (error = "")}>×</button>
+      <button class="out-error-x" aria-label={i18n.t.common.dismiss} onclick={() => (error = "")}>×</button>
     </div>
   {/if}
 
@@ -723,19 +726,18 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
       <div class="entry">
         <div class="entry-meta">
           <span class="entry-time">{clock(e.at)}</span>
-          <button class="entry-copy" aria-label="Copy" onclick={() => copyEntry(e.text)}>⧉</button>
+          <button class="entry-copy" aria-label={i18n.t.common.copy} onclick={() => copyEntry(e.text)}>⧉</button>
         </div>
         <div class="entry-text">{e.text}{#if e.streaming}<span class="cursor"></span>{/if}</div>
       </div>
     {:else}
       {#if !running}
         <p class="feed-hint">
-          {#if collapsed}Listening — hints will appear here as you talk.{:else}Press <em>Start</em>
-            {sessionRunning ? "for rolling hints from the conversation" : "to summarize the transcript"}.{/if}
+          {#if collapsed}{i18n.t.assist.listening}{:else}{i18n.t.assist.pressBefore}<em>{i18n.t.live.empty.action}</em>{sessionRunning ? i18n.t.assist.pressRolling : i18n.t.assist.pressSummary}{/if}
         </p>
       {/if}
     {/each}
-    {#if running && streamId === null}<div class="working"><span class="spin"></span>Working…</div>{/if}
+    {#if running && streamId === null}<div class="working"><span class="spin"></span>{i18n.t.assist.working}</div>{/if}
   </div>
   </div>
 {/if}

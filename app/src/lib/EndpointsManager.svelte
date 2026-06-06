@@ -11,6 +11,7 @@
     removeCloudEndpoint,
     setCloudKey,
   } from "$lib/cloud.svelte";
+  import { i18n } from "$lib/i18n.svelte";
 
   // Content-only: the host (the Settings dialog) owns the modal chrome; this just renders the
   // AI-models & endpoints manager body.
@@ -159,8 +160,8 @@
         cloud transcription and AI notes/assist.
       </p>
       <label class="ep-field">
-        <span class="ep-label">Name</span>
-        <input class="ep-in" bind:value={name} placeholder="e.g. My gateway" />
+        <span class="ep-label">{i18n.t.endpoints.name}</span>
+        <input class="ep-in" bind:value={name} placeholder={i18n.t.endpoints.namePlaceholder} />
       </label>
       <label class="ep-field">
         <span class="ep-label">Base URL</span>
@@ -171,13 +172,13 @@
         <input class="ep-in" bind:value={model} placeholder="e.g. gpt-4o-mini / metis-coder" />
       </label>
       <label class="ep-field">
-        <span class="ep-label">API key {#if editing !== "new"}<em>(leave blank to keep)</em>{/if}</span>
+        <span class="ep-label">{i18n.t.endpoints.apiKey} {#if editing !== "new"}<em>{i18n.t.endpoints.leaveBlank}</em>{/if}</span>
         <input class="ep-in" type="password" bind:value={apiKey} placeholder="sk-…" />
       </label>
       <details class="ep-adv">
-        <summary class="ep-adv-sum">Advanced — assist parameters &amp; transcription</summary>
+        <summary class="ep-adv-sum">{i18n.t.endpoints.advanced}</summary>
 
-        <span class="ep-subhead">AI notes / assist</span>
+        <span class="ep-subhead">{i18n.t.endpoints.assistHead}</span>
         <div class="ep-grid">
           <label class="ep-field">
             <span class="ep-label">Temperature</span>
@@ -185,21 +186,21 @@
           </label>
           <label class="ep-field">
             <span class="ep-label">Max reply tokens</span>
-            <input class="ep-in" type="number" min="0" bind:value={maxTokens} placeholder="provider default" />
+            <input class="ep-in" type="number" min="0" bind:value={maxTokens} placeholder={i18n.t.endpoints.providerDefault} />
           </label>
           <label class="ep-field">
             <span class="ep-label">Context size (tokens)</span>
-            <input class="ep-in" type="number" min="0" bind:value={contextTokens} placeholder="no limit" />
+            <input class="ep-in" type="number" min="0" bind:value={contextTokens} placeholder={i18n.t.endpoints.noLimit} />
           </label>
           <label class="ep-field">
             <span class="ep-label">top_p</span>
-            <input class="ep-in" type="number" step="0.05" min="0" max="1" bind:value={topP} placeholder="provider default" />
+            <input class="ep-in" type="number" step="0.05" min="0" max="1" bind:value={topP} placeholder={i18n.t.endpoints.providerDefault} />
           </label>
         </div>
         <label class="ep-field">
-          <span class="ep-label">System prompt</span>
+          <span class="ep-label">{i18n.t.endpoints.systemPrompt}</span>
           <textarea class="ep-in ep-area" rows="2" bind:value={systemPrompt}
-            placeholder="Standing instruction prepended to every assist task (persona, language, style)."
+            placeholder={i18n.t.endpoints.systemPromptPlaceholder}
           ></textarea>
         </label>
         <p class="ep-hint">
@@ -207,7 +208,7 @@
           instead of overflowing the model — it covers the whole transcript.
         </p>
 
-        <span class="ep-subhead">Transcription API shape</span>
+        <span class="ep-subhead">{i18n.t.endpoints.apiShapeHead}</span>
         <div class="ep-seg">
           <button class:active={protocol === "openai"} onclick={() => (protocol = "openai")}>
             Audio transcriptions
@@ -227,19 +228,19 @@
       {#if error}<div class="ep-error">{error}</div>{/if}
 
       <div class="ep-actions">
-        <button class="ep-ghost" onclick={reset} disabled={busy}>Cancel</button>
+        <button class="ep-ghost" onclick={reset} disabled={busy}>{i18n.t.common.cancel}</button>
         <button
           class="ep-save"
           disabled={busy || !name.trim() || !baseUrl.trim() || !model.trim()}
-          onclick={save}>{editing === "new" ? "Add" : "Save"}</button
+          onclick={save}>{editing === "new" ? i18n.t.common.add : i18n.t.common.save}</button
         >
       </div>
     </div>
   {:else}
-    <p class="ep-intro">Keys are stored only on this device, and sent only to the provider they belong to.</p>
+    <p class="ep-intro">{i18n.t.endpoints.intro}</p>
 
     <div class="ep-section">
-      <span class="ep-head">Built-in</span>
+      <span class="ep-head">{i18n.t.endpoints.builtin}</span>
       <ul class="ep-list">
         {#each builtins as p (p.id)}
           <li class="ep-row">
@@ -248,7 +249,7 @@
               {#if keyEditId !== p.id}
                 <span class="ep-meta">
                   {#if p.keySet}<span class="ep-keyed">{p.keyHint}</span>{:else}<span class="ep-nokey"
-                      >no key yet</span
+                      >{i18n.t.endpoints.noKeyYet}</span
                     >{/if}
                 </span>
               {/if}
@@ -265,7 +266,7 @@
                     autocapitalize="off"
                     spellcheck="false"
                     autofocus
-                    placeholder="Paste API key"
+                    placeholder={i18n.t.endpoints.keyPlaceholder}
                     bind:value={keyDraft}
                     onkeydown={(e) => {
                       if (e.key === "Enter") saveKey(p.id);
@@ -273,20 +274,20 @@
                     }}
                   />
                   <button class="ep-reveal" type="button" onclick={() => (reveal = !reveal)}>
-                    {reveal ? "Hide" : "Show"}
+                    {reveal ? i18n.t.endpoints.hide : i18n.t.endpoints.show}
                   </button>
                 </div>
-                <button class="ep-mini accent" onclick={() => saveKey(p.id)} disabled={!keyDraft.trim()}>Save</button>
-                <button class="ep-mini" onclick={cancelKey}>Cancel</button>
+                <button class="ep-mini accent" onclick={() => saveKey(p.id)} disabled={!keyDraft.trim()}>{i18n.t.common.save}</button>
+                <button class="ep-mini" onclick={cancelKey}>{i18n.t.common.cancel}</button>
               </div>
             {:else}
               <div class="ep-row-actions">
                 {#if p.keySet}
-                  <button class="ep-mini" onclick={() => startKey(p.id)}>Edit</button>
-                  <button class="ep-mini danger" onclick={() => setCloudKey(p.id, "")}>Remove</button>
+                  <button class="ep-mini" onclick={() => startKey(p.id)}>{i18n.t.common.edit}</button>
+                  <button class="ep-mini danger" onclick={() => setCloudKey(p.id, "")}>{i18n.t.common.remove}</button>
                 {:else}
-                  <button class="ep-mini" onclick={() => getKey(p.keysUrl)}>Get a key ↗</button>
-                  <button class="ep-mini accent" onclick={() => startKey(p.id)}>Add key</button>
+                  <button class="ep-mini" onclick={() => getKey(p.keysUrl)}>{i18n.t.endpoints.getKey}</button>
+                  <button class="ep-mini accent" onclick={() => startKey(p.id)}>{i18n.t.endpoints.addKey}</button>
                 {/if}
               </div>
             {/if}
@@ -296,7 +297,7 @@
     </div>
 
     <div class="ep-section">
-      <span class="ep-head">OpenAI-compatible endpoints</span>
+      <span class="ep-head">{i18n.t.endpoints.customHead}</span>
       {#if customs.length}
         <ul class="ep-list">
           {#each customs as p (p.id)}
@@ -305,13 +306,13 @@
                 <span class="ep-name">{p.name}</span>
                 <span class="ep-meta">
                   {p.models[0]?.id ?? "—"} · {p.baseUrl}
-                  {#if p.keySet}· <span class="ep-keyed">key set</span>{:else}·
-                    <span class="ep-nokey">no key</span>{/if}
+                  {#if p.keySet}· <span class="ep-keyed">{i18n.t.endpoints.keySet}</span>{:else}·
+                    <span class="ep-nokey">{i18n.t.endpoints.noKey}</span>{/if}
                 </span>
               </div>
               <div class="ep-row-actions">
-                <button class="ep-mini" onclick={() => startEdit(p)}>Edit</button>
-                <button class="ep-mini danger" onclick={() => remove(p.id)} disabled={busy}>Remove</button>
+                <button class="ep-mini" onclick={() => startEdit(p)}>{i18n.t.common.edit}</button>
+                <button class="ep-mini danger" onclick={() => remove(p.id)} disabled={busy}>{i18n.t.common.remove}</button>
               </div>
             </li>
           {/each}
@@ -322,7 +323,7 @@
           (<code>http://localhost:11434/v1</code>), or OpenAI.
         </p>
       {/if}
-      <button class="ep-add" onclick={startAdd}>+ Add OpenAI Compatible Endpoint</button>
+      <button class="ep-add" onclick={startAdd}>{i18n.t.endpoints.addEndpoint}</button>
     </div>
   {/if}
 
