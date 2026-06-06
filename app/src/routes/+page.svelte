@@ -93,11 +93,13 @@
   let downloading = $state<string | null>(null);
   let downloadProgress = $state<{ downloaded: number; total: number } | null>(null);
   let downloadFailed = $state<string | null>(null);
-  // Delete (free disk space) state: which model is mid-confirm, which is being deleted, and a brief
-  // "freed N" note shown after a successful delete.
+  // Delete (free disk space) state: the model pending the confirm dialog, whether the dialog is open,
+  // which model is being deleted, and a brief "freed N" note after a successful delete.
   let confirmingDelete = $state<string | null>(null);
+  let deleteModalOpen = $state(false);
   let deleting = $state<string | null>(null);
   let justFreed = $state<{ name: string; bytes: number } | null>(null);
+  const dmToDelete = $derived(models.find((m) => m.id === confirmingDelete));
   // Core ML (Neural Engine) encoder download, tracked separately from the model download.
   let downloadingCoreml = $state<string | null>(null);
   let coremlProgress = $state<{ downloaded: number; total: number } | null>(null);
@@ -676,15 +678,19 @@
       error = String(e);
     } finally {
       deleting = null;
-      confirmingDelete = null;
+      deleteModalOpen = false;
     }
   }
 
-  // Reset the inline delete confirm + freed note whenever the picker closes, so reopening it never
-  // shows a stale confirm or banner.
+  // Closing the confirm dialog (Cancel / Escape / backdrop / after a delete) clears the pending target.
+  $effect(() => {
+    if (!deleteModalOpen) confirmingDelete = null;
+  });
+
+  // Closing the picker dismisses any open confirm dialog + freed note, so reopening starts clean.
   $effect(() => {
     if (!pickerOpen) {
-      confirmingDelete = null;
+      deleteModalOpen = false;
       justFreed = null;
     }
   });
@@ -1603,47 +1609,31 @@
                           {#if m.fit === "heavy"}<span class="picker-opt-note">{m.fitReason}</span>{/if}
                         </button>
                         {#if m.deletable}
-                          {#if confirmingDelete === m.id}
-                            <span class="picker-del-confirm">
-                              <span class="picker-del-frees">−{fmtSize(m.sizeBytes)}</span>
-                              <button
-                                class="picker-del-btn cancel"
-                                title="Keep model"
-                                aria-label="Cancel delete"
-                                onclick={() => (confirmingDelete = null)}>✕</button
-                              >
-                              <button
-                                class="picker-del-btn confirm"
-                                title="Delete and free {fmtSize(m.sizeBytes)}"
-                                aria-label="Confirm delete"
-                                disabled={deleting === m.id}
-                                onclick={() => removeModel(m.id)}>✓</button
-                              >
-                            </span>
-                          {:else}
-                            <button
-                              class="picker-del-btn trash"
-                              title="Delete model · frees {fmtSize(m.sizeBytes)}"
-                              aria-label="Delete {m.name}, frees {fmtSize(m.sizeBytes)}"
-                              onclick={() => (confirmingDelete = m.id)}
+                          <button
+                            class="picker-del-btn trash"
+                            title="Delete model · frees {fmtSize(m.sizeBytes)}"
+                            aria-label="Delete {m.name}, frees {fmtSize(m.sizeBytes)}"
+                            onclick={() => {
+                              confirmingDelete = m.id;
+                              deleteModalOpen = true;
+                            }}
+                          >
+                            <svg
+                              viewBox="0 0 16 16"
+                              width="14"
+                              height="14"
+                              fill="none"
+                              stroke="currentColor"
+                              stroke-width="1.4"
+                              stroke-linecap="round"
+                              stroke-linejoin="round"
+                              aria-hidden="true"
                             >
-                              <svg
-                                viewBox="0 0 16 16"
-                                width="14"
-                                height="14"
-                                fill="none"
-                                stroke="currentColor"
-                                stroke-width="1.4"
-                                stroke-linecap="round"
-                                stroke-linejoin="round"
-                                aria-hidden="true"
-                              >
-                                <path
-                                  d="M2.5 4h11M6 4V2.9c0-.5.4-.9.9-.9h2.2c.5 0 .9.4.9.9V4m1.4 0v8.6c0 .6-.4 1-1 1H4.8c-.6 0-1-.4-1-1V4M6.5 7v4M9.5 7v4"
-                                />
-                              </svg>
-                            </button>
-                          {/if}
+                              <path
+                                d="M2.5 4h11M6 4V2.9c0-.5.4-.9.9-.9h2.2c.5 0 .9.4.9.9V4m1.4 0v8.6c0 .6-.4 1-1 1H4.8c-.6 0-1-.4-1-1V4M6.5 7v4M9.5 7v4"
+                              />
+                            </svg>
+                          </button>
                         {/if}
                       </div>
                     {/if}
@@ -2525,6 +2515,27 @@
       {/if}
     </section>
   {/if}
+  <!-- Delete-model confirmation: a focused dialog so removing a multi-GB model is a deliberate act,
+       never a one-click mistake. -->
+  <Modal bind:open={deleteModalOpen} title="Delete model?">
+    {#if dmToDelete}
+      <p class="confirm-text">
+        Delete <strong>{dmToDelete.name}</strong> and free
+        <strong>{fmtSize(dmToDelete.sizeBytes)}</strong> of disk space?
+      </p>
+      <p class="confirm-sub">It stays in the catalog — you can re-download it anytime.</p>
+      <div class="confirm-actions">
+        <button class="btn" onclick={() => (deleteModalOpen = false)}>Cancel</button>
+        <button
+          class="btn danger"
+          disabled={deleting === dmToDelete.id}
+          onclick={() => removeModel(dmToDelete.id)}
+        >
+          {deleting === dmToDelete.id ? "Deleting…" : "Delete"}
+        </button>
+      </div>
+    {/if}
+  </Modal>
   </div>
 </main>
 
@@ -3549,40 +3560,35 @@
     background: color-mix(in srgb, var(--stop) 12%, transparent);
   }
 
-  .picker-del-confirm {
-    flex: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-  }
-
-  .picker-del-frees {
-    font-family: var(--font-mono);
-    font-size: 11px;
-    color: var(--stop);
-    font-variant-numeric: tabular-nums;
-    white-space: nowrap;
-    margin-right: 1px;
-  }
-
-  .picker-del-btn.cancel:hover {
+  /* Delete confirmation dialog (reuses <Modal>): a deliberate two-button choice, not a one-click delete. */
+  .confirm-text {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
     color: var(--text);
-    background: var(--surface-active);
   }
 
-  .picker-del-btn.confirm {
-    color: var(--stop);
-    font-size: 13px;
+  .confirm-sub {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--muted);
   }
 
-  .picker-del-btn.confirm:hover {
-    color: #fff;
+  .confirm-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+
+  .btn.danger {
     background: var(--stop);
+    color: #fff;
+    border-color: var(--stop);
   }
 
-  .picker-del-btn.confirm:disabled {
-    opacity: 0.5;
-    cursor: default;
+  .btn.danger:hover {
+    background: color-mix(in srgb, var(--stop) 88%, #000);
   }
 
   /* Brief reclaim confirmation at the top of the local list. */
