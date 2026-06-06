@@ -294,6 +294,9 @@ export const en = {
     tmplNotes: "Detailed notes",
     tmplEmail: "Follow-up email",
     tmplQuestions: "Open questions",
+    tmplSales: "Sales copilot (live)",
+    tmplSupport: "Support copilot (live)",
+    tmplSentiment: "Sentiment & tone (live)",
     tmplBlank: "Blank",
   },
 

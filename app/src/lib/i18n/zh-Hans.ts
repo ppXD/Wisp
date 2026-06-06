@@ -258,6 +258,9 @@ export const zhHans: Messages = {
     tmplNotes: "详细纪要",
     tmplEmail: "跟进邮件",
     tmplQuestions: "未决问题",
+    tmplSales: "销售助手（实时）",
+    tmplSupport: "客服助手（实时）",
+    tmplSentiment: "情绪与语气（实时）",
     tmplBlank: "空白",
   },
 

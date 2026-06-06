@@ -258,6 +258,9 @@ export const zhHant: Messages = {
     tmplNotes: "詳細紀要",
     tmplEmail: "跟進郵件",
     tmplQuestions: "未決問題",
+    tmplSales: "銷售助手（即時）",
+    tmplSupport: "客服助手（即時）",
+    tmplSentiment: "情緒與語氣（即時）",
     tmplBlank: "空白",
   },
 
