@@ -57,6 +57,7 @@
     // (this OS/machine can't run it). Blocked models are shown greyed with the reason, never started.
     fit: string;
     fitReason?: string | null;
+    deletable: boolean;
   };
 
   let running = $state(false);
@@ -91,6 +92,11 @@
   let downloading = $state<string | null>(null);
   let downloadProgress = $state<{ downloaded: number; total: number } | null>(null);
   let downloadFailed = $state<string | null>(null);
+  // Delete (free disk space) state: which model is mid-confirm, which is being deleted, and a brief
+  // "freed N" note shown after a successful delete.
+  let confirmingDelete = $state<string | null>(null);
+  let deleting = $state<string | null>(null);
+  let justFreed = $state<{ name: string; bytes: number } | null>(null);
   // Core ML (Neural Engine) encoder download, tracked separately from the model download.
   let downloadingCoreml = $state<string | null>(null);
   let coremlProgress = $state<{ downloaded: number; total: number } | null>(null);
@@ -649,6 +655,34 @@
       error = String(e);
     }
   }
+
+  // Delete an installed local model's files to reclaim disk space. The row flips back to its download
+  // state on refresh; if it was the active model the backend clears the active selection, so Start just
+  // gates until another model is picked. A brief "freed N" note confirms the reclaim.
+  async function removeModel(id: string) {
+    const m = models.find((x) => x.id === id);
+    deleting = id;
+    error = "";
+    try {
+      await invoke("remove_model", { id });
+      justFreed = m ? { name: m.name, bytes: m.sizeBytes } : null;
+      await refreshModels();
+    } catch (e) {
+      error = String(e);
+    } finally {
+      deleting = null;
+      confirmingDelete = null;
+    }
+  }
+
+  // Reset the inline delete confirm + freed note whenever the picker closes, so reopening it never
+  // shows a stale confirm or banner.
+  $effect(() => {
+    if (!pickerOpen) {
+      confirmingDelete = null;
+      justFreed = null;
+    }
+  });
 
   async function ensureListener() {
     if (unlisten) return;
@@ -1482,6 +1516,11 @@
               </div>
               <div class="picker-detail">
                 {#if pickerTab === "local"}
+                  {#if justFreed}
+                    <div class="picker-freed">
+                      ✓ Freed {fmtSize(justFreed.bytes)} — deleted {justFreed.name}
+                    </div>
+                  {/if}
                   {#each localModelsFor(pickerLocalLabel) as m (m.id)}
                     {#if m.fit === "blocked"}
                       <div class="picker-opt blocked" title={m.fitReason ?? ""}>
@@ -1489,18 +1528,64 @@
                         <span class="picker-opt-note">{m.fitReason}</span>
                       </div>
                     {:else}
-                      <button
-                        class="picker-opt"
-                        class:sel={localSelected(m.id)}
-                        onclick={() => choose(m.id)}
-                      >
-                        <span class="picker-opt-name">{m.name}</span>
-                        {#if m.id === recommendedId}<span class="picker-tag rec">{recommendTag}</span>{/if}
-                        {#if m.active}<span class="picker-tag">active</span>
-                        {:else if !m.installed}<span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span
-                          >{/if}
-                        {#if m.fit === "heavy"}<span class="picker-opt-note">{m.fitReason}</span>{/if}
-                      </button>
+                      <div class="picker-opt-row">
+                        <button
+                          class="picker-opt"
+                          class:sel={localSelected(m.id)}
+                          onclick={() => choose(m.id)}
+                        >
+                          <span class="picker-opt-name">{m.name}</span>
+                          {#if m.id === recommendedId}<span class="picker-tag rec">{recommendTag}</span
+                            >{/if}
+                          {#if m.active}<span class="picker-tag">active</span>
+                          {:else if !m.installed}<span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span
+                            >{/if}
+                          {#if m.fit === "heavy"}<span class="picker-opt-note">{m.fitReason}</span>{/if}
+                        </button>
+                        {#if m.deletable}
+                          {#if confirmingDelete === m.id}
+                            <span class="picker-del-confirm">
+                              <span class="picker-del-frees">−{fmtSize(m.sizeBytes)}</span>
+                              <button
+                                class="picker-del-btn cancel"
+                                title="Keep model"
+                                aria-label="Cancel delete"
+                                onclick={() => (confirmingDelete = null)}>✕</button
+                              >
+                              <button
+                                class="picker-del-btn confirm"
+                                title="Delete and free {fmtSize(m.sizeBytes)}"
+                                aria-label="Confirm delete"
+                                disabled={deleting === m.id}
+                                onclick={() => removeModel(m.id)}>✓</button
+                              >
+                            </span>
+                          {:else}
+                            <button
+                              class="picker-del-btn trash"
+                              title="Delete model · frees {fmtSize(m.sizeBytes)}"
+                              aria-label="Delete {m.name}, frees {fmtSize(m.sizeBytes)}"
+                              onclick={() => (confirmingDelete = m.id)}
+                            >
+                              <svg
+                                viewBox="0 0 16 16"
+                                width="14"
+                                height="14"
+                                fill="none"
+                                stroke="currentColor"
+                                stroke-width="1.4"
+                                stroke-linecap="round"
+                                stroke-linejoin="round"
+                                aria-hidden="true"
+                              >
+                                <path
+                                  d="M2.5 4h11M6 4V2.9c0-.5.4-.9.9-.9h2.2c.5 0 .9.4.9.9V4m1.4 0v8.6c0 .6-.4 1-1 1H4.8c-.6 0-1-.4-1-1V4M6.5 7v4M9.5 7v4"
+                                />
+                              </svg>
+                            </button>
+                          {/if}
+                        {/if}
+                      </div>
                     {/if}
                   {/each}
                 {:else if pickerCat === REC_CLOUD}
@@ -3296,6 +3381,105 @@
     background: color-mix(in srgb, var(--accent) 12%, transparent);
     padding: 1px 6px;
     border-radius: 999px;
+  }
+
+  /* ── Delete an installed model (reclaim disk space) ── */
+  /* The row wraps the selectable button + a trailing trash / inline-confirm as one flex row. */
+  .picker-opt-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .picker-opt-row .picker-opt {
+    width: auto;
+    flex: 1;
+    min-width: 0;
+  }
+
+  .picker-del-btn {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    padding: 0;
+    font-family: inherit;
+    font-size: 12px;
+    line-height: 1;
+    color: var(--muted);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s,
+      opacity 0.12s;
+  }
+
+  /* The trash stays muted (more so until the row is hovered) so the list reads calm; it turns
+     destructive-red only on direct hover, right before the confirm. */
+  .picker-del-btn.trash {
+    opacity: 0.4;
+  }
+
+  .picker-opt-row:hover .picker-del-btn.trash,
+  .picker-del-btn.trash:focus-visible {
+    opacity: 0.75;
+  }
+
+  .picker-del-btn.trash:hover {
+    opacity: 1;
+    color: var(--stop);
+    background: color-mix(in srgb, var(--stop) 12%, transparent);
+  }
+
+  .picker-del-confirm {
+    flex: none;
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+  }
+
+  .picker-del-frees {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    color: var(--stop);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    margin-right: 1px;
+  }
+
+  .picker-del-btn.cancel:hover {
+    color: var(--text);
+    background: var(--surface-active);
+  }
+
+  .picker-del-btn.confirm {
+    color: var(--stop);
+    font-size: 13px;
+  }
+
+  .picker-del-btn.confirm:hover {
+    color: #fff;
+    background: var(--stop);
+  }
+
+  .picker-del-btn.confirm:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  /* Brief reclaim confirmation at the top of the local list. */
+  .picker-freed {
+    margin: 0 2px 6px;
+    padding: 6px 9px;
+    font-size: 12px;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 10%, transparent);
+    border-radius: 7px;
   }
 
   .active-model {
