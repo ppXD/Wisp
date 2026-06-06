@@ -5,6 +5,13 @@
     <link rel="icon" href="%sveltekit.assets%/favicon.png" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Wisp</title>
+    <script>
+      // Apply the saved colour theme before first paint so dark never flashes light on load.
+      try {
+        if (localStorage.getItem("wisp.theme") === "dark")
+          document.documentElement.dataset.theme = "dark";
+      } catch (e) {}
+    </script>
     %sveltekit.head%
   </head>
   <body data-sveltekit-preload-data="hover">
