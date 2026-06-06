@@ -182,10 +182,11 @@ fn google() -> CloudProvider {
             .recommended(),
             model(
                 "gemini-2.5-flash-native-audio-preview-12-2025",
-                "Gemini 2.5 Flash (native audio)",
+                "Gemini 2.5 Flash Live",
                 true,
                 false,
-                "Native-audio Live model — high-quality realtime transcription.",
+                "Prior-generation native-audio Live model — superseded by Gemini 3.1 Flash Live, kept \
+                 as a fallback.",
             ),
             // ── File (batch) models ──
             model(
