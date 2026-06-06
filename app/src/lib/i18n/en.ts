@@ -317,6 +317,12 @@ export const en = {
     hide: "Hide",
     addEndpoint: "+ Add OpenAI Compatible Endpoint",
     intro: "Keys are stored only on this device, and sent only to the provider they belong to.",
+    // Add-form note + empty-state line: the <strong>/<code>/proper nouns stay literal in the
+    // template, so the prose is split around them.
+    formNoteBefore: "An ",
+    formNoteAfter: " endpoint — base URL + key, like Cline or Ollama. Backs cloud transcription and AI notes/assist.",
+    emptyBefore: "Add your own OpenAI-compatible endpoint — your gateway, a local Ollama (",
+    emptyAfter: "), or OpenAI.",
   },
 
   // User-facing error toasts (set in <script>).

@@ -280,6 +280,10 @@ export const zhHans: Messages = {
     hide: "隐藏",
     addEndpoint: "+ 添加 OpenAI Compatible 端点",
     intro: "密钥只存储在本机，且只发送给所属的提供商。",
+    formNoteBefore: "一个 ",
+    formNoteAfter: " 端点 —— base URL + 密钥，类似 Cline 或 Ollama。支撑云端转写和 AI 笔记/辅助。",
+    emptyBefore: "添加你自己的 OpenAI-compatible 端点 —— 你的网关、本地 Ollama (",
+    emptyAfter: ")，或 OpenAI。",
   },
 
   error: {

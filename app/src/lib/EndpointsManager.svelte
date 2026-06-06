@@ -156,8 +156,7 @@
 {#if editing}
     <div class="ep-form">
       <p class="ep-formnote">
-        An <strong>OpenAI-compatible</strong> endpoint — base URL + key, like Cline or Ollama. Backs
-        cloud transcription and AI notes/assist.
+        {i18n.t.endpoints.formNoteBefore}<strong>OpenAI-compatible</strong>{i18n.t.endpoints.formNoteAfter}
       </p>
       <label class="ep-field">
         <span class="ep-label">{i18n.t.endpoints.name}</span>
@@ -319,8 +318,7 @@
         </ul>
       {:else}
         <p class="ep-empty">
-          Add your own OpenAI-compatible endpoint — your gateway, a local Ollama
-          (<code>http://localhost:11434/v1</code>), or OpenAI.
+          {i18n.t.endpoints.emptyBefore}<code>http://localhost:11434/v1</code>{i18n.t.endpoints.emptyAfter}
         </p>
       {/if}
       <button class="ep-add" onclick={startAdd}>{i18n.t.endpoints.addEndpoint}</button>
