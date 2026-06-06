@@ -184,6 +184,8 @@ export const zhHans: Messages = {
     speakers: "说话人",
     identifySpeakers: "区分说话人",
     model: "模型",
+    diarizeLabel: (short) =>
+      short === "standard (fast)" ? "标准（快速）" : short === "most accurate" ? "最精确" : short,
     audioHint: "默认采集你的麦克风 + 全部系统音频，并做回声消除；只要系统音频时，把麦克风设为关闭。",
     audioHintLocal: " 轻度最适合实时。",
     audioHintCloud: " 云端在服务端降噪 —— 在「高级参数」里调。",

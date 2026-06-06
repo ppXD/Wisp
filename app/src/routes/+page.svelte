@@ -1056,7 +1056,8 @@
       .join("\n"),
   );
   // Short segmented-control label for a diarization model (last "·" segment of its display name).
-  const diarizeShortName = (m: ModelInfo) => (m.name.split("·").pop() ?? m.name).trim();
+  const diarizeShortName = (m: ModelInfo) =>
+    i18n.t.advanced.diarizeLabel((m.name.split("·").pop() ?? m.name).trim());
 
   async function refreshDiarizeModels() {
     try {

@@ -206,6 +206,9 @@ export const en = {
     speakers: "Speakers",
     identifySpeakers: "Identify speakers",
     model: "Model",
+    // Diarization model variant labels (the suffix of the backend display_name). Unknown variants
+    // fall back to the original English.
+    diarizeLabel: (short: string): string => short,
     audioHint:
       "Defaults to your mic + all system audio with echo cancellation; for system audio only, set Microphone to Off.",
     audioHintLocal: " Light is the best fit for live.",

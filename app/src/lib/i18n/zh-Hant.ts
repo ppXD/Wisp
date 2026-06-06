@@ -184,6 +184,8 @@ export const zhHant: Messages = {
     speakers: "說話人",
     identifySpeakers: "區分說話人",
     model: "模型",
+    diarizeLabel: (short) =>
+      short === "standard (fast)" ? "標準（快速）" : short === "most accurate" ? "最精確" : short,
     audioHint: "預設擷取你的麥克風 + 全部系統音訊，並做回聲消除；只要系統音訊時，把麥克風設為關閉。",
     audioHintLocal: " 輕度最適合即時。",
     audioHintCloud: " 雲端在伺服器端降噪 —— 在「進階參數」裡調。",
