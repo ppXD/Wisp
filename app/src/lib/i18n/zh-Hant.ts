@@ -24,6 +24,18 @@ export const zhHant: Messages = {
   live: {
     loadingModels: "正在載入模型…",
 
+    // 刪除模型確認對話框（Live + File 選擇器共用）。
+    deleteModel: {
+      trashTitle: (size: string): string => `刪除模型 · 釋放 ${size}`,
+      trashAria: (name: string, size: string): string => `刪除 ${name}，釋放 ${size}`,
+      title: "刪除模型？",
+      body: (name: string, size: string): string => `刪除 ${name} 並釋放 ${size} 磁碟空間？`,
+      sub: "模型仍保留在目錄中 —— 隨時可重新下載。",
+      confirm: "刪除",
+      deleting: "刪除中…",
+      freed: (size: string, name: string): string => `已釋放 ${size} —— 已刪除 ${name}`,
+    },
+
     you: "我",
     them: "對方",
     youTip: (on, running) =>

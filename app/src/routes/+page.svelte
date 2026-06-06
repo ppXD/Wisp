@@ -1584,7 +1584,7 @@
                 {#if pickerTab === "local"}
                   {#if justFreed}
                     <div class="picker-freed">
-                      ✓ Freed {fmtSize(justFreed.bytes)} — deleted {justFreed.name}
+                      ✓ {i18n.t.live.deleteModel.freed(fmtSize(justFreed.bytes), justFreed.name)}
                     </div>
                   {/if}
                   {#each localModelsFor(pickerLocalLabel) as m (m.id)}
@@ -1611,8 +1611,8 @@
                         {#if m.deletable}
                           <button
                             class="picker-del-btn trash"
-                            title="Delete model · frees {fmtSize(m.sizeBytes)}"
-                            aria-label="Delete {m.name}, frees {fmtSize(m.sizeBytes)}"
+                            title={i18n.t.live.deleteModel.trashTitle(fmtSize(m.sizeBytes))}
+                            aria-label={i18n.t.live.deleteModel.trashAria(m.name, fmtSize(m.sizeBytes))}
                             onclick={() => {
                               confirmingDelete = m.id;
                               deleteModalOpen = true;
@@ -2517,21 +2517,20 @@
   {/if}
   <!-- Delete-model confirmation: a focused dialog so removing a multi-GB model is a deliberate act,
        never a one-click mistake. -->
-  <Modal bind:open={deleteModalOpen} title="Delete model?">
+  <Modal bind:open={deleteModalOpen} title={i18n.t.live.deleteModel.title}>
     {#if dmToDelete}
       <p class="confirm-text">
-        Delete <strong>{dmToDelete.name}</strong> and free
-        <strong>{fmtSize(dmToDelete.sizeBytes)}</strong> of disk space?
+        {i18n.t.live.deleteModel.body(dmToDelete.name, fmtSize(dmToDelete.sizeBytes))}
       </p>
-      <p class="confirm-sub">It stays in the catalog — you can re-download it anytime.</p>
+      <p class="confirm-sub">{i18n.t.live.deleteModel.sub}</p>
       <div class="confirm-actions">
-        <button class="btn" onclick={() => (deleteModalOpen = false)}>Cancel</button>
+        <button class="btn" onclick={() => (deleteModalOpen = false)}>{i18n.t.common.cancel}</button>
         <button
           class="btn danger"
           disabled={deleting === dmToDelete.id}
           onclick={() => removeModel(dmToDelete.id)}
         >
-          {deleting === dmToDelete.id ? "Deleting…" : "Delete"}
+          {deleting === dmToDelete.id ? i18n.t.live.deleteModel.deleting : i18n.t.live.deleteModel.confirm}
         </button>
       </div>
     {/if}

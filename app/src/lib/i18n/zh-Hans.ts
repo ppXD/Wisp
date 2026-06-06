@@ -24,6 +24,18 @@ export const zhHans: Messages = {
   live: {
     loadingModels: "正在加载模型…",
 
+    // 删除模型确认对话框（Live + File 选择器共用）。
+    deleteModel: {
+      trashTitle: (size: string): string => `删除模型 · 释放 ${size}`,
+      trashAria: (name: string, size: string): string => `删除 ${name}，释放 ${size}`,
+      title: "删除模型？",
+      body: (name: string, size: string): string => `删除 ${name} 并释放 ${size} 磁盘空间？`,
+      sub: "模型仍保留在目录中 —— 随时可重新下载。",
+      confirm: "删除",
+      deleting: "删除中…",
+      freed: (size: string, name: string): string => `已释放 ${size} —— 已删除 ${name}`,
+    },
+
     you: "我",
     them: "对方",
     youTip: (on, running) =>

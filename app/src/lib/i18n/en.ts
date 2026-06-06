@@ -28,6 +28,18 @@ export const en = {
   live: {
     loadingModels: "Loading models…",
 
+    // Delete-model confirmation dialog (shared by the Live + File pickers).
+    deleteModel: {
+      trashTitle: (size: string): string => `Delete model · frees ${size}`,
+      trashAria: (name: string, size: string): string => `Delete ${name}, frees ${size}`,
+      title: "Delete model?",
+      body: (name: string, size: string): string => `Delete ${name} and free ${size} of disk space?`,
+      sub: "It stays in the catalog — you can re-download it anytime.",
+      confirm: "Delete",
+      deleting: "Deleting…",
+      freed: (size: string, name: string): string => `Freed ${size} — deleted ${name}`,
+    },
+
     you: "You",
     them: "Them",
     // Tooltip for the You/Them capture toggles — depends on whether the source is on and whether a
