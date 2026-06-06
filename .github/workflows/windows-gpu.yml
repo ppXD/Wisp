@@ -1,0 +1,53 @@
+# Smoke-builds the Windows app with the from-source DirectML GPU backend (sherpa-gpu).
+#
+# There is no prebuilt DirectML sherpa-onnx binary, so this compiles sherpa-onnx (and onnxruntime)
+# from source — a ~2h build on GitHub's 2-core Windows runners. That is far too slow to gate every
+# PR (ci.yml builds the fast prebuilt CPU app instead), so this runs weekly + on demand. Its jobs:
+#   1. prove the DirectML build path still compiles between releases (so a release isn't the first
+#      time we discover it broke);
+#   2. surface the runtime DLL set the installer must bundle (the from-source GPU build emits a
+#      different set than the prebuilt CPU download — see the "List the DirectML runtime DLLs" step).
+#
+# The shipped GPU installer is produced by release.yml on a tag; this workflow only validates.
+name: Windows GPU smoke
+
+on:
+  schedule:
+    - cron: "0 6 * * 1" # Mondays 06:00 UTC
+  workflow_dispatch: {}
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: app builds (windows, DirectML)
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Build the frontend (tauri-build needs the dist)
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+      # Build twice: the first pass compiles the engine + emits its DLLs (and may trip the same
+      # build.rs DLL-staging race the prebuilt CPU job pre-stages around); the second pass, with the
+      # engine now cached, completes the app once the DLLs are present. CMake + MSVC are preinstalled
+      # on windows-latest, so no extra toolchain is needed.
+      - name: Build the app with DirectML from source (~2h)
+        shell: pwsh
+        run: |
+          cargo build --manifest-path app/src-tauri/Cargo.toml --no-default-features --features sherpa-gpu
+          if (-not $?) { Write-Host "first pass tripped the DLL-staging race; retrying with the engine built" }
+          cargo build --manifest-path app/src-tauri/Cargo.toml --no-default-features --features sherpa-gpu
+      # Always list the produced DLLs — even if the app build failed at staging — so we learn the
+      # exact DirectML runtime set the installer (release.yml + tauri.windows.conf.json) must bundle.
+      - name: List the DirectML runtime DLLs the installer must bundle
+        if: always()
+        shell: pwsh
+        run: Get-ChildItem -Path app\src-tauri\target\debug -Filter *.dll -ErrorAction SilentlyContinue | Select-Object Name, Length

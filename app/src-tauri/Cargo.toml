@@ -30,6 +30,16 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 name = "Wisp"
 path = "src/main.rs"
 
+[features]
+default = ["sherpa-cpu"]
+# Prebuilt CPU sherpa-onnx + onnxruntime — the fast default for every platform, CI, and dev; the CPU
+# release ships this too (~5-minute build).
+sherpa-cpu = ["wisp-engine-sherpa/download-binaries"]
+# From-source sherpa-onnx with DirectML for Windows GPU. Built ONLY for the Windows release and the
+# weekly smoke workflow (cargo build --no-default-features --features sherpa-gpu) — a ~2h compile,
+# too slow to gate every PR. Mutually exclusive with sherpa-cpu (sherpa-rs-sys enforces this).
+sherpa-gpu = ["wisp-engine-sherpa/directml"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 
@@ -50,13 +60,9 @@ wisp-models = { path = "../../crates/wisp-models" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 # Opt-in cloud transcription engine (HTTP) — cross-platform.
 wisp-engine-cloud = { path = "../../crates/wisp-engine-cloud" }
-
-# The sherpa-onnx ASR engines run on every platform, but the backend differs: macOS/Linux download
-# the prebuilt CPU binaries (fast), while Windows builds sherpa-onnx from source with DirectML for GPU
-# (see the windows section). download-binaries and directml are mutually exclusive in sherpa-rs-sys,
-# so each platform selects exactly one — default-features = false drops the crate's download default.
-[target.'cfg(not(target_os = "windows"))'.dependencies]
-wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa", default-features = false, features = ["download-binaries"] }
+# sherpa-onnx ASR engines (SenseVoice, Whisper-ONNX, diarization, denoise). The CPU/GPU backend is
+# selected by the sherpa-cpu (default) / sherpa-gpu features above, so this stays backend-free here.
+wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa", default-features = false }
 
 # macOS-only native deps. System-audio capture (ScreenCaptureKit), WebRTC AEC (needs meson), the
 # Metal Whisper engine, and the AVFoundation/sysctl helpers all live here; other platforms degrade
@@ -79,8 +85,3 @@ wisp-loopback = { path = "../../crates/wisp-loopback" }
 # Total physical memory (GlobalMemoryStatusEx) to recommend a machine-appropriate model. Same
 # `windows` major as wisp-loopback, so no extra version in the tree.
 windows = { version = "0.61", features = ["Win32_System_SystemInformation"] }
-# Build sherpa-onnx from source with DirectML so the app auto-uses any DX12 GPU when present and
-# degrades to CPU otherwise (runtime EP selection — see wisp-engine-sherpa's execution_provider +
-# with_cpu_fallback). One binary, no per-machine build; GPU-less machines are unaffected. macOS gets
-# GPU via Metal instead. default-features = false: directml can't coexist with download-binaries.
-wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa", default-features = false, features = ["directml"] }

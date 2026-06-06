@@ -75,11 +75,6 @@ jobs:
       # build.rs first and fail on the not-yet-present DLLs; a separate prior step removes that race.
       - name: Stage sherpa runtime DLLs
         run: cargo build --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
-      # The DirectML build compiles sherpa-onnx from source; its DLL set differs from the prebuilt
-      # download (e.g. cargs.dll may be absent). List what landed so build.rs staging + the tauri
-      # resources manifest can be matched to the real output.
-      - name: List built runtime DLLs (diagnostic)
-        run: Get-ChildItem -Path app\src-tauri\target\debug -Filter *.dll | Select-Object Name
       - name: Build the app
         run: cargo build --manifest-path app/src-tauri/Cargo.toml
 
