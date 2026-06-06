@@ -155,13 +155,6 @@ fn groq() -> CloudProvider {
                 true,
                 "Faster large-v3 turbo on Groq — files, multilingual.",
             ),
-            model(
-                "distil-whisper-large-v3-en",
-                "Distil-Whisper large-v3 (English)",
-                false,
-                true,
-                "Distilled large-v3 — English-only, ~6× faster on Groq. Files.",
-            ),
         ],
     }
 }

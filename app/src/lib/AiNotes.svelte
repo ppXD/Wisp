@@ -57,8 +57,14 @@
       { id: "gpt-realtime", label: "GPT Realtime", kind: "realtime" },
     ],
     groq: [
+      // Verified on console.groq.com/docs/models. Production: GPT-OSS + Llama; preview (eval-only,
+      // may be discontinued at short notice): Llama 4 Scout, Qwen3-32B.
+      { id: "openai/gpt-oss-120b", label: "GPT-OSS 120B", kind: "chat" },
+      { id: "openai/gpt-oss-20b", label: "GPT-OSS 20B", kind: "chat" },
       { id: "llama-3.3-70b-versatile", label: "Llama 3.3 70B", kind: "chat" },
       { id: "llama-3.1-8b-instant", label: "Llama 3.1 8B", kind: "chat" },
+      { id: "meta-llama/llama-4-scout-17b-16e-instruct", label: "Llama 4 Scout 17B", kind: "chat" },
+      { id: "qwen/qwen3-32b", label: "Qwen3 32B", kind: "chat" },
     ],
     qwen: [
       { id: "qwen-max", label: "Qwen Max", kind: "chat" },
