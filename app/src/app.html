@@ -6,10 +6,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Wisp</title>
     <script>
-      // Apply the saved colour theme before first paint so dark never flashes light on load.
+      // Apply the saved colour theme + UI language before first paint so neither flashes on load.
       try {
         if (localStorage.getItem("wisp.theme") === "dark")
           document.documentElement.dataset.theme = "dark";
+        var lang = localStorage.getItem("wisp.locale");
+        if (lang) document.documentElement.lang = lang;
       } catch (e) {}
     </script>
     %sveltekit.head%
