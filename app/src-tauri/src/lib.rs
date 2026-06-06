@@ -256,6 +256,10 @@ struct ModelInfoDto {
     fit: String,
     /// The reason behind a `"heavy"` or `"blocked"` fit (e.g. "Needs macOS 26"); `None` when ready.
     fit_reason: Option<String>,
+    /// Whether this model has downloaded files on disk that can be deleted to reclaim space — true only
+    /// for a catalog model whose files are present. False for OS-provided models (no files of ours) and
+    /// before download. Drives the picker's delete affordance.
+    deletable: bool,
 }
 
 /// Per-file transcription options sent from the UI as one object.
@@ -1045,6 +1049,12 @@ fn detect_machine() -> MachineProfile {
 
 /// Maps a catalog descriptor to its UI DTO, resolving install/active status against the store.
 /// `recommended` is the machine-appropriate default; `None` for non-ASR lists that don't recommend.
+/// A model is deletable when it has files of ours present on disk — i.e. a downloaded catalog model.
+/// OS-provided models (no files) and not-yet-downloaded ones have nothing to reclaim.
+fn model_deletable(has_files: bool, on_disk: bool) -> bool {
+    has_files && on_disk
+}
+
 fn to_model_info(
     d: ModelDescriptor,
     store: &FsModelStore,
@@ -1060,6 +1070,7 @@ fn to_model_info(
     let recommended_file = file_rec == Some(&d.id);
     let family = format!("{:?}", d.family);
     let size_bytes = d.total_size_bytes();
+    let deletable = model_deletable(!d.files.is_empty(), store.local_path(&d.id).is_some());
 
     let coreml = coreml_asset(&d);
     let coreml_installed = coreml
@@ -1085,6 +1096,7 @@ fn to_model_info(
         // lists — diarization/denoise — are CPU-ONNX and always ready, so they keep the default).
         fit: "ready".to_owned(),
         fit_reason: None,
+        deletable,
     }
 }
 
@@ -2294,6 +2306,7 @@ fn custom_model_info(cm: &CustomModel, active: Option<&ModelId>) -> Option<Model
         // The caller (`list_models`) overwrites these from the machine fit; a comfortable default here.
         fit: "ready".to_owned(),
         fit_reason: None,
+        deletable: false,
     })
 }
 
@@ -2521,6 +2534,47 @@ fn select_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
         .active
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())? = Some(model_id);
+    Ok(())
+}
+
+/// Deletes an installed local model's downloaded files to reclaim disk space. If it was the active
+/// model the active selection is cleared (in memory and on disk), so the app honestly shows "no model"
+/// rather than pointing at files that are gone. The model stays in the catalog — re-downloadable anytime.
+#[tauri::command]
+fn remove_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let model_id = ModelId(id);
+
+    let descriptor = state
+        .store
+        .available()
+        .into_iter()
+        .find(|d| d.id == model_id)
+        .ok_or_else(|| "only downloaded catalog models can be deleted".to_owned())?;
+
+    if descriptor.files.is_empty() {
+        return Err("this model has no files to delete".to_owned());
+    }
+
+    state.store.remove(&model_id).map_err(|e| e.to_string())?;
+
+    clear_active_if_removed(state.inner(), &model_id)?;
+
+    Ok(())
+}
+
+/// Clears the active selection — in memory and the persisted file — when the model just removed was the
+/// active one, so the app never holds a dangling pointer to deleted files.
+fn clear_active_if_removed(state: &AppState, removed: &ModelId) -> Result<(), String> {
+    let mut active = state
+        .active
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+
+    if active.as_ref() == Some(removed) {
+        *active = None;
+        let _ = fs::remove_file(&state.active_model_path);
+    }
+
     Ok(())
 }
 
@@ -4098,6 +4152,7 @@ pub fn run() {
             import_custom_model,
             download_coreml,
             select_model,
+            remove_model,
             list_input_devices,
             system_audio_id,
             mic_off_id,
@@ -4144,6 +4199,16 @@ mod tests {
     /// A unique temp path per test, so parallel runs don't collide on the shared temp dir.
     fn temp_path(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("wisp-cloud-keys-{}-{tag}.json", std::process::id()))
+    }
+
+    #[test]
+    fn only_downloaded_catalog_models_are_deletable() {
+        // Deletable means files of ours are present on disk to reclaim. OS-provided models (no files)
+        // and not-yet-downloaded ones have nothing to delete.
+        assert!(model_deletable(true, true)); // downloaded catalog model
+        assert!(!model_deletable(false, true)); // OS-provided (e.g. Apple Speech) — no files
+        assert!(!model_deletable(true, false)); // catalog model, not downloaded yet
+        assert!(!model_deletable(false, false));
     }
 
     #[test]
