@@ -761,8 +761,8 @@ fn parse_chat_completion(json: &str) -> Result<String> {
 /// LLM primitive behind the summary / action-item features. `system` steers the task (a built-in or
 /// custom prompt); `user` carries the transcript. Returns the assistant's reply text.
 ///
-/// Works for any OpenAI-compatible chat endpoint (OpenAI, a custom endpoint, a local Ollama). Not for
-/// the Gemini `generateContent` shape — pick an OpenAI-compatible chat model for LLM tasks.
+/// Works for any OpenAI-compatible chat endpoint (OpenAI, Groq, a custom endpoint, a local Ollama),
+/// and for Gemini via its `/openai` compatibility layer (see [`chat_endpoint`]).
 /// A chat-completion request to an OpenAI-compatible endpoint: the two messages plus optional tuning
 /// knobs. Every knob is omitted from the wire request when `None`, so a provider that doesn't accept
 /// one — e.g. a reasoning model that only allows the default temperature — isn't sent it.
@@ -809,16 +809,24 @@ fn build_chat_body(model: &str, req: &ChatRequest, stream: bool) -> String {
     body.to_string()
 }
 
+/// The chat-completion endpoint for `provider`. OpenAI and other OpenAI-compatible providers expose
+/// it at `{base}/chat/completions`; Gemini serves the identical OpenAI-compatible shape under its
+/// `/openai` compatibility layer (same Bearer key), so its endpoint carries that extra segment.
+fn chat_endpoint(provider: &CloudProvider) -> String {
+    let base = provider.base_url.trim_end_matches('/');
+    match provider.protocol {
+        CloudProtocol::Gemini => format!("{base}/openai/chat/completions"),
+        _ => format!("{base}/chat/completions"),
+    }
+}
+
 pub fn chat_completion(
     provider: &CloudProvider,
     model: &str,
     api_key: &str,
     req: &ChatRequest,
 ) -> Result<String> {
-    let endpoint = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
+    let endpoint = chat_endpoint(provider);
     let body = build_chat_body(model, req, false);
 
     let sent = ureq::post(&endpoint)
@@ -840,10 +848,7 @@ pub fn chat_completion_stream(
     req: &ChatRequest,
     mut on_delta: impl FnMut(&str),
 ) -> Result<String> {
-    let endpoint = format!(
-        "{}/chat/completions",
-        provider.base_url.trim_end_matches('/')
-    );
+    let endpoint = chat_endpoint(provider);
     let body = build_chat_body(model, req, true);
 
     let sent = ureq::post(&endpoint)
@@ -1071,6 +1076,26 @@ mod tests {
                 },
             ],
         }
+    }
+
+    #[test]
+    fn chat_endpoint_routes_gemini_through_its_openai_compatibility_layer() {
+        // OpenAI-compatible providers post to {base}/chat/completions (trailing slash trimmed).
+        assert_eq!(
+            chat_endpoint(&provider()),
+            "https://api.example.com/v1/chat/completions"
+        );
+
+        // Gemini serves the same OpenAI-compatible shape under its /openai layer.
+        let gemini = CloudProvider {
+            protocol: CloudProtocol::Gemini,
+            base_url: "https://generativelanguage.googleapis.com/v1beta".to_owned(),
+            ..provider()
+        };
+        assert_eq!(
+            chat_endpoint(&gemini),
+            "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions"
+        );
     }
 
     #[test]
