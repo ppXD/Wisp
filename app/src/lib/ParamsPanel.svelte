@@ -4,6 +4,7 @@
   // nothing about any specific engine — a new knob is backend-only, rendered here automatically.
   import type { ParamSpec, ParamValue } from "$lib/cloud.svelte";
   import { defaultParamValues } from "$lib/cloud.svelte";
+  import { i18n } from "$lib/i18n.svelte";
 
   let {
     specs,
@@ -32,8 +33,8 @@
 {#if specs.length}
   <div class="params">
     <div class="params-head">
-      <span class="params-title">Parameters</span>
-      <button class="reset" disabled={isDefault} onclick={reset}>Reset to defaults</button>
+      <span class="params-title">{i18n.t.params.title}</span>
+      <button class="reset" disabled={isDefault} onclick={reset}>{i18n.t.params.reset}</button>
     </div>
 
     {#each ordered as s (s.key)}

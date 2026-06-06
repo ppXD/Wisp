@@ -5,14 +5,15 @@
   import { cubicOut } from "svelte/easing";
   import { invoke } from "@tauri-apps/api/core";
   import EndpointsManager from "$lib/EndpointsManager.svelte";
+  import { i18n } from "$lib/i18n.svelte";
 
   let { open = $bindable(false) }: { open?: boolean } = $props();
 
   type Section = "models" | "dictation";
-  const sections: { id: Section; label: string }[] = [
-    { id: "models", label: "AI models" },
-    { id: "dictation", label: "Dictation" },
-  ];
+  const sections = $derived<{ id: Section; label: string }[]>([
+    { id: "models", label: i18n.t.settings.aiModels },
+    { id: "dictation", label: i18n.t.settings.dictation },
+  ]);
   let section = $state<Section>("models");
 
   function close() {
@@ -83,13 +84,13 @@
       class="settings"
       role="dialog"
       aria-modal="true"
-      aria-label="Settings"
+      aria-label={i18n.t.nav.settings}
       tabindex="-1"
       transition:scale={{ duration: 140, start: 0.96, opacity: 1, easing: cubicOut }}
     >
       <header class="settings-head">
-        <h2 class="settings-title">Settings</h2>
-        <button class="settings-close" aria-label="Close" onclick={close}>
+        <h2 class="settings-title">{i18n.t.nav.settings}</h2>
+        <button class="settings-close" aria-label={i18n.t.common.close} onclick={close}>
           <svg
             width="16"
             height="16"
@@ -117,27 +118,24 @@
           {#if section === "models"}
             <EndpointsManager />
           {:else if section === "dictation"}
-            <p class="set-intro">
-              Hold the hotkey, speak, release — Wisp types it into whatever app has focus, fully
-              on-device (Apple speech).
-            </p>
+            <p class="set-intro">{i18n.t.settings.dictationIntro}</p>
 
             {#if dictation && !dictation.available}
-              <p class="set-note">Dictation needs Apple on-device speech (macOS 26 or newer).</p>
+              <p class="set-note">{i18n.t.settings.dictationNote}</p>
             {:else if dictation}
               <div class="set-row">
-                <span class="set-label">Push-to-talk</span>
+                <span class="set-label">{i18n.t.settings.pushToTalk}</span>
                 <button
                   class="set-btn"
                   class:on={dictation.enabled}
                   onclick={() => dictation && setDictation(!dictation.enabled)}
                 >
-                  {dictation.enabled ? "On" : "Off"}
+                  {dictation.enabled ? i18n.t.settings.on : i18n.t.settings.off}
                 </button>
               </div>
 
               <label class="set-row">
-                <span class="set-label">Hotkey</span>
+                <span class="set-label">{i18n.t.settings.hotkey}</span>
                 <input
                   class="hotkey-input"
                   value={dictation.hotkey}
@@ -148,8 +146,8 @@
 
               {#if !dictation.accessibilityOk}
                 <div class="set-perm">
-                  <span>⚠ Needs Accessibility permission to type into other apps.</span>
-                  <button class="set-btn" onclick={grantAccessibility}>Open Settings</button>
+                  <span>{i18n.t.settings.accessibilityNote}</span>
+                  <button class="set-btn" onclick={grantAccessibility}>{i18n.t.settings.openSettings}</button>
                 </div>
               {/if}
             {/if}
