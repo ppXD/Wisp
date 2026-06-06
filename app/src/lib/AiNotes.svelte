@@ -70,8 +70,15 @@
       { id: "qwen-max", label: "Qwen Max", kind: "chat" },
       { id: "qwen-plus", label: "Qwen Plus", kind: "chat" },
     ],
-    // Google/Gemini is intentionally absent: it speaks neither `/chat/completions` (chat assist) nor
-    // the OpenAI realtime protocol (realtime assist), so no assist path is wired for it yet.
+    google: [
+      // Reached through Gemini's OpenAI-compatibility layer — the backend rewrites the chat endpoint
+      // to /v1beta/openai/chat/completions (same key). Chat only: Gemini Live speaks a different,
+      // non-OpenAI realtime protocol, so it isn't offered for the realtime assist.
+      { id: "gemini-3.5-flash", label: "Gemini 3.5 Flash", kind: "chat" },
+      { id: "gemini-3.1-flash-lite", label: "Gemini 3.1 Flash-Lite", kind: "chat" },
+      { id: "gemini-2.5-pro", label: "Gemini 2.5 Pro", kind: "chat" },
+      { id: "gemini-2.5-flash", label: "Gemini 2.5 Flash", kind: "chat" },
+    ],
   };
 
   const PROVIDER_KEY = "wisp.assistProvider";
