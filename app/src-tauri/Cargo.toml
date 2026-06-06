@@ -8,11 +8,16 @@ edition = "2021"
 # Standalone workspace so this Tauri app is not built by the root library workspace/CI.
 [workspace]
 
-# As its own workspace this crate does not inherit the root release profile, so set it here:
-# strip the symbol table and thin-LTO the shipped binary to keep the packaged .app lean.
+# As its own workspace this crate does not inherit the root release profile, so set it here. These
+# trade a slower release compile (fine — releases are infrequent) for the smallest, fastest shipped
+# binary: strip removes the symbol table (big size win, zero perf cost), fat LTO optimizes across the
+# whole program (smaller + faster than thin), and one codegen unit lets the optimizer see everything.
+# (panic = "abort" is deliberately NOT set: it would turn a caught Tauri-command panic into a crash.)
+# The ML runtime dylibs (onnxruntime/sherpa/whisper) dominate bundle size regardless.
 [profile.release]
 strip = true
-lto = "thin"
+lto = "fat"
+codegen-units = 1
 
 [lib]
 # The `_lib` suffix avoids a name clash with the binary on Windows.

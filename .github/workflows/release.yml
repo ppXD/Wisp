@@ -1,78 +1,126 @@
-# Builds runnable installers: the Apple-Silicon (arm64) macOS app and the Windows x64 app. Intel
-# macOS is intentionally unsupported (the screencapture/apple-metal stack needs the macOS 15 SDK no
-# Intel runner provides, and WebRTC AEC won't cross-compile from Apple Silicon). The Windows build
-# is mic + sherpa-onnx (system audio / AEC / Metal are macOS-only and degrade). Manual or on a v* tag.
+# Builds installers and publishes them as a DRAFT GitHub Release so you review the artifacts before
+# hitting "Publish". Produces:
+#
+#   macOS:   Wisp_<ver>_aarch64.dmg   (Apple Silicon only)
+#   Windows: Wisp_<ver>_x64-setup.exe (NSIS, smaller) + Wisp_<ver>_x64_en-US.msi
+#
+# Intel macOS is intentionally unsupported (Metal/screencapture need the macOS 15 SDK no Intel runner
+# provides; WebRTC AEC won't cross-compile from Apple Silicon). The Windows build is mic + sherpa-onnx
+# (system audio / AEC / Metal are macOS-only and degrade gracefully).
+#
+# Trigger: push a `v*` tag (e.g. `git tag v0.2.0 && git push --tags`), or run manually with a tag.
+#
+# # Size / performance
+#
+# The shipped binary uses the workspace release profile (fat LTO + codegen-units=1 + strip) — smallest
+# + fastest. The bulk of the installer is the ML runtime (onnxruntime + sherpa-onnx + whisper-metal +
+# WebRTC), which is inherent and not shrinkable; ASR models download on first use, never bundled.
+#
+# # macOS signing & notarization (optional)
+#
+# All APPLE_* secrets are optional. Set them to ship a Gatekeeper-clean signed + notarized .dmg.
+# Without them the .dmg is unsigned and users run `xattr -cr /Applications/Wisp.app` once. Secrets:
+#   APPLE_CERTIFICATE / APPLE_CERTIFICATE_PASSWORD  base64 .p12 + its password
+#   APPLE_SIGNING_IDENTITY                          "Developer ID Application: Name (TEAMID)"
+#   APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID       Apple ID, app-specific password, team id
 name: Release
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to release (e.g. v0.2.0) — must already exist on the repo"
+        required: true
   push:
     tags: ["v*"]
+
+permissions:
+  contents: write # tauri-action creates the draft Release and uploads the installers
 
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  build:
-    name: build (arm64)
-    runs-on: macos-15
+  release:
+    name: build (${{ matrix.label }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-15
+            label: macOS arm64
+            args: "--target aarch64-apple-darwin"
+          - os: windows-latest
+            label: Windows x64
+            args: ""
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
         with:
           submodules: recursive # whisper.cpp is vendored as a submodule
-      # apple-metal (via screencapture) needs the macOS 15 SDK; the runner's default Xcode is older.
-      - uses: maxim-lobanov/setup-xcode@v1
+
+      # Metal (via screencapture) needs the macOS 15 SDK; the runner's default Xcode is older.
+      - name: Select latest Xcode
+        if: runner.os == 'macOS'
+        uses: maxim-lobanov/setup-xcode@v1
         with:
           xcode-version: latest-stable
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-      # The WebRTC AEC crate's `bundled` build compiles vendored WebRTC with meson + ninja, which
-      # aren't on the runner by default.
-      - name: Install meson + ninja
-        run: brew install meson ninja
-      - name: Install frontend deps
-        working-directory: app
-        run: npm ci
-      - name: Build the app
-        working-directory: app
-        run: npm run tauri build -- --bundles app
-      - name: Verify the binary is arm64
-        working-directory: app/src-tauri/target/release/bundle/macos
-        run: lipo -info Wisp.app/Contents/MacOS/app
-      - name: Zip the .app
-        working-directory: app/src-tauri/target/release/bundle/macos
-        run: ditto -c -k --sequesterRsrc --keepParent Wisp.app "$GITHUB_WORKSPACE/Wisp-arm64.app.zip"
-      - uses: actions/upload-artifact@v4
-        with:
-          name: wisp-apple-silicon
-          path: Wisp-arm64.app.zip
 
-  windows:
-    name: build (windows x64)
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "app/src-tauri -> target"
+          key: ${{ matrix.os }}-release
+
       - uses: actions/setup-node@v4
         with:
           node-version: 20
+
+      # The WebRTC AEC crate's bundled build compiles vendored WebRTC with meson + ninja (macOS only).
+      - name: Install meson + ninja
+        if: runner.os == 'macOS'
+        run: brew install meson ninja
+
       - name: Install frontend deps
         working-directory: app
         run: npm ci
-      # Drop the sherpa / onnxruntime runtime DLLs into the target dir before `tauri build` runs the
-      # app's build.rs, which stages them for the bundle's `resources`. Cargo doesn't order one build
-      # script before a dependent's, so building the engine first removes that race for the installer.
+
+      # Stamp the version from the tag into the manifests so installer FILENAMES and the embedded
+      # version (macOS About box, Windows MSI ProductVersion) match the release. The repo's checked-in
+      # 0.1.0 stays as the working version; the tag is the source of truth at release time.
+      - name: Sync version from tag
+        shell: bash
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VER="${TAG#v}"
+          echo "Releasing version $VER from tag $TAG"
+          node -e "const f='app/src-tauri/tauri.conf.json',fs=require('fs'),c=JSON.parse(fs.readFileSync(f));c.version='$VER';fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
+          node -e "const f='app/package.json',fs=require('fs'),c=JSON.parse(fs.readFileSync(f));c.version='$VER';fs.writeFileSync(f,JSON.stringify(c,null,2)+'\n')"
+          node -e "const f='app/src-tauri/Cargo.toml',fs=require('fs');let s=fs.readFileSync(f,'utf8');s=s.replace(/^version = \"[^\"]*\"/m,'version = \"$VER\"');fs.writeFileSync(f,s)"
+
+      # Windows: drop the sherpa / onnxruntime runtime DLLs into target/ before the app's build.rs runs
+      # (it stages them into the bundle resources). Cargo doesn't order one build script before a
+      # dependent's, so building the engine first removes that race for the installer.
       - name: Stage sherpa runtime DLLs
+        if: runner.os == 'Windows'
         run: cargo build --release --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
-      - name: Build the app installers
-        working-directory: app
-        run: npm run tauri build
-      - name: Upload installers
-        uses: actions/upload-artifact@v4
+
+      - name: Build installers + draft Release
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Optional — set these secrets to sign + notarize the macOS .dmg (see header).
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         with:
-          name: wisp-windows-x64
-          path: |
-            app/src-tauri/target/release/bundle/msi/*.msi
-            app/src-tauri/target/release/bundle/nsis/*.exe
+          projectPath: app
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: "Wisp ${{ github.event.inputs.tag || github.ref_name }}"
+          releaseDraft: true
+          prerelease: false
+          args: ${{ matrix.args }}
