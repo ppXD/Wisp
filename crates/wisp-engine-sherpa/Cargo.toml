@@ -8,17 +8,22 @@ license = "MIT"
 [dependencies]
 wisp-core = { path = "../wisp-core" }
 wisp-pipeline = { path = "../wisp-pipeline" }
-sherpa-rs = { version = "0.6", default-features = false, features = ["download-binaries"] }
+sherpa-rs = { version = "0.6", default-features = false }
 # Direct access to the sys layer for the online (streaming) recognizer API, which sherpa-rs only
 # wraps for offline use. Feature-matched to sherpa-rs's own dep so cargo unifies to one sys build.
-sherpa-rs-sys = { version = "0.6.8", default-features = false, features = ["download-binaries"] }
+sherpa-rs-sys = { version = "0.6.8", default-features = false }
 # Physical-core detection for the ASR thread count (pure Rust; no native lib linked).
 num_cpus = "1"
 
 [features]
-# Build the DirectML-enabled onnxruntime so the sherpa engines can run on any Windows DX12 GPU
-# (one binary, runtime EP selection + CPU fallback). Off by default → the CPU build is unchanged;
-# enable on a Windows GPU build. Forwards to both sherpa deps so cargo unifies one sys build.
+default = ["download-binaries"]
+# Download the prebuilt CPU sherpa-onnx + onnxruntime binaries — the fast default used on macOS,
+# Linux, and any CPU Windows build. Forwarded to both sherpa deps so cargo unifies one sys build.
+download-binaries = ["sherpa-rs/download-binaries", "sherpa-rs-sys/download-binaries"]
+# Build the vendored sherpa-onnx from source with the DirectML execution provider so the engines run
+# on any Windows DX12 GPU (runtime EP selection + CPU fallback). sherpa-rs-sys forbids combining this
+# with download-binaries, so a directml build must set default-features = false. Compiles the native
+# lib via CMake/MSVC — slower than the prebuilt path.
 directml = ["sherpa-rs/directml", "sherpa-rs-sys/directml"]
 
 [dev-dependencies]
