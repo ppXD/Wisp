@@ -132,36 +132,83 @@
       icon: "✦",
       label: i18n.t.assist.tmplSummary,
       prompt:
-        "Summarize the conversation so far: a one or two sentence overview, then 3-8 bullet points of \
-the key topics, decisions, and outcomes. Reply in the spoken language. Markdown only, no preamble.",
+        "You are an expert meeting-notes editor. Recap the conversation so far for someone who missed \
+it. Open with a one or two sentence TL;DR, then a 'Highlights' list of 3 to 7 one-line bullets \
+covering the main topics, decisions, and outcomes, most important first. Ground every line in what \
+was actually said; never invent names, numbers, or facts; skip small talk. Markdown, no preamble. \
+Reply in the meeting's main language.",
+    },
+    {
+      icon: "▤",
+      label: i18n.t.assist.tmplNotes,
+      prompt:
+        "You are an expert meeting-notes editor. Turn the transcript into clean, structured minutes: \
+group the discussion by topic, each as a '### topic' heading followed by 2 to 5 concise bullets of \
+what was said, agreed, or raised. End with an '### Open questions' section for anything left \
+unresolved, omitting it if there are none. Use only what was said, and attribute points to the \
+speaker (Me, Them, or a named person) when it matters. No preamble or filler. Reply in the meeting's \
+main language.",
     },
     {
       icon: "☑",
       label: i18n.t.assist.tmplActionItems,
       prompt:
-        "Extract concrete action items as a Markdown checklist in the spoken language. Format each as \
-'- [ ] <task> — <owner if named> (<due if mentioned>)'. Only real, actionable tasks; if none, reply \
-'No action items found.' No preamble.",
-    },
-    {
-      icon: "◎",
-      label: i18n.t.assist.tmplLiveHints,
-      prompt:
-        "You are a live meeting copilot. From the recent conversation, give 2-4 very brief, actionable \
-hints for the speaker right now — a question to ask next, a fact to verify, a point to clarify, or a \
-risk to flag. Reply in the spoken language as a short bullet list, no preamble.",
+        "You are an expert meeting-notes editor. Extract the concrete action items as a Markdown \
+checklist, one per line, formatted '- [ ] action — owner · due'. The owner is whoever committed (Me, \
+Them, or a named person), or 'unassigned' if unclear; include the '· due' only when a date or time \
+was actually mentioned. Capture only real commitments — things someone will do — not ideas merely \
+floated. If there are none yet, reply with exactly: _No action items yet._ No preamble. Reply in the \
+meeting's main language.",
     },
     {
       icon: "⊞",
       label: i18n.t.assist.tmplDecisions,
       prompt:
-        "List every decision made and who owns it as a Markdown table with columns Decision | Owner | \
-Notes, in the spoken language. If there are no decisions, say so. No preamble.",
+        "You are an expert meeting-notes editor. Capture only the decisions that were actually made, \
+as a Markdown table with columns Decision | Owner | Why/context — one row per settled decision, with \
+the owner if named and a short rationale if one was given. Exclude open questions and anything still \
+under debate. If nothing was decided, reply with exactly: _No decisions yet._ No preamble. Reply in \
+the meeting's main language.",
+    },
+    {
+      icon: "✉",
+      label: i18n.t.assist.tmplEmail,
+      prompt:
+        "You are an executive assistant drafting the recap email after this meeting. Write a \
+ready-to-send email: a Subject line, a one-line opener, a 'Summary' of 2 to 4 bullets, an 'Action \
+items' checklist of who does what by when, and a brief warm closing. Keep it professional and \
+concise; use only what was discussed, and write a placeholder like [date] rather than inventing \
+specifics. Output only the email, no preamble. Reply in the meeting's main language.",
+    },
+    {
+      icon: "❓",
+      label: i18n.t.assist.tmplQuestions,
+      prompt:
+        "You are an expert meeting-notes editor. Surface everything still unresolved as a Markdown \
+bullet list: questions asked but never answered, decisions deferred or parked, topics raised without \
+conclusion, and information someone still owes — noting who each is on when named. One line each, \
+only genuinely open items. If everything was resolved, reply with exactly: _Nothing open._ No \
+preamble. Reply in the meeting's main language.",
+    },
+    {
+      icon: "◎",
+      label: i18n.t.assist.tmplLiveHints,
+      prompt:
+        "You are a silent live meeting copilot for the person on the mic. From the last minute or \
+two, surface 2 to 4 ultra-brief, high-leverage prompts they can act on right now — a sharp question \
+to ask next, a claim or number worth verifying, a point to clarify, or a risk, gap, or unmet \
+commitment to flag. One line each, imperative, no preamble. Use only what was said, and skip the \
+obvious or already-resolved. If there is nothing useful to add, reply with just '—'. Reply in the \
+meeting's language.",
     },
     {
       icon: "⇄",
       label: i18n.t.assist.tmplTranslate,
-      prompt: "Translate the transcript into clear, natural English, preserving speaker turns. No preamble.",
+      prompt:
+        "You are a professional interpreter. Translate the transcript into clear, natural English, \
+preserving each speaker turn and its label (Me, Them, or Speaker N). Convey meaning idiomatically \
+rather than word-for-word, and keep names, numbers, and technical terms intact. Output only the \
+translation, no preamble.",
     },
     { icon: "✎", label: i18n.t.assist.tmplBlank, prompt: "" },
   ]);
@@ -171,11 +218,11 @@ Notes, in the spoken language. If there are no decisions, say so. No preamble.",
   // invent smalltalk), so this hard wall has to live where you can read and tune every word of it.
   const REALTIME_DEFAULT =
     "You are a silent meeting-notes tool, not a chat assistant. The people speaking (\"Me\" and \"Them\") \
-are talking to each other, NOT to you — never greet them, reply to them, answer their questions, or \
-continue their conversation. Use ONLY the transcript lines you are given; never invent, guess, or pad. \
-If nothing meaningful has been said yet, reply with just \"—\".\n\nTask: from the conversation so far, \
-give 2-4 very short, useful live notes — a key point, a decision, an open question, or a fact worth \
-checking. Bullet list, in the spoken language, no preamble.";
+are talking to each other, NOT to you — never greet them, answer them, or join their conversation. Use \
+ONLY the transcript lines you are given; never invent, guess, or pad. If nothing meaningful has been \
+said yet, reply with just \"—\".\n\nTask: from the conversation so far, surface 2 to 4 very short, \
+useful live notes — a key point, a decision, an open question, or a fact worth checking. Bullet list, \
+in the meeting's language, no preamble.";
 
   // Chat and realtime keep separate prompts (the grounded realtime wall vs. a plain chat task), each
   // persisted under its own key, so switching model kind never clobbers the other.
@@ -266,9 +313,10 @@ checking. Bullet list, in the spoken language, no preamble.";
   let summarizedChars = $state(0);
   const RECENT_BUDGET = 6000; // chars kept verbatim; older turns get compressed into the summary
   const SUMMARY_PROMPT =
-    "You maintain a running summary of a live conversation. Merge the existing summary with the new \
-turns into one updated summary that preserves decisions, action items, names, numbers, and open \
-questions; drop chit-chat. Be concise. Reply in the conversation's language. Output only the summary.";
+    "You maintain a running summary of a live meeting. Merge the existing summary with the new turns \
+into one updated summary that preserves decisions, action items, owners, names, numbers, dates, and \
+open questions, and drops small talk. Keep it tight and factual — only what was actually said. Reply \
+in the meeting's language. Output only the summary.";
 
   const collapsed = $derived(live && liveOn);
   // A realtime model listens to live audio, so it only works inside a running Live session (never in

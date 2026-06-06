@@ -255,6 +255,9 @@ export const zhHans: Messages = {
     tmplLiveHints: "实时提示（教练）",
     tmplDecisions: "决策与负责人",
     tmplTranslate: "翻译成英文",
+    tmplNotes: "详细纪要",
+    tmplEmail: "跟进邮件",
+    tmplQuestions: "未决问题",
     tmplBlank: "空白",
   },
 

@@ -291,6 +291,9 @@ export const en = {
     tmplLiveHints: "Live hints (coach)",
     tmplDecisions: "Decisions & owners",
     tmplTranslate: "Translate to English",
+    tmplNotes: "Detailed notes",
+    tmplEmail: "Follow-up email",
+    tmplQuestions: "Open questions",
     tmplBlank: "Blank",
   },
 
