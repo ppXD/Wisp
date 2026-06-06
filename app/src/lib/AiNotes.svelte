@@ -223,6 +223,10 @@ checking. Bullet list, in the spoken language, no preamble.";
   const assistOverrides = $derived(changedParamValues(assistParamValues, assistParamSpecs));
 
   let modelOpen = $state(false);
+  // The provider whose models fill the picker's right pane (the two-pane layout); set to the current
+  // selection's provider when the menu opens.
+  let mpProvider = $state("");
+  const mpModels = $derived(providerAssist.find((g) => g.provider.id === mpProvider)?.models ?? []);
   let templatesOpen = $state(false);
   let running = $state(false);
   let error = $state("");
@@ -266,6 +270,12 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     providerId = pId;
     modelId = mId;
     modelOpen = false;
+  }
+
+  // Open/close the model picker; on open, focus the right pane on the current selection's provider.
+  function toggleModelMenu() {
+    modelOpen = !modelOpen;
+    if (modelOpen) mpProvider = providerId || providerAssist[0]?.provider.id || "";
   }
 
   function useTemplate(p: string) {
@@ -569,30 +579,43 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
   <!-- Control bar: the model, plus the assist's own Stop (rolling) and Clear (feed). -->
   <div class="ctl">
     <div class="model">
-      <button class="model-trigger" class:open={modelOpen} onclick={() => (modelOpen = !modelOpen)}>
+      <button class="model-trigger" class:open={modelOpen} onclick={toggleModelMenu}>
         <span class="model-name">{model ? `${provider?.name} · ${model.label}` : "Pick a model"}</span>
         <span class="caret"></span>
       </button>
       {#if modelOpen}
         <button class="scrim" aria-label="Close" onclick={() => (modelOpen = false)}></button>
-        <div class="menu">
-          {#each providerAssist as g (g.provider.id)}
-            <span class="menu-group">
-              {g.provider.name}{#if !g.provider.keySet}<span class="grp-warn"> · ⚠ needs key</span>{/if}
-            </span>
-            {#each g.models as m (m.id)}
-              <button
-                class="menu-opt"
-                class:sel={g.provider.id === providerId && m.id === modelId}
-                onclick={() => pick(g.provider.id, m.id)}
-              >
-                <span class="opt-name">
-                  {#if m.kind === "realtime"}<span class="rt-tag">⚡</span>{/if}{m.label}
-                </span>
-                <span class="opt-model">{m.id}</span>
-              </button>
-            {/each}
-          {/each}
+        <!-- Two-pane picker: providers (left) → that provider's models (right), like the transcription
+             picker — so the long flat list becomes a browsable per-vendor structure. -->
+        <div class="menu two-pane">
+          <div class="mp-panes">
+            <div class="mp-cats">
+              {#each providerAssist as g (g.provider.id)}
+                <button
+                  class="mp-cat"
+                  class:active={mpProvider === g.provider.id}
+                  onclick={() => (mpProvider = g.provider.id)}
+                >
+                  <span class="mp-cat-name">{g.provider.name}</span>
+                  {#if !g.provider.keySet}<span class="mp-cat-dot" title="API key needed"></span>{/if}
+                </button>
+              {/each}
+            </div>
+            <div class="mp-detail">
+              {#each mpModels as m (m.id)}
+                <button
+                  class="menu-opt"
+                  class:sel={mpProvider === providerId && m.id === modelId}
+                  onclick={() => pick(mpProvider, m.id)}
+                >
+                  <span class="opt-name">
+                    {#if m.kind === "realtime"}<span class="rt-tag">⚡</span>{/if}{m.label}
+                  </span>
+                  <span class="opt-model">{m.id}</span>
+                </button>
+              {/each}
+            </div>
+          </div>
           <button class="menu-manage" onclick={() => ((modelOpen = false), openEndpointsModal())}>
             ✦ Manage models &amp; endpoints…
           </button>
@@ -876,21 +899,82 @@ questions; drop chit-chat. Be concise. Reply in the conversation's language. Out
     box-shadow: 0 12px 28px rgb(0 0 0 / 18%);
   }
 
-  .menu-group {
-    display: block;
-    padding: 8px 8px 4px;
-    font-size: 10.5px;
-    font-weight: 600;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--muted);
+  /* Two-pane variant: providers (left) | that provider's models (right), + the manage footer. */
+  .menu.two-pane {
+    width: 360px;
+    max-width: 84vw;
+    max-height: none;
+    overflow: hidden;
+    padding: 0;
+    display: flex;
+    flex-direction: column;
   }
 
-  .grp-warn {
-    color: var(--stop);
-    text-transform: none;
-    letter-spacing: 0;
+  .mp-panes {
+    display: flex;
+    align-items: stretch;
+    min-height: 0;
+    max-height: 52vh;
+  }
+
+  .mp-cats {
+    flex: none;
+    width: 132px;
+    border-right: 1px solid var(--border);
+    padding: 6px;
+    overflow-y: auto;
+  }
+
+  .mp-cat {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-family: inherit;
+    font-size: 12.5px;
     font-weight: 500;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 8px;
+    cursor: pointer;
+    text-align: left;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+
+  .mp-cat:hover {
+    background: var(--surface-active);
+  }
+
+  .mp-cat.active {
+    background: var(--surface-active);
+    color: var(--accent);
+  }
+
+  .mp-cat-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mp-cat-dot {
+    flex: none;
+    width: 5px;
+    height: 5px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .mp-detail {
+    flex: 1;
+    min-width: 0;
+    padding: 6px;
+    overflow-y: auto;
   }
 
   .menu-opt {
