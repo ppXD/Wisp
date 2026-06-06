@@ -11,6 +11,7 @@
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
   import Settings from "$lib/Settings.svelte";
+  import { i18n, LOCALES } from "$lib/i18n.svelte";
   import {
     refreshCloud,
     cloudReady,
@@ -143,6 +144,10 @@
     if (doc.startViewTransition) doc.startViewTransition(() => setTheme(next));
     else setTheme(next);
   }
+
+  // UI language menu (the rail globe). The active locale + catalogue live in $lib/i18n.svelte; the
+  // inline script in app.html applies the saved locale before first paint, so no flash on load.
+  let langMenuOpen = $state(false);
 
   // Settings modals (replace the old inline disclosures, so opening them never shifts the layout).
   let liveAdvancedOpen = $state(false);
@@ -1338,8 +1343,8 @@
     <button
       class="rail-edge"
       onclick={toggleSidebar}
-      title={sidebarExpanded ? "Collapse" : "Expand"}
-      aria-label={sidebarExpanded ? "Collapse sidebar" : "Expand sidebar"}
+      title={sidebarExpanded ? i18n.t.nav.collapse : i18n.t.nav.expand}
+      aria-label={sidebarExpanded ? i18n.t.nav.collapseSidebar : i18n.t.nav.expandSidebar}
     >
       <svg
         class="rail-chevron"
@@ -1360,19 +1365,19 @@
         class="rail-item"
         class:active={mode === "live"}
         onclick={() => (mode = "live")}
-        title="Live"
+        title={i18n.t.nav.live}
       >
         <svg class="rail-ico" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
           <circle cx="12" cy="12" r="6" />
         </svg>
-        <span class="rail-label">Live</span>
+        <span class="rail-label">{i18n.t.nav.live}</span>
       </button>
 
       <button
         class="rail-item"
         class:active={mode === "file"}
         onclick={() => (mode = "file")}
-        title="File"
+        title={i18n.t.nav.file}
       >
         <svg
           class="rail-ico"
@@ -1385,7 +1390,7 @@
         >
           <path d="M7 3h7l4 4v14H7z" /><path d="M14 3v4h4" />
         </svg>
-        <span class="rail-label">File</span>
+        <span class="rail-label">{i18n.t.nav.file}</span>
       </button>
     </div>
 
@@ -1395,8 +1400,8 @@
       class="rail-item theme-toggle"
       class:is-dark={theme === "dark"}
       onclick={toggleTheme}
-      title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
-      aria-label="Toggle colour theme"
+      title={theme === "dark" ? i18n.t.nav.themeToLight : i18n.t.nav.themeToDark}
+      aria-label={i18n.t.nav.themeToggle}
     >
       <span class="rail-ico theme-ico">
         <!-- Moon — shown in light mode (click to go dark). -->
@@ -1428,14 +1433,69 @@
           />
         </svg>
       </span>
-      <span class="rail-label">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+      <span class="rail-label">{theme === "dark" ? i18n.t.nav.lightMode : i18n.t.nav.darkMode}</span>
     </button>
+
+    <!-- UI language: globe + a small menu of every registered locale (scales as you add files). -->
+    <div class="rail-lang">
+      <button
+        class="rail-item"
+        class:active={langMenuOpen}
+        onclick={() => (langMenuOpen = !langMenuOpen)}
+        title={i18n.t.nav.language}
+        aria-label={i18n.t.nav.languageMenu}
+        aria-haspopup="menu"
+        aria-expanded={langMenuOpen}
+      >
+        <svg
+          class="rail-ico"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="9" />
+          <path d="M3 12h18" />
+          <path d="M12 3a14 14 0 0 1 0 18 14 14 0 0 1 0-18z" />
+        </svg>
+        <span class="rail-label">{i18n.t.nav.language}</span>
+      </button>
+
+      {#if langMenuOpen}
+        <button class="rail-lang-backdrop" aria-label={i18n.t.common.close} onclick={() => (langMenuOpen = false)}
+        ></button>
+        <div class="rail-lang-menu" role="menu" transition:fly={{ x: -4, duration: 100 }}>
+          {#each LOCALES as loc (loc.id)}
+            <button
+              class="rail-lang-opt"
+              class:sel={i18n.locale === loc.id}
+              role="menuitemradio"
+              aria-checked={i18n.locale === loc.id}
+              onclick={() => {
+                i18n.set(loc.id);
+                langMenuOpen = false;
+              }}
+            >
+              <span class="rail-lang-name">{loc.label}</span>
+              {#if i18n.locale === loc.id}
+                <svg class="rail-lang-check" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                  <path d="M3 8.5l3.5 3.5L13 4.5" />
+                </svg>
+              {/if}
+            </button>
+          {/each}
+        </div>
+      {/if}
+    </div>
 
     <button
       class="rail-item"
       onclick={() => (cloudState.endpointsOpen = true)}
-      title="Settings"
-      aria-label="Settings"
+      title={i18n.t.nav.settings}
+      aria-label={i18n.t.nav.settings}
     >
       <svg
         class="rail-ico"
@@ -1452,7 +1512,7 @@
           d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
         />
       </svg>
-      <span class="rail-label">Settings</span>
+      <span class="rail-label">{i18n.t.nav.settings}</span>
     </button>
   </nav>
 
@@ -1645,7 +1705,7 @@
         {/if}
       </div>
     {:else}
-      <span class="muted">Loading models…</span>
+      <span class="muted">{i18n.t.live.loadingModels}</span>
     {/if}
   {/snippet}
 
@@ -1656,7 +1716,7 @@
           <span class="active-model">{liveRunningLabel}</span>
         {:else}
           <div class="engine-group">
-            <span class="source-prefix">Transcribe with</span>
+            <span class="source-prefix">{i18n.t.common.transcribeWith}</span>
             {@render modelPicker()}
           </div>
         {/if}
@@ -1668,13 +1728,7 @@
               class="audio-chip"
               class:on={youOn}
               onclick={youClick}
-              title={youOn
-                ? running
-                  ? "You (your mic) is on — click to mute"
-                  : "You (your mic) is on — click to exclude from transcription"
-                : running
-                  ? "You (your mic) is muted — click to unmute"
-                  : "You (your mic) is off — click to include in transcription"}
+              title={i18n.t.live.youTip(youOn, running)}
             >
               {#if youOn}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" aria-hidden="true">
@@ -1688,7 +1742,7 @@
                   <path d="M4 3l16 18" />
                 </svg>
               {/if}
-              <span class="chip-label">You</span>
+              <span class="chip-label">{i18n.t.live.you}</span>
             </button>
           {/if}
           {#if themShown}
@@ -1696,13 +1750,7 @@
               class="audio-chip"
               class:on={themOn}
               onclick={themClick}
-              title={themOn
-                ? running
-                  ? "Them (system audio) is on — click to mute"
-                  : "Them (system audio) is on — click to exclude from transcription"
-                : running
-                  ? "Them (system audio) is muted — click to unmute"
-                  : "Them (system audio) is off — click to include in transcription"}
+              title={i18n.t.live.themTip(themOn, running)}
             >
               {#if themOn}
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true">
@@ -1715,20 +1763,20 @@
                   <path d="M16 10l4 4M20 10l-4 4" />
                 </svg>
               {/if}
-              <span class="chip-label">Them</span>
+              <span class="chip-label">{i18n.t.live.them}</span>
             </button>
           {/if}
         </div>
         <span class="status" class:rec={running}>
           <span class="status-dot"></span>{running
-            ? `Recording · ${fmtTime(elapsedMs)}`
+            ? `${i18n.t.live.status.recording} · ${fmtTime(elapsedMs)}`
             : liveEngine === "cloud"
               ? liveCloudReady
-                ? "ready"
-                : "key needed"
+                ? i18n.t.live.status.ready
+                : i18n.t.live.status.keyNeeded
               : canStart
-                ? "ready"
-                : "no model"}
+                ? i18n.t.live.status.ready
+                : i18n.t.live.status.noModel}
         </span>
       </div>
 
@@ -1881,7 +1929,7 @@
       <div class="live-body" bind:this={liveBodyEl}>
         <div class="transcript-pane">
           <div class="pane-head">
-            <span class="pane-title">Transcript</span>
+            <span class="pane-title">{i18n.t.common.transcript}</span>
             <span class="pane-actions">
               {#if running || liveSegments.length}
                 <button
@@ -1918,7 +1966,7 @@
             <span class="listening-text">Listening…</span>
           </li>
         {:else if !liveSegments.length}
-          <li class="empty">Pick a model, press <em>Start</em>, and speak.</li>
+          <li class="empty">{i18n.t.live.empty.before}<em>{i18n.t.live.empty.action}</em>{i18n.t.live.empty.after}</li>
         {/if}
           </ul>
           {#if liveSegments.length}
@@ -1975,8 +2023,8 @@
             class:loading={stopping}
             onclick={stop}
             disabled={stopping}
-            title="Stop transcription"
-            aria-label="Stop transcription"
+            title={i18n.t.live.stop}
+            aria-label={i18n.t.live.stop}
           >
             {#if stopping}
               <span class="spinner" aria-hidden="true"></span>
@@ -1994,11 +2042,11 @@
                 (liveEngine === "cloud" ? !liveCloudReady : !canStart) ||
                 downloading !== null}
               title={downloading !== null
-                ? "Downloading model…"
+                ? i18n.t.live.startDownloading
                 : starting
-                  ? "Connecting…"
-                  : "Start transcription"}
-              aria-label="Start transcription"
+                  ? i18n.t.live.startConnecting
+                  : i18n.t.live.start}
+              aria-label={i18n.t.live.start}
             >
               {#if starting}
                 <span class="spinner" aria-hidden="true"></span>
@@ -2008,7 +2056,7 @@
             </button>
             {#if starting && slowStart}
               <span class="start-hint" role="status">
-                {liveEngine === "cloud" ? "Connecting…" : "Loading model — a first run can take a few seconds"}
+                {liveEngine === "cloud" ? i18n.t.live.startConnecting : i18n.t.live.startSlowHint}
               </span>
             {/if}
           </div>
@@ -2031,7 +2079,7 @@
           <circle cx="9.5" cy="5" r="1.6" />
           <circle cx="6" cy="11" r="1.6" />
         </svg>
-        {liveEngine === "cloud" ? "Audio · devices" : "Advanced · audio, language, speakers"}
+        {liveEngine === "cloud" ? i18n.t.live.advancedCloud : i18n.t.live.advanced}
       </button>
       <Modal bind:open={liveAdvancedOpen} title={liveEngine === "cloud" ? "Audio" : "Advanced settings"}>
           <section class="modal-section">
@@ -2258,7 +2306,7 @@
         </div>
       {:else}
         <div class="box-head file-pick-head">
-          <span class="source-prefix">Transcribe with</span>
+          <span class="source-prefix">{i18n.t.common.transcribeWith}</span>
           {@render modelPicker()}
         </div>
         {#if fileEngine === "cloud"}
@@ -2324,22 +2372,20 @@
           disabled={!fileReady}
           aria-label="Choose a file to transcribe"
         >
-          <div class="dropzone-title">Click to choose a file, or drop one here</div>
+          <div class="dropzone-title">{i18n.t.file.dropTitle}</div>
           <p class="dropzone-sub">
             {#if fileEngine === "cloud"}
               {#if fileCloudReady}
-                mp3, m4a, wav, flac, mp4, mov… sent to
-                <strong>{fileProv?.name} {fileMod?.name}</strong>.
+                {i18n.t.file.subCloudReady.before}<strong>{fileProv?.name} {fileMod?.name}</strong>{i18n.t.file.subCloudReady.after}
               {:else if fileProv?.keySet}
-                Choose a cloud model above.
+                {i18n.t.file.subCloudPick}
               {:else}
-                Add your {fileProv?.name ?? "provider"} API key to transcribe in the cloud.
+                {i18n.t.file.subCloudNoKey(fileProv?.name ?? "provider")}
               {/if}
             {:else if chosenModel?.installed}
-              mp3, m4a, wav, flac, mp4, mov… transcribed locally with
-              <strong>{chosenModel.name}</strong>.
+              {i18n.t.file.subLocalReady.before}<strong>{chosenModel.name}</strong>{i18n.t.file.subLocalReady.after}
             {:else}
-              <strong>{chosenModel?.name}</strong> isn't downloaded yet — get it below to transcribe.
+              {i18n.t.file.subLocalMissing.before}<strong>{chosenModel?.name}</strong>{i18n.t.file.subLocalMissing.after}
             {/if}
           </p>
         </button>
@@ -2361,7 +2407,7 @@
             <circle cx="9.5" cy="5" r="1.6" />
             <circle cx="6" cy="11" r="1.6" />
           </svg>
-          {fileEngine === "cloud" ? "Options · hints, speakers" : "Options · accuracy, hints, speakers"}
+          {fileEngine === "cloud" ? i18n.t.file.optionsCloud : i18n.t.file.options}
         </button>
         <Modal bind:open={fileOptionsOpen} title="Options">
           <section class="modal-section">
@@ -2687,6 +2733,73 @@
   .theme-toggle.is-dark .theme-glyph.sun {
     opacity: 1;
     transform: rotate(0deg) scale(1);
+  }
+
+  /* Language switcher: a globe in the rail that opens a small menu of every registered locale.
+     Mirrors the transcript Export menu — a transparent fixed backdrop closes it on outside click. */
+  .rail-lang {
+    position: relative;
+    display: flex;
+  }
+
+  .rail-lang > .rail-item {
+    width: 100%;
+  }
+
+  .rail-lang-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 40;
+    background: transparent;
+    border: none;
+    cursor: default;
+  }
+
+  .rail-lang-menu {
+    position: absolute;
+    left: calc(100% + 8px);
+    bottom: 0;
+    z-index: 41;
+    min-width: 134px;
+    padding: 5px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 11px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.18);
+  }
+
+  .rail-lang-opt {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 7px 10px;
+    font-family: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    cursor: pointer;
+    white-space: nowrap;
+    transition: background 0.12s;
+  }
+
+  .rail-lang-opt:hover {
+    background: var(--surface-active);
+  }
+
+  .rail-lang-opt.sel {
+    color: var(--accent);
+  }
+
+  .rail-lang-check {
+    width: 14px;
+    height: 14px;
+    flex: none;
   }
 
   /* The workspace: the active mode's content, capped to a readable width and centred in the space
