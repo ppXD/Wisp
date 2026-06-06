@@ -105,9 +105,10 @@ jobs:
         run: |
           npm ci
           npm run build
-      # Build the sherpa engine first so its prebuilt dylibs are present before the app's build.rs
-      # stages them for tauri's `resources` check — same ordering caveat as the Windows job.
+      # Build sherpa in RELEASE so its prebuilt dylibs land in target/release — the exact path
+      # tauri.conf.json's `bundle.macOS.frameworks` points at, which tauri_build validates at compile
+      # time. The app itself still builds in debug (fast); only the dylib *location* needs release.
       - name: Stage sherpa runtime libs
-        run: cargo build --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
+        run: cargo build --release --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
       - name: Build the app
         run: cargo build --manifest-path app/src-tauri/Cargo.toml
