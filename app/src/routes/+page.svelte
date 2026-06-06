@@ -118,6 +118,26 @@
     }
   }
 
+  // Colour theme: light (default) or dark, applied to <html data-theme> and persisted. The inline
+  // script in app.html applies the saved value before first paint; onMount syncs this state to it.
+  let theme = $state<"light" | "dark">("light");
+  function setTheme(next: "light" | "dark") {
+    theme = next;
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem("wisp.theme", next);
+    } catch {
+      /* storage unavailable — keep the choice for this session only */
+    }
+  }
+  function toggleTheme() {
+    const next = theme === "dark" ? "light" : "dark";
+    // Cross-fade the whole window where the WebView supports it; otherwise swap instantly.
+    const doc = document as Document & { startViewTransition?: (cb: () => void) => void };
+    if (doc.startViewTransition) doc.startViewTransition(() => setTheme(next));
+    else setTheme(next);
+  }
+
   // Settings modals (replace the old inline disclosures, so opening them never shifts the layout).
   let liveAdvancedOpen = $state(false);
   let fileOptionsOpen = $state(false);
@@ -1247,6 +1267,7 @@
       if (saved.live) liveModelId = saved.live;
       if (saved.file) fileModelId = saved.file;
       sidebarExpanded = localStorage.getItem("wisp.sidebarExpanded") === "true";
+      theme = document.documentElement.dataset.theme === "dark" ? "dark" : "light";
     } catch {
       /* ignore unreadable storage */
     }
@@ -1337,6 +1358,46 @@
     <div class="rail-spacer"></div>
 
     <button
+      class="rail-item theme-toggle"
+      class:is-dark={theme === "dark"}
+      onclick={toggleTheme}
+      title={theme === "dark" ? "Switch to light theme" : "Switch to dark theme"}
+      aria-label="Toggle colour theme"
+    >
+      <span class="rail-ico theme-ico">
+        <!-- Moon — shown in light mode (click to go dark). -->
+        <svg
+          class="theme-glyph moon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M20.5 14.2A8.2 8.2 0 0 1 9.8 3.5a8.2 8.2 0 1 0 10.7 10.7z" />
+        </svg>
+        <!-- Sun (filled centre, distinct from the Settings gear below) — shown in dark mode. -->
+        <svg
+          class="theme-glyph sun"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linecap="round"
+          aria-hidden="true"
+        >
+          <circle cx="12" cy="12" r="4" fill="currentColor" stroke="none" />
+          <path
+            d="M12 2.5v2.3M12 19.2v2.3M2.5 12h2.3M19.2 12h2.3M5.2 5.2l1.6 1.6M17.2 17.2l1.6 1.6M18.8 5.2l-1.6 1.6M6.8 17.2l-1.6 1.6"
+          />
+        </svg>
+      </span>
+      <span class="rail-label">{theme === "dark" ? "Light mode" : "Dark mode"}</span>
+    </button>
+
+    <button
       class="rail-item"
       onclick={() => (cloudState.endpointsOpen = true)}
       title="Settings"
@@ -1349,10 +1410,13 @@
         stroke="currentColor"
         stroke-width="1.7"
         stroke-linecap="round"
+        stroke-linejoin="round"
         aria-hidden="true"
       >
-        <circle cx="12" cy="12" r="3.2" />
-        <path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M19 5l-2 2M7 17l-2 2" />
+        <circle cx="12" cy="12" r="3" />
+        <path
+          d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"
+        />
       </svg>
       <span class="rail-label">Settings</span>
     </button>
@@ -2350,6 +2414,22 @@
     --font-mono: "Geist Mono Variable", ui-monospace, monospace;
   }
 
+  /* Dark theme — a warm espresso palette that mirrors the light paper theme. Only the colour
+     tokens change; every surface already reads from these vars, so the whole UI follows. */
+  :global(:root[data-theme="dark"]) {
+    --bg: #1a1714;
+    --surface: #221e19;
+    --surface-active: #2e2820;
+    --text: #efe9df;
+    --muted: #9b9388;
+    --border: #322d26;
+    --border-strong: #423b32;
+    --accent: #d4734f;
+    --accent-hover: #e08a66;
+    --stop: #d35f4f;
+    --live: #7faa88;
+  }
+
   :global(body) {
     margin: 0;
     background: var(--bg);
@@ -2485,6 +2565,43 @@
 
   .rail-spacer {
     flex: 1;
+  }
+
+  /* Theme toggle: the moon (light) and sun (dark) glyphs are stacked and cross-fade with a
+     rotate/scale swap, so a click reads as the icon turning over rather than blinking. */
+  .theme-ico {
+    position: relative;
+    display: inline-flex;
+  }
+
+  .theme-glyph {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    transition:
+      opacity 0.3s ease,
+      transform 0.45s cubic-bezier(0.34, 1.25, 0.5, 1);
+  }
+
+  .theme-glyph.moon {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
+  }
+
+  .theme-glyph.sun {
+    opacity: 0;
+    transform: rotate(-90deg) scale(0.3);
+  }
+
+  .theme-toggle.is-dark .theme-glyph.moon {
+    opacity: 0;
+    transform: rotate(90deg) scale(0.3);
+  }
+
+  .theme-toggle.is-dark .theme-glyph.sun {
+    opacity: 1;
+    transform: rotate(0deg) scale(1);
   }
 
   /* The workspace: the active mode's content, capped to a readable width and centred in the space
