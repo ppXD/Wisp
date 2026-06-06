@@ -27,5 +27,6 @@ thiserror = "2"
 unsafe_code = "warn"
 
 [profile.release]
-lto = "thin"
+lto = "fat"
 strip = true
+codegen-units = 1
