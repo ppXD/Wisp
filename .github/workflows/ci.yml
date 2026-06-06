@@ -59,6 +59,11 @@ jobs:
   windows-app:
     name: app builds (windows)
     runs-on: windows-latest
+    env:
+      # The bundled WebRTC uses C++20 designated initializers; macOS clang allows them as an
+      # extension but MSVC needs /std:c++20, and webrtc's meson.build pins cpp_std=c++17. Override
+      # via CXXFLAGS — cl.exe takes the last /std flag, so c++20 wins over meson's c++17.
+      CXXFLAGS: /std:c++20
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
