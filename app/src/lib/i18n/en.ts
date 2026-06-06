@@ -114,6 +114,44 @@ export const en = {
     noModel: "No model",
     manageModels: "✦ Manage models & endpoints…",
     addCustom: "+ Custom model…",
+    onDevice: "On-device",
+    cloud: "Cloud",
+    recommendedCat: "Recommended",
+    bestAccuracy: "best accuracy",
+    forThisMachine: "for this machine",
+    apiKeyNeeded: "API key needed",
+    addKeyHint: (name: string): string => `Add an API key in Settings → AI models to use ${name}.`,
+    noCloudModels: "No cloud models yet — add a provider & key in Settings → AI models.",
+    importCustom: "Import custom model…",
+    manageInSettings: "Manage models in Settings…",
+    manageHint: "API keys · endpoints · custom models",
+  },
+
+  // Live box-aux: model download / CoreML hints, permission banners, cloud key notices. "Wisp",
+  // "Neural Engine", "System Settings", "Screen Recording"/"Microphone" (macOS panes), and provider
+  // names stay English.
+  notice: {
+    blocked: (reason: string): string => `⚠ ${reason} — pick another model.`,
+    download: "Download",
+    retryDownload: "Retry download",
+    coremlSupports: (size: string): string => `⚡ Supports Neural Engine acceleration · optional ${size} after install`,
+    coremlOn: "⚡ Neural Engine acceleration on",
+    coremlBoost: (size: string): string => `⚡ Neural Engine boost · ${size}`,
+    screenRecOff: "Screen Recording is off.",
+    screenRecOffBody: "Enable Wisp under Screen Recording in System Settings, then restart to apply it.",
+    micOff: "Microphone is off.",
+    micOffBody: "Enable Wisp under Microphone in System Settings, then restart — or set Microphone to Off in Advanced.",
+    grant: "Grant",
+    restart: "Restart",
+    addKeyLead: (name: string): string => `Add your ${name} API key`,
+    addKeyBody: "to run live cloud transcription. Stored on this device only.",
+    apiKeys: "API keys",
+    manageApiKey: "Manage API key",
+    realtimeNote: (name: string): string =>
+      `Cloud realtime streams audio continuously to ${name} — it bills per minute and needs a stable connection.`,
+    sentenceNote: (name: string): string =>
+      `${name} transcribes each finished sentence — near-live, with no mid-sentence partials, billed per request.`,
+    advancedParams: "Advanced parameters",
   },
 
   // Advanced parameters panel (ParamsPanel). The per-parameter labels come from the backend specs.

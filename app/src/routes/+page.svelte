@@ -251,7 +251,7 @@
       : models.find((m) => m.recommendedLive)
     )?.id,
   );
-  const recommendTag = $derived(mode === "file" ? "best accuracy" : "for this machine");
+  const recommendTag = $derived(mode === "file" ? i18n.t.picker.bestAccuracy : i18n.t.picker.forThisMachine);
 
   // The pinned ★ Recommended category keys (a sentinel "family"/"provider" id the picker special-cases).
   const REC_LOCAL = "local:__rec__";
@@ -282,7 +282,7 @@
     return "Whisper";
   }
   const localCategories = $derived([
-    ...(recommendedLocal.length ? [{ key: REC_LOCAL, label: "Recommended", star: true }] : []),
+    ...(recommendedLocal.length ? [{ key: REC_LOCAL, label: i18n.t.picker.recommendedCat, star: true }] : []),
     ...FAMILY_ORDER.filter((label) => models.some((m) => familyLabel(m.family) === label)).map(
       (label) => ({ key: `local:${label}`, label, star: false }),
     ),
@@ -327,7 +327,7 @@
       ),
   );
   const cloudCategories = $derived([
-    ...(recommendedCloud.length ? [{ key: REC_CLOUD, label: "Recommended", keySet: true, star: true }] : []),
+    ...(recommendedCloud.length ? [{ key: REC_CLOUD, label: i18n.t.picker.recommendedCat, keySet: true, star: true }] : []),
     ...cloudProviders.map((p) => ({ key: `cloud:${p.id}`, label: p.name, keySet: p.keySet, star: false })),
   ]);
 
@@ -1539,16 +1539,16 @@
           <span class="picker-caret"></span>
         </button>
         {#if pickerOpen}
-          <button class="picker-backdrop" aria-label="Close" onclick={() => (pickerOpen = false)}
+          <button class="picker-backdrop" aria-label={i18n.t.common.close} onclick={() => (pickerOpen = false)}
           ></button>
           <!-- Tabs (On-device | Cloud) up top; below, categories (left) → that category's models (right). -->
           <div class="picker-menu wide" transition:fly={{ y: -6, duration: 120 }}>
             <div class="picker-tabs">
               <button class:active={pickerTab === "local"} onclick={() => selectTab("local")}>
-                On-device
+                {i18n.t.picker.onDevice}
               </button>
               <button class:active={pickerTab === "cloud"} onclick={() => selectTab("cloud")}>
-                Cloud
+                {i18n.t.picker.cloud}
               </button>
             </div>
             <div class="picker-panes">
@@ -1575,7 +1575,7 @@
                     >
                       {#if c.star}<span class="picker-cat-star">✦</span>{/if}
                       <span class="picker-cat-name">{c.label}</span>
-                      {#if !c.keySet}<span class="picker-cat-dot" title="API key needed"></span>{/if}
+                      {#if !c.keySet}<span class="picker-cat-dot" title={i18n.t.picker.apiKeyNeeded}></span>{/if}
                     </button>
                   {/each}
                 {/if}
@@ -1603,7 +1603,7 @@
                           <span class="picker-opt-name">{m.name}</span>
                           {#if m.id === recommendedId}<span class="picker-tag rec">{recommendTag}</span
                             >{/if}
-                          {#if m.active}<span class="picker-tag">active</span>
+                          {#if m.active}<span class="picker-tag">{i18n.t.picker.active}</span>
                           {:else if !m.installed}<span class="picker-opt-size">{fmtSize(m.sizeBytes)}</span
                             >{/if}
                           {#if m.fit === "heavy"}<span class="picker-opt-note">{m.fitReason}</span>{/if}
@@ -1646,13 +1646,13 @@
                       onclick={() => chooseCloud(p.id, m.id)}
                     >
                       <span class="picker-opt-name">{p.name} · {m.name}</span>
-                      {#if !p.keySet}<span class="picker-opt-note">needs key</span>{/if}
+                      {#if !p.keySet}<span class="picker-opt-note">{i18n.t.picker.needsKey}</span>{/if}
                     </button>
                   {/each}
                 {:else if pickerCatProvider}
                   {#if !pickerCatProvider.keySet}
                     <div class="picker-detail-hint">
-                      Add an API key in Settings → AI models to use {pickerCatProvider.name}.
+                      {i18n.t.picker.addKeyHint(pickerCatProvider.name)}
                     </div>
                   {/if}
                   {#each runnableCloudModels(pickerCatProvider) as m (m.id)}
@@ -1662,12 +1662,12 @@
                       onclick={() => chooseCloud(pickerCatProvider.id, m.id)}
                     >
                       <span class="picker-opt-name">{m.name}</span>
-                      {#if m.recommended}<span class="picker-tag rec">recommended</span>{/if}
+                      {#if m.recommended}<span class="picker-tag rec">{i18n.t.picker.recommended}</span>{/if}
                     </button>
                   {/each}
                 {:else}
                   <div class="picker-detail-hint">
-                    No cloud models yet — add a provider &amp; key in Settings → AI models.
+                    {i18n.t.picker.noCloudModels}
                   </div>
                 {/if}
               </div>
@@ -1677,7 +1677,7 @@
               <button class="picker-custom" onclick={importCustom}>
                 <span class="picker-custom-main">
                   <span class="picker-custom-icon" aria-hidden="true"></span>
-                  <span class="picker-custom-label">Import custom model…</span>
+                  <span class="picker-custom-label">{i18n.t.picker.importCustom}</span>
                 </span>
                 <span class="picker-custom-hint">.bin / .gguf · Whisper GGML/GGUF</span>
               </button>
@@ -1686,9 +1686,9 @@
               <button class="picker-custom" onclick={manageCloudModels}>
                 <span class="picker-custom-main">
                   <span class="picker-custom-icon cog" aria-hidden="true"></span>
-                  <span class="picker-custom-label">Manage models in Settings…</span>
+                  <span class="picker-custom-label">{i18n.t.picker.manageInSettings}</span>
                 </span>
-                <span class="picker-custom-hint">API keys · endpoints · custom models</span>
+                <span class="picker-custom-hint">{i18n.t.picker.manageHint}</span>
               </button>
             {/if}
           </div>
@@ -1773,14 +1773,14 @@
       {#if liveNotice}
         <div class="live-notice" role="status">
           <span>{liveNotice}</span>
-          <button class="live-notice-x" aria-label="Dismiss" onclick={() => (liveNotice = "")}>×</button>
+          <button class="live-notice-x" aria-label={i18n.t.common.dismiss} onclick={() => (liveNotice = "")}>×</button>
         </div>
       {/if}
 
       {#if !running && (error || (liveEngine === "local" && (needsScreenRecording || needsMicPermission || (chosenModel && !chosenModel.installed) || (chosenModel && chosenModel.installed && chosenModel.coremlAvailable))))}
         <div class="box-aux">
           {#if liveEngine === "local" && chosenModel && chosenModel.fit === "blocked"}
-            <span class="blocked-notice">⚠ {chosenModel.fitReason} — pick another model.</span>
+            <span class="blocked-notice">{i18n.t.notice.blocked(chosenModel.fitReason ?? "")}</span>
           {:else if liveEngine === "local" && chosenModel && !chosenModel.installed}
             {#if downloading === chosenModel.id && downloadProgress}
               <div class="dl-bar">
@@ -1791,7 +1791,7 @@
               </div>
             {:else}
               <button class="btn outline" onclick={() => download(chosenModel.id)} disabled={downloading !== null}>
-                {downloadFailed === chosenModel.id ? "Retry download" : "Download"} · {fmtSize(chosenModel.sizeBytes)}
+                {downloadFailed === chosenModel.id ? i18n.t.notice.retryDownload : i18n.t.notice.download} · {fmtSize(chosenModel.sizeBytes)}
               </button>
             {/if}
           {/if}
@@ -1799,14 +1799,14 @@
           <!-- Before download, surface that whisper.cpp models also support an optional ANE boost. -->
           {#if liveEngine === "local" && chosenModel && chosenModel.fit !== "blocked" && !chosenModel.installed && chosenModel.coremlAvailable}
             <span class="coreml-hint">
-              ⚡ Supports Neural Engine acceleration · optional {fmtSize(chosenModel.coremlSizeBytes)} after install
+              {i18n.t.notice.coremlSupports(fmtSize(chosenModel.coremlSizeBytes))}
             </span>
           {/if}
 
           <!-- Optional Apple Neural Engine encoder for installed whisper.cpp models. -->
           {#if liveEngine === "local" && chosenModel && chosenModel.installed && chosenModel.coremlAvailable}
             {#if chosenModel.coremlInstalled}
-              <span class="coreml-on">⚡ Neural Engine acceleration on</span>
+              <span class="coreml-on">{i18n.t.notice.coremlOn}</span>
             {:else if downloadingCoreml === chosenModel.id && coremlProgress}
               <div class="dl-bar">
                 <div class="dl-track"><div class="dl-fill" style="width:{coremlPct}%"></div></div>
@@ -1820,7 +1820,7 @@
                 onclick={() => downloadCoreml(chosenModel.id)}
                 disabled={downloadingCoreml !== null}
               >
-                ⚡ Neural Engine boost · {fmtSize(chosenModel.coremlSizeBytes)}
+                {i18n.t.notice.coremlBoost(fmtSize(chosenModel.coremlSizeBytes))}
               </button>
             {/if}
           {/if}
@@ -1828,14 +1828,13 @@
           {#if liveEngine === "local" && needsScreenRecording}
             <div class="notice">
               <span class="notice-text">
-                <strong>Screen Recording is off.</strong> Enable Wisp under Screen Recording in System
-                Settings, then restart to apply it.
+                <strong>{i18n.t.notice.screenRecOff}</strong> {i18n.t.notice.screenRecOffBody}
               </span>
               <span class="notice-actions">
                 <button class="btn outline sm" onclick={grantScreenRecording} disabled={permissionBusy}>
-                  {permissionBusy ? "…" : "Grant"}
+                  {permissionBusy ? "…" : i18n.t.notice.grant}
                 </button>
-                <button class="btn ghost sm" onclick={restartApp}>Restart</button>
+                <button class="btn ghost sm" onclick={restartApp}>{i18n.t.notice.restart}</button>
               </span>
             </div>
           {/if}
@@ -1843,12 +1842,11 @@
           {#if liveEngine === "local" && needsMicPermission}
             <div class="notice">
               <span class="notice-text">
-                <strong>Microphone is off.</strong> Enable Wisp under Microphone in System Settings,
-                then restart — or set Microphone to Off in Advanced.
+                <strong>{i18n.t.notice.micOff}</strong> {i18n.t.notice.micOffBody}
               </span>
               <span class="notice-actions">
-                <button class="btn outline sm" onclick={openMicSettings}>Settings</button>
-                <button class="btn ghost sm" onclick={restartApp}>Restart</button>
+                <button class="btn outline sm" onclick={openMicSettings}>{i18n.t.nav.settings}</button>
+                <button class="btn ghost sm" onclick={restartApp}>{i18n.t.notice.restart}</button>
               </span>
             </div>
           {/if}
@@ -1856,7 +1854,7 @@
           {#if error}
             <div class="notice error">
               <span class="notice-msg">{error}</span>
-              <button class="notice-x" aria-label="Dismiss" onclick={() => (error = "")}>×</button>
+              <button class="notice-x" aria-label={i18n.t.common.dismiss} onclick={() => (error = "")}>×</button>
             </div>
           {/if}
         </div>
@@ -1867,32 +1865,29 @@
           {#if !liveCloudReady}
             <div class="notice">
               <span class="notice-text">
-                <strong>Add your {liveProv?.name ?? "provider"} API key</strong> to run live cloud
-                transcription. Stored on this device only.
+                <strong>{i18n.t.notice.addKeyLead(liveProv?.name ?? "provider")}</strong> {i18n.t.notice.addKeyBody}
               </span>
               <span class="notice-actions">
-                <button class="btn outline sm" onclick={openEndpointsModal}>API keys</button>
+                <button class="btn outline sm" onclick={openEndpointsModal}>{i18n.t.notice.apiKeys}</button>
               </span>
             </div>
           {/if}
 
           {#if liveMod?.streaming}
             <p class="cloud-live-note">
-              Cloud realtime streams audio continuously to {liveProv?.name ?? "the provider"} — it
-              bills per minute and needs a stable connection.
-              <button class="link-btn" onclick={openEndpointsModal}>Manage API key</button>
+              {i18n.t.notice.realtimeNote(liveProv?.name ?? "the provider")}
+              <button class="link-btn" onclick={openEndpointsModal}>{i18n.t.notice.manageApiKey}</button>
             </p>
           {:else}
             <p class="cloud-live-note">
-              {liveProv?.name ?? "The provider"} transcribes each finished sentence — near-live, with no
-              mid-sentence partials, billed per request.
-              <button class="link-btn" onclick={openEndpointsModal}>Manage API key</button>
+              {i18n.t.notice.sentenceNote(liveProv?.name ?? "The provider")}
+              <button class="link-btn" onclick={openEndpointsModal}>{i18n.t.notice.manageApiKey}</button>
             </p>
           {/if}
 
           {#if liveParamSpecs.length}
             <button class="params-trigger" onclick={() => (liveParamsOpen = true)}>
-              <span class="params-ico" aria-hidden="true"></span>Advanced parameters
+              <span class="params-ico" aria-hidden="true"></span>{i18n.t.notice.advancedParams}
             </button>
           {/if}
         </div>
@@ -2217,7 +2212,7 @@
       {#if error}
         <div class="notice error">
           <span class="notice-msg">{error}</span>
-          <button class="notice-x" aria-label="Dismiss" onclick={() => (error = "")}>×</button>
+          <button class="notice-x" aria-label={i18n.t.common.dismiss} onclick={() => (error = "")}>×</button>
         </div>
       {/if}
       {#if fileTranscribing || fileSegments.length}
