@@ -31,9 +31,9 @@ name = "Wisp"
 path = "src/main.rs"
 
 [features]
-# Build the DirectML-enabled onnxruntime for Windows GPU acceleration (one binary, runtime EP
-# selection + CPU fallback). Off by default → the shipped CPU build is unchanged; a Windows GPU
-# build enables it with `--features directml`.
+# DirectML-enabled onnxruntime (Windows GPU). Windows ENABLES THIS AUTOMATICALLY via the
+# cfg(windows) dependency below, so the shipped Windows binary always has GPU support (runtime EP
+# selection + CPU fallback). This flag stays as the manual lever for a non-Windows GPU build.
 directml = ["wisp-engine-sherpa/directml"]
 
 [build-dependencies]
@@ -80,3 +80,8 @@ wisp-loopback = { path = "../../crates/wisp-loopback" }
 # Total physical memory (GlobalMemoryStatusEx) to recommend a machine-appropriate model. Same
 # `windows` major as wisp-loopback, so no extra version in the tree.
 windows = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+# Always build the DirectML-enabled onnxruntime so the app auto-uses any DX12 GPU when present and
+# degrades to CPU otherwise (runtime EP selection — see wisp-engine-sherpa's execution_provider +
+# with_cpu_fallback). One binary, no per-machine build; GPU-less machines are unaffected. macOS gets
+# GPU via Metal/CoreML instead, so directml stays off there.
+wisp-engine-sherpa = { path = "../../crates/wisp-engine-sherpa", features = ["directml"] }

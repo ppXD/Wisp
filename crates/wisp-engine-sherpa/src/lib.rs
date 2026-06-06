@@ -56,7 +56,25 @@ pub const EXECUTION_PROVIDER_ENV: &str = "WISP_ONNX_PROVIDER";
 /// default. Read per config build, so a process can be pointed at a different provider via the
 /// environment without recompiling.
 fn execution_provider() -> Option<String> {
-    parse_provider(std::env::var(EXECUTION_PROVIDER_ENV).ok())
+    // An explicit env override always wins (e.g. WISP_ONNX_PROVIDER=cpu to force CPU, or =cuda).
+    if let Some(p) = parse_provider(std::env::var(EXECUTION_PROVIDER_ENV).ok()) {
+        return Some(p);
+    }
+    default_execution_provider()
+}
+
+/// The provider used when `WISP_ONNX_PROVIDER` is unset. On a DirectML-enabled build (the Windows GPU
+/// build) request the GPU automatically — `with_cpu_fallback` drops to CPU on a machine without a
+/// compatible DX12 GPU — so users get GPU acceleration with zero config and CPU everywhere else.
+/// Non-DirectML builds (macOS, Linux) stay on sherpa's CPU default; macOS gets GPU via Metal instead.
+#[cfg(feature = "directml")]
+fn default_execution_provider() -> Option<String> {
+    Some("directml".to_owned())
+}
+
+#[cfg(not(feature = "directml"))]
+fn default_execution_provider() -> Option<String> {
+    None
 }
 
 /// Normalizes a raw [`EXECUTION_PROVIDER_ENV`] value: trims surrounding space and treats an
