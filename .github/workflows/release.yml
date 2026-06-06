@@ -70,11 +70,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-        with:
-          workspaces: "app/src-tauri -> target"
-          key: ${{ matrix.os }}-release
-
+      # No rust-cache: sherpa-rs-sys downloads its prebuilt libs to a dir outside target/ (and on
+      # Windows bakes absolute link paths), so a cache hit restores target/ without the libs it points
+      # at — the app build.rs DLL staging then fails on a missing onnxruntime.dll. Releases are
+      # infrequent, so build clean (matches the CI app-build jobs, which omit the cache for the same reason).
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -112,13 +111,11 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Optional — set these secrets to sign + notarize the macOS .dmg (see header).
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          # The .dmg ships UNSIGNED — users run `xattr -cr /Applications/Wisp.app` once. Passing empty
+          # APPLE_* secrets made tauri-action attempt (and fail) a keychain certificate import, so the
+          # signing env is omitted entirely. To sign + notarize, set the APPLE_* secrets and restore
+          # their env vars here (APPLE_CERTIFICATE / _PASSWORD / SIGNING_IDENTITY, APPLE_ID / _PASSWORD
+          # / _TEAM_ID) — see the header.
         with:
           projectPath: app
           tagName: ${{ github.event.inputs.tag || github.ref_name }}
