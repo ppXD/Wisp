@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr_in_place, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
@@ -2744,11 +2744,11 @@ fn open_mic_within(device: Option<String>) -> Result<Box<dyn AudioSource>, Strin
     })
 }
 
-/// The echo canceller for this platform: WebRTC AEC on macOS (falling back to passthrough if it
-/// won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>` lets the dual-stream
-/// path stay identical on every platform — the cross-stream dedup handles residual echo where there
-/// is no real AEC.
-#[cfg(target_os = "macos")]
+/// The echo canceller for this platform: WebRTC AEC3 on macOS and Windows (falling back to
+/// passthrough if it won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>` lets
+/// the dual-stream path stay identical on every platform — the cross-stream dedup handles residual
+/// echo where there is no real AEC.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn echo_canceller() -> Box<dyn EchoCanceller> {
     match WebrtcEchoCanceller::new() {
         Ok(c) => Box::new(c),
@@ -2759,7 +2759,7 @@ fn echo_canceller() -> Box<dyn EchoCanceller> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn echo_canceller() -> Box<dyn EchoCanceller> {
     Box::new(PassthroughEchoCanceller)
 }

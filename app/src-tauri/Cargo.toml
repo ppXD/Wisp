@@ -85,3 +85,7 @@ wisp-loopback = { path = "../../crates/wisp-loopback" }
 # Total physical memory (GlobalMemoryStatusEx) to recommend a machine-appropriate model. Same
 # `windows` major as wisp-loopback, so no extra version in the tree.
 windows = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+# Real WebRTC AEC3 echo cancellation, same as macOS. The bundled WebRTC compiles via meson + ninja +
+# a C++ toolchain (added to the windows CI/release jobs); the dual-stream echo path then uses real
+# AEC3 instead of the cross-stream dedup fallback.
+wisp-aec = { path = "../../crates/wisp-aec" }
