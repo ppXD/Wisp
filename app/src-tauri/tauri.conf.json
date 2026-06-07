@@ -39,6 +39,7 @@
     ],
     "macOS": {
       "minimumSystemVersion": "11.0",
+      "signingIdentity": "-",
       "frameworks": [
         "target/release/libonnxruntime.1.17.1.dylib",
         "target/release/libsherpa-onnx-c-api.dylib"
