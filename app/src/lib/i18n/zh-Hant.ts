@@ -202,7 +202,7 @@ export const zhHant: Messages = {
     transcribing: "轉寫中",
     done: "完成",
     cancelling: "正在取消…",
-    aiNotes: "✦ AI 筆記",
+    aiNotes: "AI 筆記",
     transcribingLarge: "轉寫中… 大檔案需要一點時間。",
     transcribeAnother: "轉寫另一個",
     keySaved: (name) => `✓ ${name} 金鑰已儲存在本機`,

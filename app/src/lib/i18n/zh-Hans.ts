@@ -202,7 +202,7 @@ export const zhHans: Messages = {
     transcribing: "转写中",
     done: "完成",
     cancelling: "正在取消…",
-    aiNotes: "✦ AI 笔记",
+    aiNotes: "AI 笔记",
     transcribingLarge: "转写中… 大文件需要一点时间。",
     transcribeAnother: "转写另一个",
     keySaved: (name) => `✓ ${name} 密钥已存储在本机`,

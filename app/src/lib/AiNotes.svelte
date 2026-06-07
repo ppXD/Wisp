@@ -332,6 +332,9 @@ in the meeting's language, no preamble.";
   // Live rolling.
   let liveOn = $state(false);
   let connecting = $state(false); // Start pressed, establishing the first response (not yet "live")
+  // Bumped on every Start and on Cancel; an in-flight start checks it after each await and bails if it
+  // changed, so cancelling a stuck connect can never later flip the assist live.
+  let startToken = 0;
   // True while a realtime (WebSocket) assist is the live one — so Stop closes the socket (not just
   // the chat rolling), and the rolling timer below stays off (realtime pushes via events instead).
   let runningRealtime = $state(false);
@@ -508,8 +511,10 @@ in the meeting's language. Output only the summary.";
       await call(transcript); // static transcript → a single pass (the feed shows Working…)
       return;
     }
+    const myToken = ++startToken;
     connecting = true;
     await rollOnce(); // first hint — the "connect" — also seeds the summary-buffer memory
+    if (myToken !== startToken) return; // cancelled mid-connect → don't flip live
     connecting = false;
     if (!error) liveOn = true; // succeeded → go live (collapses; the bar shows Stop)
   }
@@ -519,6 +524,7 @@ in the meeting's language. Output only the summary.";
   // session's mic+system audio and emits each finalised reply as an `assist://text` event.
   async function startRealtime() {
     if (!provider || !model || !live || !sessionRunning) return;
+    const myToken = ++startToken;
     connecting = true;
     try {
       await invoke("start_assist_realtime", {
@@ -527,12 +533,16 @@ in the meeting's language. Output only the summary.";
         instructions: prompt,
         params: assistOverrides,
       });
+      if (myToken !== startToken) {
+        void stopRealtime(); // cancelled while the socket was opening → tear it back down
+        return;
+      }
       runningRealtime = true;
       liveOn = true;
     } catch (e) {
-      error = String(e);
+      if (myToken === startToken) error = String(e);
     }
-    connecting = false;
+    if (myToken === startToken) connecting = false;
   }
 
   // Close the realtime assist's WebSocket. Best-effort — even if the call fails, drop the live state.
@@ -560,6 +570,24 @@ in the meeting's language. Output only the summary.";
     } catch {
       // assist not running — nothing to pull.
     }
+  }
+
+  // The "run right now" button shown while the assist is live: a realtime assist pulls an immediate
+  // reply; a chat assist runs one roll now instead of waiting for the throttle tick. Both no-op safely
+  // when busy (rollOnce guards on `running`).
+  function runNow() {
+    if (runningRealtime) void hintNow();
+    else void rollOnce();
+  }
+
+  // Abort a Start that's stuck establishing — the realtime socket won't connect, or the first chat roll
+  // hangs. Bump the token so the in-flight attempt resolves into a no-op, drop the busy flags, and tear
+  // down any half-open realtime socket, leaving the panel back on the config view so Start can be retried.
+  function cancelStart() {
+    startToken++;
+    connecting = false;
+    running = false;
+    void stopRealtime();
   }
 
   function clearFeed() {
@@ -716,9 +744,7 @@ in the meeting's language. Output only the summary.";
 
     {#if collapsed}
       <div class="ctl-right">
-        {#if runningRealtime}
-          <button class="hint" onclick={hintNow} title={i18n.t.assist.hintNow}>✨ {i18n.t.assist.hint}</button>
-        {/if}
+        <button class="hint" onclick={runNow} disabled={running} title={i18n.t.assist.hintNow}>✨ {i18n.t.assist.hint}</button>
         <button class="stop" onclick={stopAssist}>◼ {i18n.t.assist.stop}</button>
         <button class="clear" onclick={clearFeed} disabled={!feed.length}>{i18n.t.common.clear}</button>
       </div>
@@ -786,6 +812,9 @@ in the meeting's language. Output only the summary.";
       >
         {#if connecting || running}<span class="btn-spin"></span>{connecting ? i18n.t.assist.connecting : i18n.t.assist.working}{:else}{selectedKind === "realtime" ? `⚡ ${i18n.t.assist.start}` : `▸ ${i18n.t.assist.start}`}{/if}
       </button>
+      {#if connecting || running}
+        <button class="stop" onclick={cancelStart} title={i18n.t.assist.stop}>◼ {i18n.t.assist.stop}</button>
+      {/if}
       <button class="clear act-clear" onclick={clearFeed} disabled={!feed.length}>{i18n.t.common.clear}</button>
     </div>
 
