@@ -41,7 +41,7 @@ sherpa-cpu = ["wisp-engine-sherpa/download-binaries"]
 sherpa-gpu = ["wisp-engine-sherpa/directml"]
 # whisper.cpp with the Vulkan GPU backend on Windows (generic GPU — AMD/Intel/NVIDIA — with a CPU
 # fallback). Off by default; the Windows GPU release turns it on. No effect on macOS (always Metal).
-whisper-vulkan = ["wisp-engine-whisper-cpp/vulkan"]
+whisper-vulkan = ["wisp-engine-whisper-cpp/vulkan", "wisp-models/whisper-vulkan"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }

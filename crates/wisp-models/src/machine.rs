@@ -169,7 +169,14 @@ fn resolve(ideal: &str, catalog: &[ModelDescriptor]) -> ModelId {
 /// scattered `cfg` checks.
 pub fn family_runnable(family: ModelFamily, accelerator: Accelerator) -> bool {
     match family {
-        ModelFamily::WhisperCpp | ModelFamily::AppleSpeech => accelerator == Accelerator::Metal,
+        // whisper.cpp runs on the Apple GPU (Metal), or — in a Windows GPU build — on Vulkan with a
+        // built-in CPU fallback, so it's offered on Windows too (no GPU required to run, just to
+        // accelerate). Apple on-device speech stays macOS/Metal-only.
+        ModelFamily::WhisperCpp => {
+            accelerator == Accelerator::Metal
+                || (cfg!(target_os = "windows") && cfg!(feature = "whisper-vulkan"))
+        }
+        ModelFamily::AppleSpeech => accelerator == Accelerator::Metal,
         _ => true,
     }
 }
