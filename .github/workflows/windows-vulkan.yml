@@ -44,19 +44,39 @@ jobs:
         with:
           version: 1.4.309.0
           cache: true
-      - name: Build the frontend (tauri-build needs the dist)
+      - name: Install the frontend deps
         working-directory: app
-        run: |
-          npm ci
-          npm run build
-      - name: Build the Windows app with the Vulkan whisper.cpp engine
+        run: npm ci
+      # `tauri build` runs the frontend build (beforeBuildCommand) + the cargo release build + the NSIS
+      # bundler in one step, producing the real Windows GPU installer: default features (sherpa on CPU)
+      # plus whisper-vulkan (whisper on the GPU, CPU fallback). This also proves the exact release
+      # recipe — that tauri's bundler honours CARGO_TARGET_DIR=D:\b — before wiring it into release.yml.
+      - name: Build the Windows GPU installer (whisper.cpp Vulkan)
+        working-directory: app
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
-          # Default features (sherpa-cpu) + whisper-vulkan: sherpa runs on CPU, whisper on the GPU.
-          cargo build --manifest-path app/src-tauri/Cargo.toml --features whisper-vulkan
+          npm run tauri build -- --features whisper-vulkan
+      # Show where the NSIS bundler dropped the installer so the release.yml recipe can target the same
+      # path (confirms CARGO_TARGET_DIR is honoured by the bundler, not just the compiler).
+      - name: Locate the installer (diagnostic)
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse "D:\b","app\src-tauri\target" -Include *-setup.exe -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length | Format-Table -Auto
+      # Upload the installer so it can be downloaded and tested on real Windows hardware (GPU + non-GPU).
+      - name: Upload the Windows GPU installer
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wisp-windows-gpu-installer
+          if-no-files-found: warn
+          path: |
+            D:\b\release\bundle\nsis\*-setup.exe
+            app/src-tauri/target/release/bundle/nsis/*-setup.exe
       # Always list what the CMake build actually produced, so a link-path/lib-name mismatch in
-      # build.rs is visible from the log even when the cargo build fails at the link step.
+      # build.rs is visible from the log even when the build fails at the link step.
       - name: List the produced whisper/ggml libs (diagnostic)
         if: always()
         shell: pwsh
