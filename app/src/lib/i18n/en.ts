@@ -233,7 +233,7 @@ export const en = {
     transcribing: "transcribing",
     done: "done",
     cancelling: "Cancelling…",
-    aiNotes: "✦ AI Notes",
+    aiNotes: "AI Notes",
     transcribingLarge: "Transcribing… large files take a little while.",
     transcribeAnother: "Transcribe another",
     keySaved: (name: string): string => `✓ ${name} key saved on this device`,

@@ -937,6 +937,8 @@
   // Whether the transcript's compact "Export ▾" menu is open (collapses MD/TXT/SRT into one control).
   let exportMenuOpen = $state(false);
   let liveBodyEl = $state<HTMLElement | null>(null);
+  let fileBodyEl = $state<HTMLElement | null>(null);
+  let fileAssistOpen = $state(false);
   const ASSIST_MIN = 320;
   const TRANSCRIPT_MIN = 360;
   let assistWidth = $state(Math.max(ASSIST_MIN, Number(localStorage.getItem("wisp.assistWidth")) || 440));
@@ -966,7 +968,8 @@
     e.preventDefault();
     const startX = e.clientX;
     const startW = assistWidth;
-    const maxW = liveBodyEl ? Math.max(ASSIST_MIN, liveBodyEl.clientWidth - TRANSCRIPT_MIN) : 9999;
+    const bodyEl = mode === "file" ? fileBodyEl : liveBodyEl;
+    const maxW = bodyEl ? Math.max(ASSIST_MIN, bodyEl.clientWidth - TRANSCRIPT_MIN) : 9999;
     const onMove = (ev: MouseEvent) => {
       assistWidth = Math.min(maxW, Math.max(ASSIST_MIN, startW - (ev.clientX - startX)));
     };
@@ -1044,8 +1047,7 @@
   const speakerColor = (n: number) => SPEAKER_COLORS[n % SPEAKER_COLORS.length];
   const speakerLabel = (n: number) => i18n.t.common.speaker(n + 1);
 
-  // Which File results tab is showing, and the transcript assembled as plain text for the AI tasks.
-  let fileTab = $state<"transcript" | "ai">("transcript");
+  // The File transcript assembled as plain text for the AI Notes panel.
   const fileTranscriptText = $derived(
     fileParagraphs
       .map((p) => {
@@ -1133,7 +1135,7 @@
     }
     error = "";
     fileSegments = [];
-    fileTab = "transcript";
+    fileAssistOpen = false;
     fileProgress = 0;
     fileStage = "";
     fileName = path.split(/[\\/]/).pop() ?? path;
@@ -2215,18 +2217,30 @@
                 · {fileModelLabel}</span
               >{/if}</span
           >
-          <span class="status" class:live={fileTranscribing}>
-            <span class="status-dot"></span>{fileTranscribing
-              ? fileProgress > 0
-                ? `${fileStage || i18n.t.fileResult.transcribing}… ${fileProgress}%`
-                : `${fileStage || i18n.t.fileResult.transcribing}…`
-              : i18n.t.fileResult.done}
+          <span class="head-actions">
+            <span class="status" class:live={fileTranscribing}>
+              <span class="status-dot"></span>{fileTranscribing
+                ? fileProgress > 0
+                  ? `${fileStage || i18n.t.fileResult.transcribing}… ${fileProgress}%`
+                  : `${fileStage || i18n.t.fileResult.transcribing}…`
+                : i18n.t.fileResult.done}
+            </span>
+            {#if fileTranscribing}
+              <button class="file-cancel" onclick={cancelFile} disabled={fileCancelling}>
+                {fileCancelling ? i18n.t.fileResult.cancelling : i18n.t.common.cancel}
+              </button>
+            {/if}
+            {#if fileSegments.length && !fileTranscribing}
+              <button
+                class="assist-launch"
+                class:on={fileAssistOpen}
+                onclick={() => (fileAssistOpen = !fileAssistOpen)}
+                title={i18n.t.fileResult.aiNotes}
+              >
+                <span class="spark">✦</span> {i18n.t.fileResult.aiNotes}
+              </button>
+            {/if}
           </span>
-          {#if fileTranscribing}
-            <button class="file-cancel" onclick={cancelFile} disabled={fileCancelling}>
-              {fileCancelling ? i18n.t.fileResult.cancelling : i18n.t.common.cancel}
-            </button>
-          {/if}
         </div>
         {#if fileTranscribing}
           <div class="file-progress" class:indeterminate={fileProgress === 0}>
@@ -2237,35 +2251,44 @@
           </div>
         {/if}
 
-        {#if fileSegments.length && !fileTranscribing}
-          <div class="seg file-tabs">
-            <button class:active={fileTab === "transcript"} onclick={() => (fileTab = "transcript")}>
-              {i18n.t.common.transcript}
-            </button>
-            <button class:active={fileTab === "ai"} onclick={() => (fileTab = "ai")}>{i18n.t.fileResult.aiNotes}</button>
+        <!-- Transcript on the left; the AI Notes panel docks on the right when opened, so you can read
+             the transcript while the assistant works it. The splitter resizes the panel (drag to widen). -->
+        <div class="file-body" bind:this={fileBodyEl}>
+          <div class="transcript-pane">
+            <ul class="feed">
+              {#each fileParagraphs as para (para.id)}
+                <li>
+                  {#if fileHasTimestamps}
+                    <span class="meta"><span class="time">{fmtTime(para.startMs)}</span></span>
+                  {/if}
+                  <span class="text"
+                    >{#if para.speaker !== null}<span
+                        class="speaker"
+                        style="--spk: {speakerColor(para.speaker)}">{speakerLabel(para.speaker)}</span
+                      >{/if}{para.text}</span>
+                </li>
+              {:else}
+                <li class="empty">{i18n.t.fileResult.transcribingLarge}</li>
+              {/each}
+            </ul>
           </div>
-        {/if}
-
-        {#if fileTab === "ai" && fileSegments.length && !fileTranscribing}
-          <div class="ai-pane"><AiNotes transcript={fileTranscriptText} /></div>
-        {:else}
-        <ul class="feed">
-          {#each fileParagraphs as para (para.id)}
-            <li>
-              {#if fileHasTimestamps}
-                <span class="meta"><span class="time">{fmtTime(para.startMs)}</span></span>
-              {/if}
-              <span class="text"
-                >{#if para.speaker !== null}<span
-                    class="speaker"
-                    style="--spk: {speakerColor(para.speaker)}">{speakerLabel(para.speaker)}</span
-                  >{/if}{para.text}</span>
-            </li>
-          {:else}
-            <li class="empty">{i18n.t.fileResult.transcribingLarge}</li>
-          {/each}
-        </ul>
-        {/if}
+          {#if fileAssistOpen && fileSegments.length && !fileTranscribing}
+            <aside class="assist-panel" style:width="{assistWidth}px">
+              <button
+                class="assist-resize"
+                aria-label={i18n.t.transcript.resizeAssist}
+                onmousedown={startAssistResize}
+              ></button>
+              <div class="assist-head">
+                <span class="assist-title">✦ {i18n.t.fileResult.aiNotes}</span>
+                <button class="assist-x" aria-label={i18n.t.common.close} onclick={() => (fileAssistOpen = false)}
+                  >×</button
+                >
+              </div>
+              <div class="assist-body"><AiNotes transcript={fileTranscriptText} /></div>
+            </aside>
+          {/if}
+        </div>
         <div class="box-foot">
           <div class="export-group">
             {#if fileSegments.length && !fileTranscribing}
@@ -4030,17 +4053,18 @@
     margin: 0 14px 14px;
   }
 
-  /* Transcript ↔ AI Notes tabs + the scrolling AI pane in the File results view. */
-  .file-tabs {
-    align-self: flex-start;
-    margin: 12px 14px 0;
+  /* File results header: file name on the left, a right-aligned cluster of status + AI Notes launcher. */
+  .head-actions {
+    display: flex;
+    align-items: center;
+    gap: 10px;
   }
 
-  .ai-pane {
+  /* File: transcript + AI Notes side by side — mirrors Live; the panel docks on the right, resizable. */
+  .file-body {
     flex: 1 1 auto;
     min-height: 0;
     display: flex;
-    flex-direction: column;
   }
 
   /* Live: transcript + AI assist side by side — the panel docks on the right, never overlays. */
