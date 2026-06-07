@@ -15,6 +15,10 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # Keep the build tree shallow: ggml-vulkan's vulkan-shaders-gen sub-build nests deeply, and from the
+  # default target dir its .pdb path runs past Windows' 260-char MAX_PATH ("cannot open program
+  # database"). A short target root keeps every nested path well under the limit.
+  CARGO_TARGET_DIR: 'D:\b'
 
 jobs:
   build:
@@ -51,6 +55,6 @@ jobs:
         if: always()
         shell: pwsh
         run: |
-          Get-ChildItem -Recurse crates\wisp-engine-whisper-cpp\target -Include *.lib,*.dll -ErrorAction SilentlyContinue |
+          Get-ChildItem -Recurse "$env:CARGO_TARGET_DIR" -Include *.lib,*.dll -ErrorAction SilentlyContinue |
             Where-Object { $_.Name -match '(?i)whisper|ggml|vulkan' } |
             Select-Object FullName, Length | Sort-Object FullName | Format-Table -Auto
