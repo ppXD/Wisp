@@ -157,16 +157,12 @@ npm run tauri dev      # run the app
 npm run tauri build    # produce an installer
 ```
 
-The Rust workspace lives in `crates/*`; the Tauri shell in `app/src-tauri`. See [`CLAUDE.md`](./CLAUDE.md) for architecture and conventions.
-
 ## 💻 Platform support
 
 | Platform | Status | Transcription | GPU | System audio | Echo cancel |
 |---|---|---|---|---|---|
 | **macOS** (Apple Silicon) | ✅ Released | sherpa-onnx · whisper.cpp · Apple SpeechAnalyzer | Metal + ANE | ScreenCaptureKit | WebRTC AEC3 |
-| **Windows** (x64) | ✅ Released | sherpa-onnx | CPU¹ | WASAPI loopback | cross-stream dedup |
-
-<sub>¹ A DirectML GPU path is designed and gated behind the build; Windows runs on CPU by default today.</sub>
+| **Windows** (x64) | ✅ Released | sherpa-onnx | CPU · DirectML GPU (from source) | WASAPI loopback | cross-stream dedup |
 
 ## 📄 License
 
