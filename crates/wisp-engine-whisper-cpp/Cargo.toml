@@ -10,6 +10,12 @@ wisp-core = { path = "../wisp-core" }
 # Physical-core detection for the decode thread count (pure Rust; no native lib linked).
 num_cpus = "1"
 
+[features]
+# Build whisper.cpp with the Vulkan backend on Windows (generic GPU — AMD/Intel/NVIDIA — with a CPU
+# fallback). Off by default so the standard Windows build stays a no-op shell and needs no Vulkan SDK.
+# No effect on macOS, which always builds the Metal + Core ML backend.
+vulkan = []
+
 [build-dependencies]
 cmake = "0.1"
 bindgen = "0.70"

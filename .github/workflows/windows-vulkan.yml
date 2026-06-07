@@ -1,0 +1,47 @@
+# Smoke-builds the whisper.cpp engine crate with the Vulkan GPU backend on Windows.
+#
+# Unlike the sherpa-onnx DirectML path (which compiles onnxruntime from source for hours and has no
+# upstream prebuilt), whisper.cpp + Vulkan builds in minutes and covers any Vulkan GPU — AMD, Intel,
+# or NVIDIA — with ggml's built-in CPU fallback. This validates that the from-source Vulkan build
+# links cleanly so we can wire it into the Windows app. Runs on demand.
+name: Windows Vulkan whisper smoke
+
+on:
+  workflow_dispatch: {}
+  # Validate on pushes to the feature branch (a brand-new workflow can't be dispatched from a
+  # non-default branch). Drop this trigger once the path is proven and the workflow lands on main.
+  push:
+    branches: [feat/windows-vulkan-whisper]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: whisper.cpp + Vulkan (windows)
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive # the vendored whisper.cpp is a submodule
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the Vulkan SDK
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: latest
+          cache: true
+      - name: Build the whisper.cpp engine with the Vulkan backend
+        shell: pwsh
+        run: |
+          Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
+          cargo build -p wisp-engine-whisper-cpp --features vulkan
+      # Always list what the CMake build actually produced, so a link-path/lib-name mismatch in
+      # build.rs is visible from the log even when the cargo build fails at the link step.
+      - name: List the produced whisper/ggml libs (diagnostic)
+        if: always()
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse target\debug\build -Include *.lib,*.dll -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)whisper|ggml|vulkan' } |
+            Select-Object FullName, Length | Sort-Object FullName | Format-Table -Auto

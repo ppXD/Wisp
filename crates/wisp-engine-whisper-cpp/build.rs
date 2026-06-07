@@ -1,11 +1,19 @@
-//! Builds the vendored whisper.cpp (with the Metal backend) and generates Rust bindings for its
-//! C API. macOS-only for now; on other targets this is a no-op so the crate is an empty shell.
+//! Builds the vendored whisper.cpp and generates Rust bindings for its C API.
+//!
+//! - **macOS**: Metal + Core ML backend (always).
+//! - **Windows**: Vulkan backend — generic GPU across AMD/Intel/NVIDIA, with ggml's built-in CPU
+//!   fallback — but only when the `vulkan` feature is on, so the default Windows build stays a no-op
+//!   shell and needs no Vulkan SDK.
+//! - **Other targets**: a no-op, so the crate is an empty shell.
 
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 fn main() {
-    if env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let windows_vulkan = target_os == "windows" && env::var("CARGO_FEATURE_VULKAN").is_ok();
+
+    if target_os != "macos" && !windows_vulkan {
         return;
     }
 
@@ -16,9 +24,19 @@ fn main() {
         "whisper.cpp submodule missing — run `git submodule update --init --recursive`"
     );
 
-    // Build whisper.cpp + ggml as static libs with the Metal backend, embedding the Metal shader
-    // library into the binary so nothing extra has to ship at runtime.
-    let dst = cmake::Config::new(&src)
+    if target_os == "macos" {
+        build_macos(&src);
+    } else {
+        build_windows_vulkan(&src);
+    }
+
+    generate_bindings(&src);
+}
+
+/// Builds whisper.cpp + ggml as static libs with the Metal backend, embedding the Metal shader
+/// library into the binary so nothing extra has to ship at runtime, plus the Core ML encoder path.
+fn build_macos(src: &Path) {
+    let dst = cmake::Config::new(src)
         .profile("Release")
         // ggml uses std::filesystem (introduced in macOS 10.15). Pin a modern deployment target so
         // the C++ build doesn't inherit a lower one from the embedding app's build environment
@@ -79,7 +97,52 @@ fn main() {
     ] {
         println!("cargo:rustc-link-lib=framework={framework}");
     }
+}
 
+/// Builds whisper.cpp + ggml as static libs with the Vulkan backend (generic GPU; ggml falls back to
+/// CPU when no Vulkan device is present). The Vulkan headers + loader import lib come from the Vulkan
+/// SDK at build time (CI installs it; `VULKAN_SDK` points at it); at runtime `vulkan-1.dll` ships with
+/// the GPU driver, so nothing extra has to be bundled.
+fn build_windows_vulkan(src: &Path) {
+    let dst = cmake::Config::new(src)
+        .profile("Release")
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("WHISPER_BUILD_EXAMPLES", "OFF")
+        .define("WHISPER_BUILD_TESTS", "OFF")
+        .define("WHISPER_BUILD_SERVER", "OFF")
+        .define("GGML_VULKAN", "ON")
+        .define("GGML_OPENMP", "OFF")
+        .build();
+
+    // MSVC is multi-config, so the libs land under per-config (`Release`) subdirs of the build tree
+    // and/or the install prefix — search the likely spots so linking is robust to either layout.
+    let build = dst.join("build");
+    for dir in [
+        dst.join("lib"),
+        build.join("src"),
+        build.join("src/Release"),
+        build.join("ggml/src"),
+        build.join("ggml/src/Release"),
+        build.join("ggml/src/ggml-vulkan"),
+        build.join("ggml/src/ggml-vulkan/Release"),
+    ] {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    }
+
+    for lib in ["whisper", "ggml", "ggml-cpu", "ggml-vulkan", "ggml-base"] {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+
+    // The Vulkan loader import library, from the Vulkan SDK.
+    if let Ok(sdk) = env::var("VULKAN_SDK") {
+        println!("cargo:rustc-link-search=native={}\\Lib", sdk);
+    }
+    println!("cargo:rustc-link-lib=vulkan-1");
+}
+
+/// Generates the Rust FFI bindings for whisper.cpp's C API. Platform-independent — it only parses the
+/// public headers, so the same bindings serve every backend.
+fn generate_bindings(src: &Path) {
     let whisper_h = src.join("include/whisper.h");
     let bindings = bindgen::Builder::default()
         .header(whisper_h.to_string_lossy())
