@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
-          cargo build -p wisp-engine-whisper-cpp --features vulkan
+          cargo build -p wisp-engine-whisper-cpp --features wisp-engine-whisper-cpp/vulkan
       # Always list what the CMake build actually produced, so a link-path/lib-name mismatch in
       # build.rs is visible from the log even when the cargo build fails at the link step.
       - name: List the produced whisper/ggml libs (diagnostic)
