@@ -162,7 +162,7 @@ npm run tauri build    # produce an installer
 | Platform | Status | Transcription | GPU | System audio | Echo cancel |
 |---|---|---|---|---|---|
 | **macOS** (Apple Silicon) | ✅ Released | sherpa-onnx · whisper.cpp · Apple SpeechAnalyzer | Metal + ANE | ScreenCaptureKit | WebRTC AEC3 |
-| **Windows** (x64) | ✅ Released | sherpa-onnx | CPU · DirectML GPU (from source) | WASAPI loopback | cross-stream dedup |
+| **Windows** (x64) | ✅ Released | sherpa-onnx | DirectML (auto) · CPU fallback | WASAPI loopback | cross-stream dedup |
 
 ## 📄 License
 
