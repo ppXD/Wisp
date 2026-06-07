@@ -51,3 +51,29 @@ jobs:
         if: always()
         shell: pwsh
         run: Get-ChildItem -Path app\src-tauri\target\debug -Filter *.dll -ErrorAction SilentlyContinue | Select-Object Name, Length
+      # No upstream DirectML prebuilt exists (k2-fsa ships only CPU/CUDA), so if this from-source build
+      # succeeds we capture its sherpa-onnx + onnxruntime + DirectML .dll/.lib. Published as our own
+      # prebuilt, future GPU builds link it via SHERPA_LIB_PATH and finish in minutes, not hours.
+      - name: Stage the built DirectML libs (reusable SHERPA_LIB_PATH bundle)
+        if: always()
+        shell: pwsh
+        run: |
+          $dst = "gpu-libs\lib"
+          New-Item -ItemType Directory -Force $dst | Out-Null
+          $rx = '(?i)sherpa|onnxruntime|onnx|directml|espeak|kaldi|piper|cargs|sentencepiece|portaudio|ucd'
+          Get-ChildItem -Recurse app\src-tauri\target\debug -Include *.dll,*.lib -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -match $rx } |
+            Group-Object Name | ForEach-Object { $_.Group[0] } |
+            ForEach-Object { Copy-Item $_.FullName $dst -Force -ErrorAction SilentlyContinue }
+          Write-Host "=== captured for reuse ==="
+          Get-ChildItem $dst | Select-Object Name, Length | Sort-Object Name | Format-Table -Auto
+          Write-Host "=== ALL dll/lib under target/debug (diagnostic) ==="
+          Get-ChildItem -Recurse app\src-tauri\target\debug -Include *.dll,*.lib -ErrorAction SilentlyContinue | Select-Object FullName, Length | Format-Table -Auto
+      - name: Upload the DirectML libs artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sherpa-directml-win-x64-v1.12.9
+          path: gpu-libs
+          retention-days: 30
+          if-no-files-found: warn
