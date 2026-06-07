@@ -23,7 +23,7 @@ jobs:
   build:
     name: app builds (windows, DirectML)
     runs-on: windows-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
