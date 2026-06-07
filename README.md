@@ -26,6 +26,10 @@ Your microphone **and** the meeting's audio become a live, per-speaker transcrip
 &nbsp;
 [![Download for Windows](https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/ppXD/Wisp/releases)
 
+<br>
+
+<img src="branding/screenshot-live.png" alt="Wisp — live transcription with per-speaker labels and the realtime AI Assist copilot" width="860">
+
 </div>
 
 ---
@@ -74,6 +78,10 @@ Drop in any audio or video file and get a transcript you can trust:
 - **Optional local LLM cleanup** — tidy punctuation and disfluencies without leaving the device.
 - **Structured Markdown export** — summary, speakers, and a timestamped timeline, ready to share.
 - **Live progress** even on opaque decode phases, so you're never staring at a frozen bar.
+
+<p align="center">
+  <img src="branding/screenshot-file.png" alt="Wisp — file transcription with the AI Notes sidebar open beside the transcript" width="860">
+</p>
 
 ## 🔒 Local-first & genuinely private
 
