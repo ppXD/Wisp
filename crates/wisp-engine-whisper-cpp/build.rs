@@ -106,6 +106,11 @@ fn build_macos(src: &Path) {
 fn build_windows_vulkan(src: &Path) {
     let mut config = cmake::Config::new(src);
     config
+        // Ninja, not the Visual Studio generator: ggml-vulkan builds its `vulkan-shaders-gen` host
+        // tool via ExternalProject, and the VS generator fails to initialize the compiler in that
+        // sub-build ("No CMAKE_C_COMPILER could be found"). Ninja + the MSVC dev environment (set up
+        // in CI) lets every sub-build find cl.exe. Requires Ninja + the MSVC env on PATH.
+        .generator("Ninja")
         .profile("Release")
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("WHISPER_BUILD_EXAMPLES", "OFF")

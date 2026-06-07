@@ -26,6 +26,12 @@ jobs:
         with:
           submodules: recursive # the vendored whisper.cpp is a submodule
       - uses: dtolnay/rust-toolchain@stable
+      # Put cl.exe + the MSVC include/lib env on PATH so the Ninja generator (and ggml-vulkan's
+      # vulkan-shaders-gen sub-build) can find the compiler. Ninja itself is preinstalled.
+      - name: Set up the MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - name: Install the Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
