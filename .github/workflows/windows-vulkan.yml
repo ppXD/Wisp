@@ -35,6 +35,9 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
+          Write-Host "=== SPIRV/Vulkan cmake configs bundled in the SDK ==="
+          Get-ChildItem -Recurse "$env:VULKAN_SDK" -Filter '*onfig.cmake' -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '(?i)spirv|vulkan' } | Select-Object FullName | Format-Table -Auto -Wrap
           cargo build --manifest-path crates/wisp-engine-whisper-cpp/Cargo.toml --features vulkan
       # Always list what the CMake build actually produced, so a link-path/lib-name mismatch in
       # build.rs is visible from the log even when the cargo build fails at the link step.

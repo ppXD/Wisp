@@ -114,10 +114,13 @@ fn build_windows_vulkan(src: &Path) {
         .define("GGML_VULKAN", "ON")
         .define("GGML_OPENMP", "OFF");
 
-    // Point CMake's `find_package(Vulkan)` straight at the installed SDK. Auto-detection can miss it
-    // on the CI runner even with VULKAN_SDK set, so pre-fill the include dir and loader import lib;
-    // the glslc shader compiler is still found via VULKAN_SDK.
+    // Help CMake find the Vulkan SDK. ggml-vulkan only appends the SDK to CMAKE_PREFIX_PATH when
+    // VULKAN_SDK is set in the *cmake* environment — which cmake-rs does not forward by default — so
+    // pass it through explicitly. With that plus an explicit prefix path and the loader paths,
+    // find_package locates Vulkan, SPIRV-Headers, and SPIRV-Tools without relying on auto-detection.
     if let Ok(sdk) = env::var("VULKAN_SDK") {
+        config.env("VULKAN_SDK", &sdk);
+        config.define("CMAKE_PREFIX_PATH", &sdk);
         config.define("Vulkan_INCLUDE_DIR", format!("{sdk}/Include"));
         config.define("Vulkan_LIBRARY", format!("{sdk}/Lib/vulkan-1.lib"));
     }
