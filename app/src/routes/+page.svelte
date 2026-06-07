@@ -2789,8 +2789,8 @@
     flex: none;
   }
 
-  /* The workspace: the active mode's content, capped to a readable width and centred in the space
-     left of the rail. Grows wider when the assist panel is open so both columns fit. */
+  /* The workspace: the active mode's content, filling the space left of the rail. Both Live and File
+     grow with the window when it's enlarged (the assist panel opens beside the content). */
   .workspace {
     flex: 1;
     min-width: 0;
@@ -2800,7 +2800,7 @@
     flex-direction: column;
     gap: 12px;
     padding: 16px 24px 18px;
-    max-width: min(1180px, 100%);
+    max-width: 100%;
     margin: 0 auto;
   }
 
@@ -2808,8 +2808,9 @@
     max-width: min(1680px, 100%);
   }
 
-  /* Live is a working surface, not a reading column — let it grow to fill the window when enlarged
-     (File stays capped for comfortable review). Defined after .wide so it wins when both apply. */
+  /* Keep Live at full width even when the assist panel opens — this wins over the .wide cap above (it
+     is defined after it), so widening for two columns never shrinks the Live surface. File fills via
+     the default .workspace rule. */
   .app.live .workspace {
     max-width: 100%;
   }
