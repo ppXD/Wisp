@@ -26,8 +26,6 @@ Your microphone **and** the meeting's audio become a live, per-speaker transcrip
 &nbsp;
 [![Download for Windows](https://img.shields.io/badge/Download-Windows%20x64-0078D6?style=for-the-badge&logo=windows&logoColor=white)](https://github.com/ppXD/Wisp/releases)
 
-<sub>~8 MB Windows installer · ~22 MB macOS app · models download on demand, never bundled</sub>
-
 </div>
 
 ---
@@ -65,6 +63,18 @@ This is the heart of Wisp — and it's fast.
 
 > Bring your own LLM endpoint (local or cloud) — the assistant is model-agnostic and fully parameterized (temperature, penalties, max tokens, and more).
 
+## 📄 State-of-the-art file transcription
+
+Drop in any audio or video file and get a transcript you can trust:
+
+- **Accuracy-first by default** — Whisper **large-v3-turbo**, with heavier or quantized variants a click away.
+- **Speaker diarization** — *who* said *what*, with **word-level timestamps** and per-word speaker attribution.
+- **Custom vocabulary / term biasing** — feed in names, products, and jargon so they transcribe correctly.
+- **Cleaner audio in** — neural denoising and VAD gating drop non-speech before the model sees it.
+- **Optional local LLM cleanup** — tidy punctuation and disfluencies without leaving the device.
+- **Structured Markdown export** — summary, speakers, and a timestamped timeline, ready to share.
+- **Live progress** even on opaque decode phases, so you're never staring at a frozen bar.
+
 ## 🔒 Local-first & genuinely private
 
 Transcription, diarization, denoising, and VAD all run **on-device** through `sherpa-onnx` and Metal/ANE — no audio ever touches a network. Models are pulled from Hugging Face **only when you choose to install them**, then cached locally.
@@ -91,18 +101,6 @@ No mandatory engine downloads. No forced multi-gigabyte "summary engine" gating 
 - **Delete models** you don't need, right from the picker, to reclaim disk in one click.
 - **Configure everything** — transcription language, accuracy/speed profile, VAD gating, denoising, decoding thresholds, diarization, custom vocabulary — instead of being locked to one preset.
 - **Honest picker** — models your machine can't run are clearly marked, with size and hardware hints *before* you download.
-
-## 📄 State-of-the-art file transcription
-
-Drop in any audio or video file and get a transcript you can trust:
-
-- **Accuracy-first by default** — Whisper **large-v3-turbo**, with heavier or quantized variants a click away.
-- **Speaker diarization** — *who* said *what*, with **word-level timestamps** and per-word speaker attribution.
-- **Custom vocabulary / term biasing** — feed in names, products, and jargon so they transcribe correctly.
-- **Cleaner audio in** — neural denoising and VAD gating drop non-speech before the model sees it.
-- **Optional local LLM cleanup** — tidy punctuation and disfluencies without leaving the device.
-- **Structured Markdown export** — summary, speakers, and a timestamped timeline, ready to share.
-- **Live progress** even on opaque decode phases, so you're never staring at a frozen bar.
 
 ## 🔌 Zero setup, no dependencies
 
@@ -152,21 +150,6 @@ npm run tauri build    # produce an installer
 ```
 
 The Rust workspace lives in `crates/*`; the Tauri shell in `app/src-tauri`. See [`CLAUDE.md`](./CLAUDE.md) for architecture and conventions.
-
-## 🧪 Engineering & CI
-
-Quality is enforced, not hoped for:
-
-- **Three-tier tests** — unit (pure logic), integration (real-but-isolated infra), and skip-guarded E2E against real hardware.
-- **Strict CI** on every PR — `rustfmt`, `clippy -D warnings`, and the full test suite on Linux + macOS.
-- **Real app builds in CI** — the full Tauri app is compiled on **both macOS and Windows** every PR, so platform-specific code (Metal, ScreenCaptureKit, WASAPI, WebRTC AEC) can't regress unseen.
-- **Automated releases** — push a `v*` tag and installers for macOS and Windows are built and published as a draft GitHub Release automatically.
-
-```sh
-cargo fmt --all -- --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all --all-features
-```
 
 ## 💻 Platform support
 
