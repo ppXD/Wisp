@@ -120,7 +120,9 @@ fn build_windows_vulkan(src: &Path) {
     // find_package locates Vulkan, SPIRV-Headers, and SPIRV-Tools without relying on auto-detection.
     if let Ok(sdk) = env::var("VULKAN_SDK") {
         config.env("VULKAN_SDK", &sdk);
-        config.define("CMAKE_PREFIX_PATH", &sdk);
+        // The SDK drops its package configs flat in Lib/cmake (e.g. SPIRV-HeadersConfig.cmake) rather
+        // than in per-package subdirs, so add that dir itself to the prefix path for find_package.
+        config.define("CMAKE_PREFIX_PATH", format!("{sdk};{sdk}/Lib/cmake"));
         config.define("Vulkan_INCLUDE_DIR", format!("{sdk}/Include"));
         config.define("Vulkan_LIBRARY", format!("{sdk}/Lib/vulkan-1.lib"));
     }
