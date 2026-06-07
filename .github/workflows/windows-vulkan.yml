@@ -30,6 +30,9 @@ jobs:
         with:
           submodules: recursive # the vendored whisper.cpp is a submodule
       - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
       # Put cl.exe + the MSVC include/lib env on PATH so the Ninja generator (and ggml-vulkan's
       # vulkan-shaders-gen sub-build) can find the compiler. Ninja itself is preinstalled.
       - name: Set up the MSVC build environment
@@ -41,14 +44,17 @@ jobs:
         with:
           version: 1.4.309.0
           cache: true
-      - name: Build the whisper.cpp engine with the Vulkan backend
+      - name: Build the frontend (tauri-build needs the dist)
+        working-directory: app
+        run: |
+          npm ci
+          npm run build
+      - name: Build the Windows app with the Vulkan whisper.cpp engine
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
-          Write-Host "=== SPIRV/Vulkan cmake configs bundled in the SDK ==="
-          Get-ChildItem -Recurse "$env:VULKAN_SDK" -Filter '*onfig.cmake' -ErrorAction SilentlyContinue |
-            Where-Object { $_.Name -match '(?i)spirv|vulkan' } | Select-Object FullName | Format-Table -Auto -Wrap
-          cargo build --manifest-path crates/wisp-engine-whisper-cpp/Cargo.toml --features vulkan
+          # Default features (sherpa-cpu) + whisper-vulkan: sherpa runs on CPU, whisper on the GPU.
+          cargo build --manifest-path app/src-tauri/Cargo.toml --features whisper-vulkan
       # Always list what the CMake build actually produced, so a link-path/lib-name mismatch in
       # build.rs is visible from the log even when the cargo build fails at the link step.
       - name: List the produced whisper/ggml libs (diagnostic)
