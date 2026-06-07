@@ -104,15 +104,25 @@ fn build_macos(src: &Path) {
 /// SDK at build time (CI installs it; `VULKAN_SDK` points at it); at runtime `vulkan-1.dll` ships with
 /// the GPU driver, so nothing extra has to be bundled.
 fn build_windows_vulkan(src: &Path) {
-    let dst = cmake::Config::new(src)
+    let mut config = cmake::Config::new(src);
+    config
         .profile("Release")
         .define("BUILD_SHARED_LIBS", "OFF")
         .define("WHISPER_BUILD_EXAMPLES", "OFF")
         .define("WHISPER_BUILD_TESTS", "OFF")
         .define("WHISPER_BUILD_SERVER", "OFF")
         .define("GGML_VULKAN", "ON")
-        .define("GGML_OPENMP", "OFF")
-        .build();
+        .define("GGML_OPENMP", "OFF");
+
+    // Point CMake's `find_package(Vulkan)` straight at the installed SDK. Auto-detection can miss it
+    // on the CI runner even with VULKAN_SDK set, so pre-fill the include dir and loader import lib;
+    // the glslc shader compiler is still found via VULKAN_SDK.
+    if let Ok(sdk) = env::var("VULKAN_SDK") {
+        config.define("Vulkan_INCLUDE_DIR", format!("{sdk}/Include"));
+        config.define("Vulkan_LIBRARY", format!("{sdk}/Lib/vulkan-1.lib"));
+    }
+
+    let dst = config.build();
 
     // MSVC is multi-config, so the libs land under per-config (`Release`) subdirs of the build tree
     // and/or the install prefix — search the likely spots so linking is robust to either layout.
