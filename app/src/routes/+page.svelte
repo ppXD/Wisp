@@ -11,6 +11,7 @@
   import ParamsPanel from "$lib/ParamsPanel.svelte";
   import AiNotes from "$lib/AiNotes.svelte";
   import Settings from "$lib/Settings.svelte";
+  import Library from "$lib/Library.svelte";
   import { i18n, LOCALES } from "$lib/i18n.svelte";
   import {
     refreshCloud,
@@ -114,7 +115,7 @@
   let livePrompt = $state("");
   let systemAudioId = $state("");
   let micOffId = $state("");
-  let mode = $state<"live" | "file">("live");
+  let mode = $state<"live" | "file" | "library">("live");
 
   // Collapsible left rail: collapsed (icon-only) by default; expands to icon + label rows. Persisted.
   let sidebarExpanded = $state(false);
@@ -1401,6 +1402,26 @@
         </svg>
         <span class="rail-label">{i18n.t.nav.file}</span>
       </button>
+
+      <button
+        class="rail-item"
+        class:active={mode === "library"}
+        onclick={() => (mode = "library")}
+        title={i18n.t.nav.library}
+      >
+        <svg
+          class="rail-ico"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          stroke-width="1.7"
+          stroke-linejoin="round"
+          aria-hidden="true"
+        >
+          <path d="M5 4h10a2 2 0 0 1 2 2v14l-7-3-7 3V6a2 2 0 0 1 2-2z" />
+        </svg>
+        <span class="rail-label">{i18n.t.nav.library}</span>
+      </button>
     </div>
 
     <div class="rail-spacer"></div>
@@ -1527,7 +1548,7 @@
 
   <Settings bind:open={cloudState.endpointsOpen} />
 
-  <div class="workspace">
+  <div class="workspace" class:is-hidden={mode === "library"}>
 
   {#snippet modelPicker()}
     {#if models.length}
@@ -2536,6 +2557,10 @@
     {/if}
   </Modal>
   </div>
+
+  {#if mode === "library"}
+    <Library />
+  {/if}
 </main>
 
 <style>
@@ -2814,6 +2839,10 @@
 
   /* The workspace: the active mode's content, filling the space left of the rail. Both Live and File
      grow with the window when it's enlarged (the assist panel opens beside the content). */
+  .workspace.is-hidden {
+    display: none;
+  }
+
   .workspace {
     flex: 1;
     min-width: 0;

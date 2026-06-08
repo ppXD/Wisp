@@ -11,6 +11,7 @@ export const zhHans: Messages = {
     expandSidebar: "展开侧栏",
     live: "实时",
     file: "文件",
+    library: "会议库",
     settings: "设置",
     themeToLight: "切换到浅色主题",
     themeToDark: "切换到深色主题",
@@ -19,6 +20,20 @@ export const zhHans: Messages = {
     darkMode: "深色模式",
     language: "语言",
     languageMenu: "选择语言",
+  },
+
+  library: {
+    title: "会议库",
+    searchPlaceholder: "搜索会议…",
+    empty: "还没有会议。结束的会话会自动保存到这里。",
+    noResults: "没有匹配的结果。",
+    back: "返回",
+    delete: "删除",
+    cancel: "取消",
+    deleteTitle: "删除会议",
+    deleteConfirm: "确定要删除这场会议?此操作无法撤销。",
+    you: "你",
+    them: "对方",
   },
 
   live: {
