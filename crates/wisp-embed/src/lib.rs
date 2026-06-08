@@ -18,40 +18,65 @@ pub struct CatalogModel {
     pub label: &'static str,
     /// Embedding dimension (vector length stored per chunk).
     pub dim: usize,
-    /// Approximate download size in MiB, for the picker.
+    /// Approximate fp32 download size in MiB (fastembed serves full-precision ONNX).
     pub size_mb: u32,
     /// The fastembed model this maps to.
     model: EmbeddingModel,
-    /// Whether the model expects E5-style `query:` / `passage:` prefixes.
-    e5: bool,
+    /// Instruction prepended to stored passages — empty for symmetric models, `"passage: "` for E5.
+    passage_prefix: &'static str,
+    /// Instruction prepended to a search query — empty for symmetric models, `"query: "` for E5.
+    query_prefix: &'static str,
 }
 
-/// Built-in catalog: small, permissive, multilingual (incl. Chinese) models. The app shows these
-/// plus a custom-model slot for anything newer off the leaderboard.
+/// Built-in catalog: small, permissive, multilingual / Chinese models that fastembed serves
+/// directly. E5 is multilingual and asymmetric (passage/query prefixes); BGE-zh is Chinese-tuned and
+/// symmetric (v1.5 needs no instruction). The app pairs this with a custom-model slot, and a
+/// raw-ONNX path later covers decoder models like Qwen3-Embedding and quantized downloads.
 pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "e5-small",
         label: "Multilingual E5 small",
         dim: 384,
-        size_mb: 120,
+        size_mb: 470,
         model: EmbeddingModel::MultilingualE5Small,
-        e5: true,
+        passage_prefix: "passage: ",
+        query_prefix: "query: ",
     },
     CatalogModel {
         id: "e5-base",
         label: "Multilingual E5 base",
         dim: 768,
-        size_mb: 280,
+        size_mb: 1100,
         model: EmbeddingModel::MultilingualE5Base,
-        e5: true,
+        passage_prefix: "passage: ",
+        query_prefix: "query: ",
     },
     CatalogModel {
         id: "e5-large",
         label: "Multilingual E5 large",
         dim: 1024,
-        size_mb: 560,
+        size_mb: 2200,
         model: EmbeddingModel::MultilingualE5Large,
-        e5: true,
+        passage_prefix: "passage: ",
+        query_prefix: "query: ",
+    },
+    CatalogModel {
+        id: "bge-small-zh",
+        label: "BGE small · Chinese",
+        dim: 512,
+        size_mb: 95,
+        model: EmbeddingModel::BGESmallZHV15,
+        passage_prefix: "",
+        query_prefix: "",
+    },
+    CatalogModel {
+        id: "bge-large-zh",
+        label: "BGE large · Chinese",
+        dim: 1024,
+        size_mb: 1300,
+        model: EmbeddingModel::BGELargeZHV15,
+        passage_prefix: "",
+        query_prefix: "",
     },
 ];
 
@@ -65,7 +90,8 @@ pub fn catalog_model(id: &str) -> Option<&'static CatalogModel> {
 pub struct FastEmbedder {
     model: TextEmbedding,
     dim: usize,
-    e5: bool,
+    passage_prefix: &'static str,
+    query_prefix: &'static str,
 }
 
 impl FastEmbedder {
@@ -79,17 +105,9 @@ impl FastEmbedder {
         Ok(Self {
             model: loaded,
             dim: model.dim,
-            e5: model.e5,
+            passage_prefix: model.passage_prefix,
+            query_prefix: model.query_prefix,
         })
-    }
-
-    /// Applies the E5 instruction prefix when the model wants one.
-    fn prefixed(&self, kind: &str, text: &str) -> String {
-        if self.e5 {
-            format!("{kind}: {text}")
-        } else {
-            text.to_owned()
-        }
     }
 }
 
@@ -99,14 +117,17 @@ impl Embedder for FastEmbedder {
     }
 
     fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let docs: Vec<String> = texts.iter().map(|t| self.prefixed("passage", t)).collect();
+        let docs: Vec<String> = texts
+            .iter()
+            .map(|t| format!("{}{t}", self.passage_prefix))
+            .collect();
         self.model
             .embed(docs, None)
             .map_err(|e| LibraryError::Embed(e.to_string()))
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let q = self.prefixed("query", text);
+        let q = format!("{}{text}", self.query_prefix);
         let mut out = self
             .model
             .embed(vec![q], None)
@@ -129,7 +150,21 @@ mod tests {
         assert!(catalog_model("nope").is_none());
     }
 
-    // Downloads ~120 MB and runs real inference, so it is opt-in: `cargo test -- --ignored`.
+    #[test]
+    fn catalog_prefixes_match_family() {
+        // E5 is asymmetric (both prefixes set); BGE-zh v1.5 is symmetric (no instruction).
+        for m in CATALOG {
+            if m.id.starts_with("e5") {
+                assert_eq!(m.passage_prefix, "passage: ", "{}", m.id);
+                assert_eq!(m.query_prefix, "query: ", "{}", m.id);
+            } else if m.id.starts_with("bge") {
+                assert_eq!(m.passage_prefix, "", "{}", m.id);
+                assert_eq!(m.query_prefix, "", "{}", m.id);
+            }
+        }
+    }
+
+    // Downloads ~470 MB (fp32) and runs real inference, so it is opt-in: `cargo test -- --ignored`.
     #[test]
     #[ignore]
     fn e5_small_embeds_and_normalizes() {
