@@ -1,0 +1,14 @@
+[package]
+name = "wisp-embed"
+version = "0.0.0"
+description = "Local ONNX text-embedding backend for the Wisp notes library"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+# The Embedder contract this crate implements.
+wisp-library = { path = "../wisp-library" }
+# Local ONNX text embeddings: downloads the model from the HF hub, tokenizes, runs ONNX Runtime, and
+# pools — all behind one call. Pulls onnxruntime via `ort`; the app shares sherpa's runtime (handled
+# at app-integration). Kept out of the root CI build for the same reason as the sherpa engine.
+fastembed = "4"

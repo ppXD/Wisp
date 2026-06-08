@@ -12,6 +12,7 @@ exclude = [
     "crates/wisp-screencapture",
     "crates/wisp-loopback",
     "crates/wisp-aec",
+    "crates/wisp-embed",
 ]
 
 [workspace.package]
