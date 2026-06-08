@@ -1,0 +1,21 @@
+[package]
+name = "wisp-library"
+version = "0.0.0"
+description = "SQLite-backed meeting knowledge base for Wisp: persistence and full-text search"
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+# Embedded SQLite (bundled = compiled from source, so no system libsqlite3 and FTS5 is always present).
+rusqlite = { version = "0.40", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true
