@@ -13,12 +13,18 @@ use crate::Result;
 /// Implementations MUST return L2-normalized vectors of length [`Embedder::dim`], so cosine
 /// similarity reduces to a plain dot product ([`dot`]). It is `Send + Sync` so the store can hold
 /// one behind the same mutex as its connection.
+///
+/// Passages and queries are embedded separately because asymmetric models (e.g. E5) prepend a
+/// different instruction prefix to each; for symmetric models the two simply behave the same.
 pub trait Embedder: Send + Sync {
     /// Length of every vector this embedder produces.
     fn dim(&self) -> usize;
 
-    /// Embeds each input string into a `dim()`-length, L2-normalized vector, preserving order.
-    fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+    /// Embeds documents/passages for storage, into `dim()`-length L2-normalized vectors, in order.
+    fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>>;
+
+    /// Embeds a single search query into a `dim()`-length L2-normalized vector.
+    fn embed_query(&self, text: &str) -> Result<Vec<f32>>;
 }
 
 /// Dot product of two equal-length vectors — cosine similarity when both are L2-normalized. Returns
