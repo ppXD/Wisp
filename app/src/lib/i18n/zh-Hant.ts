@@ -24,6 +24,7 @@ export const zhHant: Messages = {
 
   library: {
     title: "會議庫",
+    newMeetingTitle: (date: string): string => `會議 · ${date}`,
     searchPlaceholder: "搜尋會議…",
     empty: "還沒有會議。結束的工作階段會自動存到這裡。",
     noResults: "沒有符合的結果。",
