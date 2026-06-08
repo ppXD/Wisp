@@ -52,9 +52,11 @@ jobs:
           - os: macos-15
             label: macOS arm64
             args: ""
+          # The single Windows installer is the universal GPU build: whisper.cpp on the Vulkan GPU,
+          # with whisper.cpp's automatic CPU fallback when there's no Vulkan device. sherpa stays CPU.
           - os: windows-latest
             label: Windows x64
-            args: ""
+            args: "--features whisper-vulkan"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -82,6 +84,26 @@ jobs:
       - name: Install meson + ninja
         if: runner.os == 'macOS'
         run: brew install meson ninja
+
+      # Windows ships the universal GPU installer (whisper.cpp + Vulkan). ggml-vulkan's vulkan-shaders-gen
+      # sub-build nests deeply and overruns Windows' 260-char MAX_PATH from the default target dir, so
+      # shorten it; the Ninja generator needs cl.exe on PATH; and the SDK provides the headers +
+      # vulkan-1.lib. (macOS GPU is Metal, already in the default build.)
+      - name: Shorten the Windows build tree (MAX_PATH)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: echo "CARGO_TARGET_DIR=D:\\b" >> "$GITHUB_ENV"
+      - name: Set up the MSVC build environment
+        if: runner.os == 'Windows'
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+      - name: Install the Vulkan SDK
+        if: runner.os == 'Windows'
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
 
       - name: Install frontend deps
         working-directory: app
