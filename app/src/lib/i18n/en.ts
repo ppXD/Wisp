@@ -27,6 +27,7 @@ export const en = {
 
   library: {
     title: "Library",
+    newMeetingTitle: (date: string): string => `Meeting · ${date}`,
     searchPlaceholder: "Search meetings…",
     empty: "No meetings yet. Finished sessions are saved here automatically.",
     noResults: "No matches.",

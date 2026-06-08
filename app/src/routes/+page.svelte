@@ -750,6 +750,13 @@
     }
   }
 
+  // Auto-save the finished live meeting into the Library. The id + start time are stamped at session
+  // start (so re-saving replaces the same entry); auto-save defaults on — a toggle lands with the
+  // Storage settings.
+  let autoSave = $state(true);
+  let meetingId = $state("");
+  let meetingStartedAt = $state(0);
+
   async function start() {
     error = "";
     liveNotice = "";
@@ -795,6 +802,9 @@
       });
       liveNotice = notice ?? "";
       running = true;
+      // A new live session is a new library entry; stamp its id + start now (a re-save replaces it).
+      meetingId = crypto.randomUUID();
+      meetingStartedAt = Date.now();
       // Both streams start unmuted; the live You/Them chips flip these mid-session.
       liveMicMuted = false;
       liveSystemMuted = false;
@@ -825,6 +835,23 @@
     }
     running = false;
     liveNotice = "";
+
+    if (autoSave && segments.length > 0 && meetingId) {
+      // Persist the finished meeting to the Library. A failed save must not surface as a session
+      // error — the transcript is still in memory and can be exported by hand.
+      try {
+        await invoke("save_meeting", {
+          id: meetingId,
+          meta: meetingMeta(
+            i18n.t.library.newMeetingTitle(new Date(meetingStartedAt).toLocaleString()),
+          ),
+          startedAtMs: meetingStartedAt,
+          source: "live",
+        });
+      } catch (e) {
+        console.error("auto-save meeting failed", e);
+      }
+    }
   }
 
   function clear() {

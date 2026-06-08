@@ -24,6 +24,7 @@ export const zhHans: Messages = {
 
   library: {
     title: "会议库",
+    newMeetingTitle: (date: string): string => `会议 · ${date}`,
     searchPlaceholder: "搜索会议…",
     empty: "还没有会议。结束的会话会自动保存到这里。",
     noResults: "没有匹配的结果。",
