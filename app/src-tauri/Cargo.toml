@@ -60,6 +60,8 @@ wisp-core = { path = "../../crates/wisp-core" }
 wisp-textinject = { path = "../../crates/wisp-textinject" }
 wisp-audio = { path = "../../crates/wisp-audio", features = ["mic", "file"] }
 wisp-models = { path = "../../crates/wisp-models" }
+# SQLite-backed meeting knowledge base (persistence + full-text search).
+wisp-library = { path = "../../crates/wisp-library" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 # Opt-in cloud transcription engine (HTTP) — cross-platform.
 wisp-engine-cloud = { path = "../../crates/wisp-engine-cloud" }
