@@ -62,6 +62,9 @@ wisp-audio = { path = "../../crates/wisp-audio", features = ["mic", "file"] }
 wisp-models = { path = "../../crates/wisp-models" }
 # SQLite-backed meeting knowledge base (persistence + full-text search).
 wisp-library = { path = "../../crates/wisp-library" }
+# Local ONNX text-embedding backend (fastembed) for semantic/hybrid note search. Pulls onnxruntime
+# via `ort` — coexists in the binary with sherpa's onnxruntime.
+wisp-embed = { path = "../../crates/wisp-embed" }
 wisp-pipeline = { path = "../../crates/wisp-pipeline" }
 # Opt-in cloud transcription engine (HTTP) — cross-platform.
 wisp-engine-cloud = { path = "../../crates/wisp-engine-cloud" }
