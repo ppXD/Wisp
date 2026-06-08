@@ -753,7 +753,10 @@
   // Auto-save the finished live meeting into the Library. The id + start time are stamped at session
   // start (so re-saving replaces the same entry); auto-save defaults on — a toggle lands with the
   // Storage settings.
-  let autoSave = $state(true);
+  let autoSave = $state(localStorage.getItem("wisp.autoSaveMeetings") !== "false");
+  $effect(() => {
+    localStorage.setItem("wisp.autoSaveMeetings", String(autoSave));
+  });
   let meetingId = $state("");
   let meetingStartedAt = $state(0);
 
@@ -1573,7 +1576,7 @@
     </button>
   </nav>
 
-  <Settings bind:open={cloudState.endpointsOpen} />
+  <Settings bind:open={cloudState.endpointsOpen} bind:autoSave />
 
   <div class="workspace" class:is-hidden={mode === "library"}>
 
