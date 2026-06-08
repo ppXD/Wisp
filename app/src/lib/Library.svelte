@@ -226,7 +226,28 @@
               </div>
               {#if m.preview}<div class="preview">{m.preview}</div>{/if}
             </button>
-            <button class="del-x" onclick={() => askDelete(m.id)} title={i18n.t.library.delete}>×</button>
+            <div class="row-actions">
+              <button
+                class="action"
+                onclick={() => askDelete(m.id)}
+                title={i18n.t.library.delete}
+                aria-label={i18n.t.library.delete}
+              >
+                <svg
+                  width="15"
+                  height="15"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  stroke-width="1.6"
+                  stroke-linecap="round"
+                  stroke-linejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+                </svg>
+              </button>
+            </div>
           </li>
         {/each}
       </ul>
@@ -292,20 +313,19 @@
     gap: 8px;
   }
 
+  /* A row is just a positioning context; the card is the whole box, the actions overlay its right. */
   .row {
-    display: flex;
-    align-items: stretch;
-    gap: 6px;
+    position: relative;
   }
 
   .card {
-    flex: 1;
+    width: 100%;
     min-width: 0;
     display: flex;
     flex-direction: column;
     gap: 4px;
     text-align: left;
-    padding: 13px 15px;
+    padding: 14px 16px;
     background: var(--surface);
     border: 1px solid var(--border);
     border-radius: 12px;
@@ -319,6 +339,11 @@
   .card:hover {
     border-color: var(--border-strong);
     background: var(--surface-active);
+  }
+
+  /* Reserve the right gutter so a long title never slides under the hover actions. */
+  .card-main {
+    padding-right: 48px;
   }
 
   .card-top {
@@ -359,24 +384,43 @@
     padding: 0 1px;
   }
 
-  .del-x {
-    flex: none;
-    width: 34px;
-    border: 1px solid var(--border);
-    border-radius: 10px;
-    background: var(--surface);
+  /* Minimal actions column tucked into the card's right edge — only revealed on hover/focus. */
+  .row-actions {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    display: flex;
+    align-items: center;
+    padding-right: 9px;
+    opacity: 0;
+    transition: opacity 0.12s;
+    pointer-events: none;
+  }
+  .row:hover .row-actions,
+  .row:focus-within .row-actions {
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .action {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 30px;
+    height: 30px;
+    border: none;
+    border-radius: 8px;
+    background: transparent;
     color: var(--muted);
-    font-size: 18px;
-    line-height: 1;
     cursor: pointer;
     transition:
-      color 0.15s,
-      border-color 0.15s,
-      background 0.15s;
+      background 0.12s,
+      color 0.12s;
   }
-  .del-x:hover {
+  .action:hover {
+    background: color-mix(in srgb, var(--stop) 14%, transparent);
     color: var(--stop);
-    border-color: var(--stop);
   }
 
   .empty {
