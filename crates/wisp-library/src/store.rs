@@ -208,7 +208,7 @@ impl Library {
         }
 
         let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
-        let vectors = embedder.embed(&refs)?;
+        let vectors = embedder.embed_passages(&refs)?;
 
         Ok(Some(
             chunks
@@ -392,11 +392,7 @@ impl Library {
             return Ok(Vec::new());
         }
 
-        let qvec = embedder
-            .embed(&[query])?
-            .into_iter()
-            .next()
-            .unwrap_or_default();
+        let qvec = embedder.embed_query(query)?;
 
         let mut stmt = self.conn.prepare(
             "SELECT c.meeting_id, m.title, m.started_at_ms, c.text, c.embedding
@@ -615,31 +611,37 @@ mod tests {
         dim: usize,
     }
 
+    impl HashingEmbedder {
+        // Symmetric here (no passage/query prefix), so both trait methods share this.
+        fn vec(&self, t: &str) -> Vec<f32> {
+            let mut v = vec![0f32; self.dim];
+            for tok in t.split_whitespace() {
+                let h = tok
+                    .bytes()
+                    .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+                v[h % self.dim] += 1.0;
+            }
+            let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+            if norm > 0.0 {
+                for x in &mut v {
+                    *x /= norm;
+                }
+            }
+            v
+        }
+    }
+
     impl Embedder for HashingEmbedder {
         fn dim(&self) -> usize {
             self.dim
         }
 
-        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-            Ok(texts
-                .iter()
-                .map(|t| {
-                    let mut v = vec![0f32; self.dim];
-                    for tok in t.split_whitespace() {
-                        let h = tok
-                            .bytes()
-                            .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
-                        v[h % self.dim] += 1.0;
-                    }
-                    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
-                    if norm > 0.0 {
-                        for x in &mut v {
-                            *x /= norm;
-                        }
-                    }
-                    v
-                })
-                .collect())
+        fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|t| self.vec(t)).collect())
+        }
+
+        fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
+            Ok(self.vec(text))
         }
     }
 
