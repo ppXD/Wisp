@@ -10,7 +10,7 @@
 mod record;
 mod store;
 
-pub use record::{Meeting, MeetingSummary, SearchHit, Segment};
+pub use record::{Note, NoteSummary, SearchHit, Segment};
 pub use store::Library;
 
 /// An error from the meeting library.
