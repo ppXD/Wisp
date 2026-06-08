@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <!--
+    Tauri's macOS bundle is signed with the hardened runtime, which enables Library Validation:
+    every loaded dylib must share the host binary's Team ID. Our build is ad-hoc signed (no Team ID),
+    and the sherpa-onnx / onnxruntime dylibs we bundle in Contents/Frameworks are ad-hoc too — so on
+    any machine other than the build host the loader rejects them ("mapping process and mapped file
+    (non-platform) have different Team IDs") and the app is killed at launch.
+
+    Disabling Library Validation lets the hardened-runtime process load its own bundled (ad-hoc)
+    libraries. Remove this once the app is signed with a real Developer ID and notarized (the dylibs
+    would then carry the same Team ID and pass validation on their own).
+  -->
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>
