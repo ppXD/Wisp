@@ -54,6 +54,39 @@ fn stage_windows_runtime_libs() {
             std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("stage {}: {e}", src.display()));
         }
     }
+
+    // The whisper.cpp Vulkan build also bundles the Vulkan loader so the one installer runs anywhere:
+    // it uses the GPU when a driver is present and falls back to CPU when there's no Vulkan device,
+    // instead of failing to launch on a machine with no system loader.
+    if std::env::var("CARGO_FEATURE_WHISPER_VULKAN").is_ok() {
+        stage_vulkan_loader(&staged);
+    }
+}
+
+/// Copies the Vulkan loader (`vulkan-1.dll`) from the Vulkan SDK into `windows-runtime/` so the
+/// whisper.cpp Vulkan build can bundle it next to the .exe. The SDK ships it under `Bin/`; some
+/// layouts use `runtime/x64/`, so check both. Only invoked for the `whisper-vulkan` feature, whose
+/// build always has the SDK on `VULKAN_SDK`.
+#[cfg(target_os = "windows")]
+fn stage_vulkan_loader(staged: &std::path::Path) {
+    use std::path::Path;
+
+    let sdk = std::env::var("VULKAN_SDK").expect("VULKAN_SDK is set for the whisper-vulkan build");
+    let src = ["Bin/vulkan-1.dll", "runtime/x64/vulkan-1.dll"]
+        .iter()
+        .map(|rel| Path::new(&sdk).join(rel))
+        .find(|p| p.exists())
+        .unwrap_or_else(|| panic!("vulkan-1.dll not found under VULKAN_SDK={sdk}"));
+    let dst = staged.join("vulkan-1.dll");
+
+    let current = std::fs::metadata(&dst)
+        .ok()
+        .zip(std::fs::metadata(&src).ok())
+        .is_some_and(|(d, s)| d.len() == s.len());
+    if !current {
+        std::fs::copy(&src, &dst)
+            .unwrap_or_else(|e| panic!("stage vulkan-1.dll from {}: {e}", src.display()));
+    }
 }
 
 /// The cargo `target/<profile>` dir, found by walking up from `OUT_DIR` — the same place

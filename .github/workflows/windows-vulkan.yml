@@ -47,16 +47,24 @@ jobs:
       - name: Install the frontend deps
         working-directory: app
         run: npm ci
+      # Show the Vulkan SDK layout so build.rs's loader-staging path is verifiable from the log even if
+      # it can't find vulkan-1.dll (the build would then fail in stage_vulkan_loader).
+      - name: Locate vulkan-1.dll in the SDK (diagnostic)
+        shell: pwsh
+        run: |
+          Get-ChildItem -Recurse "$env:VULKAN_SDK" -Filter vulkan-1.dll -ErrorAction SilentlyContinue |
+            Select-Object FullName, Length | Format-Table -Auto
       # `tauri build` runs the frontend build (beforeBuildCommand) + the cargo release build + the NSIS
       # bundler in one step, producing the real Windows GPU installer: default features (sherpa on CPU)
-      # plus whisper-vulkan (whisper on the GPU, CPU fallback). This also proves the exact release
-      # recipe — that tauri's bundler honours CARGO_TARGET_DIR=D:\b — before wiring it into release.yml.
+      # plus whisper-vulkan (whisper on the GPU, CPU fallback). The extra --config bundles the Vulkan
+      # loader (vulkan-1.dll) so the one installer also launches and falls back to CPU on machines with
+      # no system loader. This also proves the exact release recipe before wiring it into release.yml.
       - name: Build the Windows GPU installer (whisper.cpp Vulkan)
         working-directory: app
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
-          npm run tauri build -- --features whisper-vulkan
+          npm run tauri build -- --features whisper-vulkan --config src-tauri/tauri.vulkan.conf.json
       # Show where the NSIS bundler dropped the installer so the release.yml recipe can target the same
       # path (confirms CARGO_TARGET_DIR is honoured by the bundler, not just the compiler).
       - name: Locate the installer (diagnostic)
@@ -65,6 +73,14 @@ jobs:
         run: |
           Get-ChildItem -Recurse "D:\b","app\src-tauri\target" -Include *-setup.exe -ErrorAction SilentlyContinue |
             Select-Object FullName, Length | Format-Table -Auto
+      # Confirm the installer bundles the Vulkan loader AND the sherpa DLLs — i.e. the --config merge
+      # appended the loader resource rather than replacing the sherpa ones. 7z reads NSIS archives.
+      - name: Verify the installer bundles the loader + sherpa DLLs (diagnostic)
+        if: always()
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem "D:\b\release\bundle\nsis\*-setup.exe" -ErrorAction SilentlyContinue | Select-Object -First 1
+          if ($exe) { 7z l $exe.FullName | Select-String -Pattern 'vulkan-1\.dll|onnxruntime\.dll|sherpa-onnx-c-api\.dll' }
       # Upload the installer so it can be downloaded and tested on real Windows hardware (GPU + non-GPU).
       - name: Upload the Windows GPU installer
         if: always()
