@@ -7,7 +7,7 @@ use rusqlite::{Connection, OptionalExtension};
 use wisp_core::export::MeetingMeta;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptSegment};
 
-use crate::record::{Meeting, MeetingSummary, SearchHit, Segment};
+use crate::record::{Note, NoteSummary, SearchHit, Segment};
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
@@ -102,7 +102,7 @@ impl Library {
     /// randomness-free) and `started_at_ms` is the session start in epoch milliseconds. Saving an
     /// existing `id` replaces it. Partial and blank segments are skipped; the duration is the latest
     /// segment end.
-    pub fn save_meeting(
+    pub fn save_note(
         &mut self,
         id: &str,
         meta: &MeetingMeta,
@@ -147,7 +147,7 @@ impl Library {
     }
 
     /// Every meeting, newest first, each with a short transcript preview — for the Library list.
-    pub fn list_meetings(&self) -> Result<Vec<MeetingSummary>> {
+    pub fn list_notes(&self) -> Result<Vec<NoteSummary>> {
         let mut stmt = self.conn.prepare(
             "SELECT m.id, m.title, m.started_at_ms, m.duration_ms, m.language, m.engine,
                     (SELECT group_concat(text, ' ')
@@ -158,7 +158,7 @@ impl Library {
         let rows = stmt
             .query_map([], |r| {
                 let preview: Option<String> = r.get(6)?;
-                Ok(MeetingSummary {
+                Ok(NoteSummary {
                     id: r.get(0)?,
                     title: r.get(1)?,
                     started_at_ms: r.get(2)?,
@@ -173,7 +173,7 @@ impl Library {
     }
 
     /// One meeting's metadata plus its segments in order, or `None` if no such meeting.
-    pub fn get_meeting(&self, id: &str) -> Result<Option<(Meeting, Vec<Segment>)>> {
+    pub fn get_note(&self, id: &str) -> Result<Option<(Note, Vec<Segment>)>> {
         let meeting = self
             .conn
             .query_row(
@@ -181,7 +181,7 @@ impl Library {
                  FROM meeting WHERE id = ?1",
                 [id],
                 |r| {
-                    Ok(Meeting {
+                    Ok(Note {
                         id: r.get(0)?,
                         title: r.get(1)?,
                         started_at_ms: r.get(2)?,
@@ -307,7 +307,7 @@ impl Library {
     }
 
     /// Deletes a meeting and its segments + search index. Returns whether a meeting existed.
-    pub fn delete_meeting(&self, id: &str) -> Result<bool> {
+    pub fn delete_note(&self, id: &str) -> Result<bool> {
         let affected = self
             .conn
             .execute("DELETE FROM meeting WHERE id = ?1", [id])?;
@@ -333,7 +333,7 @@ fn source_label(source: AudioSourceKind) -> &'static str {
 }
 
 /// Inserts a meeting's finalized segments into the open transaction (the FTS index follows via the
-/// insert trigger). Factored out of [`Library::save_meeting`] so that method reads as a flat pipeline.
+/// insert trigger). Factored out of [`Library::save_note`] so that method reads as a flat pipeline.
 fn insert_segments(
     tx: &rusqlite::Transaction,
     meeting_id: &str,
@@ -433,8 +433,8 @@ mod tests {
     #[test]
     fn save_with_no_final_segments_stores_an_empty_meeting() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting("m1", &meta("Silent"), 1000, &[]).unwrap();
-        let (m, rows) = lib.get_meeting("m1").unwrap().unwrap();
+        lib.save_note("m1", &meta("Silent"), 1000, &[]).unwrap();
+        let (m, rows) = lib.get_note("m1").unwrap().unwrap();
         assert_eq!(m.segment_count, 0);
         assert_eq!(m.duration_ms, 0);
         assert!(rows.is_empty());
@@ -443,19 +443,19 @@ mod tests {
     #[test]
     fn get_missing_meeting_returns_none() {
         let lib = Library::open_in_memory().unwrap();
-        assert!(lib.get_meeting("nope").unwrap().is_none());
+        assert!(lib.get_note("nope").unwrap().is_none());
     }
 
     #[test]
     fn list_is_empty_with_no_meetings() {
         let lib = Library::open_in_memory().unwrap();
-        assert!(lib.list_meetings().unwrap().is_empty());
+        assert!(lib.list_notes().unwrap().is_empty());
     }
 
     #[test]
     fn source_label_covers_every_kind() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("M"),
             0,
@@ -466,7 +466,7 @@ mod tests {
             ],
         )
         .unwrap();
-        let (_, rows) = lib.get_meeting("m1").unwrap().unwrap();
+        let (_, rows) = lib.get_note("m1").unwrap().unwrap();
         let sources: Vec<&str> = rows.iter().map(|s| s.source.as_str()).collect();
         assert_eq!(sources, ["mic", "system", "file"]);
     }
@@ -475,7 +475,7 @@ mod tests {
     fn search_respects_the_limit() {
         let mut lib = Library::open_in_memory().unwrap();
         for i in 0i64..5 {
-            lib.save_meeting(
+            lib.save_note(
                 &format!("m{i}"),
                 &meta("M"),
                 1000 + i,
@@ -496,7 +496,7 @@ mod tests {
     #[test]
     fn search_tolerates_punctuation_without_erroring() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("M"),
             0,
@@ -518,7 +518,7 @@ mod tests {
     #[test]
     fn search_matches_short_cjk_via_like_fallback() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("会议"),
             0,
@@ -541,7 +541,7 @@ mod tests {
     #[test]
     fn like_fallback_escapes_wildcards() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "lit",
             &meta("M"),
             0,
@@ -554,7 +554,7 @@ mod tests {
             )],
         )
         .unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "oth",
             &meta("M"),
             1,
@@ -577,14 +577,14 @@ mod tests {
     fn long_transcript_preview_is_truncated_with_ellipsis() {
         let mut lib = Library::open_in_memory().unwrap();
         let long = "word ".repeat(200); // ~1000 chars, far over PREVIEW_CHARS
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("M"),
             0,
             &[seg(1, 0, 100, &long, AudioSourceKind::Microphone)],
         )
         .unwrap();
-        let preview = lib.list_meetings().unwrap()[0].preview.clone();
+        let preview = lib.list_notes().unwrap()[0].preview.clone();
         assert!(preview.chars().count() <= PREVIEW_CHARS + 1); // +1 for the ellipsis
         assert!(preview.ends_with('…'));
     }
@@ -593,14 +593,14 @@ mod tests {
     fn preview_truncation_is_char_safe_for_cjk() {
         let mut lib = Library::open_in_memory().unwrap();
         let long = "字".repeat(300); // multi-byte chars; truncation must split on a char boundary
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("M"),
             0,
             &[seg(1, 0, 100, &long, AudioSourceKind::Microphone)],
         )
         .unwrap();
-        let preview = lib.list_meetings().unwrap()[0].preview.clone(); // must not panic
+        let preview = lib.list_notes().unwrap()[0].preview.clone(); // must not panic
         assert!(preview.chars().count() <= PREVIEW_CHARS + 1);
         assert!(preview.starts_with('字'));
     }
@@ -612,11 +612,11 @@ mod tests {
             seg(1, 0, 1000, "Hello there", AudioSourceKind::Microphone),
             seg(2, 1000, 2500, "General Kenobi", AudioSourceKind::System),
         ];
-        lib.save_meeting("m1", &meta("Standup"), 1000, &segs)
+        lib.save_note("m1", &meta("Standup"), 1000, &segs)
             .unwrap();
 
         assert_eq!(lib.count().unwrap(), 1);
-        let (m, rows) = lib.get_meeting("m1").unwrap().unwrap();
+        let (m, rows) = lib.get_note("m1").unwrap().unwrap();
         assert_eq!(m.title, "Standup");
         assert_eq!(m.started_at_ms, 1000);
         assert_eq!(m.duration_ms, 2500); // latest segment end
@@ -635,10 +635,10 @@ mod tests {
         partial.status = SegmentStatus::Partial;
         let blank = seg(2, 500, 600, "   ", AudioSourceKind::Microphone);
         let good = seg(3, 600, 1200, "committed", AudioSourceKind::Microphone);
-        lib.save_meeting("m1", &meta("M"), 0, &[partial, blank, good])
+        lib.save_note("m1", &meta("M"), 0, &[partial, blank, good])
             .unwrap();
 
-        let (m, rows) = lib.get_meeting("m1").unwrap().unwrap();
+        let (m, rows) = lib.get_note("m1").unwrap().unwrap();
         assert_eq!(m.segment_count, 1);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].text, "committed");
@@ -649,15 +649,15 @@ mod tests {
         let mut lib = Library::open_in_memory().unwrap();
         let mut s = seg(1, 0, 1000, "labelled", AudioSourceKind::Microphone);
         s.speaker = Some(SpeakerId(3));
-        lib.save_meeting("m1", &meta("M"), 0, &[s]).unwrap();
-        let (_, rows) = lib.get_meeting("m1").unwrap().unwrap();
+        lib.save_note("m1", &meta("M"), 0, &[s]).unwrap();
+        let (_, rows) = lib.get_note("m1").unwrap().unwrap();
         assert_eq!(rows[0].speaker, Some(3));
     }
 
     #[test]
     fn list_orders_newest_first_with_preview() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "old",
             &meta("Old"),
             1000,
@@ -670,7 +670,7 @@ mod tests {
             )],
         )
         .unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "new",
             &meta("New"),
             5000,
@@ -684,7 +684,7 @@ mod tests {
         )
         .unwrap();
 
-        let list = lib.list_meetings().unwrap();
+        let list = lib.list_notes().unwrap();
         assert_eq!(list.len(), 2);
         assert_eq!(list[0].id, "new"); // newest first
         assert_eq!(list[1].id, "old");
@@ -694,7 +694,7 @@ mod tests {
     #[test]
     fn search_finds_a_term_and_groups_by_meeting() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("Budget"),
             1000,
@@ -716,7 +716,7 @@ mod tests {
             ],
         )
         .unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m2",
             &meta("Other"),
             2000,
@@ -745,7 +745,7 @@ mod tests {
     #[test]
     fn search_matches_cjk_substring() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("会议"),
             1000,
@@ -767,7 +767,7 @@ mod tests {
     #[test]
     fn delete_removes_meeting_segments_and_index() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("M"),
             1000,
@@ -781,17 +781,17 @@ mod tests {
         )
         .unwrap();
 
-        assert!(lib.delete_meeting("m1").unwrap());
+        assert!(lib.delete_note("m1").unwrap());
         assert_eq!(lib.count().unwrap(), 0);
-        assert!(lib.get_meeting("m1").unwrap().is_none());
+        assert!(lib.get_note("m1").unwrap().is_none());
         assert!(lib.search("budget", 10).unwrap().is_empty()); // FTS cleared by the cascade trigger
-        assert!(!lib.delete_meeting("m1").unwrap()); // already gone
+        assert!(!lib.delete_note("m1").unwrap()); // already gone
     }
 
     #[test]
     fn resaving_same_id_replaces() {
         let mut lib = Library::open_in_memory().unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("First"),
             1000,
@@ -804,7 +804,7 @@ mod tests {
             )],
         )
         .unwrap();
-        lib.save_meeting(
+        lib.save_note(
             "m1",
             &meta("Second"),
             2000,
@@ -819,7 +819,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(lib.count().unwrap(), 1);
-        let (m, rows) = lib.get_meeting("m1").unwrap().unwrap();
+        let (m, rows) = lib.get_note("m1").unwrap().unwrap();
         assert_eq!(m.title, "Second");
         assert_eq!(rows[0].text, "second version");
         assert!(lib.search("first", 10).unwrap().is_empty()); // old index gone
@@ -832,7 +832,7 @@ mod tests {
         let path = dir.path().join("lib.db");
         {
             let mut lib = Library::open(&path).unwrap();
-            lib.save_meeting(
+            lib.save_note(
                 "m1",
                 &meta("M"),
                 1000,

@@ -190,7 +190,7 @@
             <p class="set-intro">{i18n.t.settings.storageIntro}</p>
 
             <div class="set-row">
-              <span class="set-label">{i18n.t.settings.autoSaveMeetings}</span>
+              <span class="set-label">{i18n.t.settings.autoSaveNotes}</span>
               <button class="set-btn" class:on={autoSave} onclick={() => (autoSave = !autoSave)}>
                 {autoSave ? i18n.t.settings.on : i18n.t.settings.off}
               </button>
@@ -198,7 +198,7 @@
 
             {#if storageError}<p class="set-error">{storageError}</p>{/if}
             {#if paths}
-              {#each [{ label: i18n.t.settings.storageModels, path: paths.models, reveal: false }, { label: i18n.t.settings.storageMeetings, path: paths.database, reveal: true }, { label: i18n.t.settings.storageData, path: paths.data, reveal: false }] as loc (loc.path)}
+              {#each [{ label: i18n.t.settings.storageModels, path: paths.models, reveal: false }, { label: i18n.t.settings.storageNotes, path: paths.database, reveal: true }, { label: i18n.t.settings.storageData, path: paths.data, reveal: false }] as loc (loc.path)}
                 <div class="store-row">
                   <div class="store-info">
                     <span class="set-label">{loc.label}</span>

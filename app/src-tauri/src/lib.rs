@@ -44,7 +44,7 @@ use wisp_engine_sherpa::{
     GtcrnDenoiser, ParaformerEngine, ParakeetEngine, SenseVoiceEngine, SherpaDiarizer,
     SherpaLiveDiarizer, SileroSegmenter, StreamingTransducerEngine, WhisperEngine,
 };
-use wisp_library::{Library, Meeting, MeetingSummary, SearchHit, Segment};
+use wisp_library::{Library, Note, NoteSummary, SearchHit, Segment};
 #[cfg(target_os = "windows")]
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
@@ -3999,7 +3999,7 @@ fn gate_clip(app: &AppHandle, audio: &[f32]) -> GatedClip {
     GatedClip::from_utterances(utterances)
 }
 
-/// Meeting metadata the frontend supplies for a Markdown export — everything the pure formatter can't
+/// Note metadata the frontend supplies for a Markdown export — everything the pure formatter can't
 /// derive from the segments. All optional; the document degrades gracefully when fields are absent.
 #[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -4063,8 +4063,8 @@ fn export_transcript(
 
 /// One stored meeting with its segments, for the Library detail view.
 #[derive(Serialize)]
-struct LibraryMeetingDetail {
-    meeting: Meeting,
+struct LibraryNoteDetail {
+    meeting: Note,
     segments: Vec<Segment>,
 }
 
@@ -4072,7 +4072,7 @@ struct LibraryMeetingDetail {
 /// library under a caller-supplied `id` and `started_at_ms` — the frontend owns those, mirroring
 /// `export_transcript`. Re-saving the same `id` replaces the stored meeting.
 #[tauri::command]
-fn save_meeting(
+fn save_note(
     state: State<'_, AppState>,
     id: String,
     meta: MarkdownMetaInput,
@@ -4094,34 +4094,34 @@ fn save_meeting(
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?;
     library
-        .save_meeting(&id, &meta.into(), started_at_ms, &segments)
+        .save_note(&id, &meta.into(), started_at_ms, &segments)
         .map_err(|e| e.to_string())
 }
 
 /// Every stored meeting, newest first, for the Library list.
 #[tauri::command]
-fn list_library_meetings(state: State<'_, AppState>) -> Result<Vec<MeetingSummary>, String> {
+fn list_library_notes(state: State<'_, AppState>) -> Result<Vec<NoteSummary>, String> {
     state
         .library
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
-        .list_meetings()
+        .list_notes()
         .map_err(|e| e.to_string())
 }
 
 /// One stored meeting with its segments, or `null` if it no longer exists.
 #[tauri::command]
-fn get_library_meeting(
+fn get_library_note(
     state: State<'_, AppState>,
     id: String,
-) -> Result<Option<LibraryMeetingDetail>, String> {
+) -> Result<Option<LibraryNoteDetail>, String> {
     let detail = state
         .library
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
-        .get_meeting(&id)
+        .get_note(&id)
         .map_err(|e| e.to_string())?
-        .map(|(meeting, segments)| LibraryMeetingDetail { meeting, segments });
+        .map(|(meeting, segments)| LibraryNoteDetail { meeting, segments });
     Ok(detail)
 }
 
@@ -4142,12 +4142,12 @@ fn search_library(
 
 /// Deletes a stored meeting; returns whether it existed.
 #[tauri::command]
-fn delete_library_meeting(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+fn delete_library_note(state: State<'_, AppState>, id: String) -> Result<bool, String> {
     state
         .library
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
-        .delete_meeting(&id)
+        .delete_note(&id)
         .map_err(|e| e.to_string())
 }
 
@@ -4284,11 +4284,11 @@ pub fn run() {
             dictation::set_dictation_enabled,
             dictation::open_accessibility_settings,
             set_stream_muted,
-            save_meeting,
-            list_library_meetings,
-            get_library_meeting,
+            save_note,
+            list_library_notes,
+            get_library_note,
             search_library,
-            delete_library_meeting
+            delete_library_note
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

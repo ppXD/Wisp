@@ -843,10 +843,10 @@
       // Persist the finished meeting to the Library. A failed save must not surface as a session
       // error — the transcript is still in memory and can be exported by hand.
       try {
-        await invoke("save_meeting", {
+        await invoke("save_note", {
           id: meetingId,
           meta: meetingMeta(
-            i18n.t.library.newMeetingTitle(new Date(meetingStartedAt).toLocaleString()),
+            i18n.t.library.newNoteTitle(new Date(meetingStartedAt).toLocaleString()),
           ),
           startedAtMs: meetingStartedAt,
           source: "live",
@@ -1448,7 +1448,7 @@
           stroke-linejoin="round"
           aria-hidden="true"
         >
-          <path d="M5 4h10a2 2 0 0 1 2 2v14l-7-3-7 3V6a2 2 0 0 1 2-2z" />
+          <path d="M8 3h8a1 1 0 0 1 1 1v17l-5-4-5 4V4a1 1 0 0 1 1-1z" />
         </svg>
         <span class="rail-label">{i18n.t.nav.library}</span>
       </button>

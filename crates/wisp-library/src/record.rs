@@ -5,7 +5,7 @@ use serde::{Deserialize, Serialize};
 
 /// A stored meeting's metadata (one `meeting` row).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct Meeting {
+pub struct Note {
     pub id: String,
     pub title: String,
     /// Session start, epoch milliseconds. The shell formats it for display.
@@ -36,7 +36,7 @@ pub struct Segment {
 
 /// A row in the Library list: a meeting plus a short transcript preview.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-pub struct MeetingSummary {
+pub struct NoteSummary {
     pub id: String,
     pub title: String,
     pub started_at_ms: i64,

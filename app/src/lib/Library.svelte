@@ -1,13 +1,13 @@
 <script lang="ts">
-  // The Library — a browsable, searchable archive of finished meetings. Reads from the SQLite-backed
-  // store via the meeting commands; search uses the backend's full-text index (with a short-CJK
+  // The Library — a browsable, searchable archive of finished notes. Reads from the SQLite-backed
+  // store via the note commands; search uses the backend's full-text index (with a short-CJK
   // substring fallback). List ⇄ detail in one view; deletes go through a confirm modal.
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
 
-  type MeetingSummary = {
+  type NoteSummary = {
     id: string;
     title: string;
     started_at_ms: number;
@@ -23,7 +23,7 @@
     snippet: string;
     score: number;
   };
-  type Meeting = {
+  type Note = {
     id: string;
     title: string;
     started_at_ms: number;
@@ -41,9 +41,9 @@
     source: string;
     text: string;
   };
-  type Detail = { meeting: Meeting; segments: Segment[] };
+  type Detail = { meeting: Note; segments: Segment[] };
 
-  let meetings = $state<MeetingSummary[]>([]);
+  let notes = $state<NoteSummary[]>([]);
   let query = $state("");
   let hits = $state<SearchHit[] | null>(null); // null = not searching; [] = searched with no results
   let detail = $state<Detail | null>(null);
@@ -54,7 +54,7 @@
 
   async function loadList() {
     try {
-      meetings = await invoke<MeetingSummary[]>("list_library_meetings");
+      notes = await invoke<NoteSummary[]>("list_library_notes");
       error = "";
     } catch (e) {
       error = String(e);
@@ -81,9 +81,9 @@
     }, 200);
   }
 
-  async function openMeeting(id: string) {
+  async function openNote(id: string) {
     try {
-      detail = await invoke<Detail | null>("get_library_meeting", { id });
+      detail = await invoke<Detail | null>("get_library_note", { id });
       error = "";
     } catch (e) {
       error = String(e);
@@ -101,7 +101,7 @@
     pendingDelete = null;
     if (!id) return;
     try {
-      await invoke<boolean>("delete_library_meeting", { id });
+      await invoke<boolean>("delete_library_note", { id });
       if (detail?.meeting.id === id) detail = null;
       await loadList();
       if (query.trim()) onSearchInput();
@@ -198,7 +198,7 @@
         <ul class="cards">
           {#each hits as hit (hit.meeting_id)}
             <li>
-              <button class="card hit-card" onclick={() => openMeeting(hit.meeting_id)}>
+              <button class="card hit-card" onclick={() => openNote(hit.meeting_id)}>
                 <div class="card-top">
                   <span class="card-title">{hit.title}</span>
                   <span class="card-date">{fmtDate(hit.started_at_ms)}</span>
@@ -210,13 +210,13 @@
           {/each}
         </ul>
       {/if}
-    {:else if meetings.length === 0}
+    {:else if notes.length === 0}
       <div class="empty">{i18n.t.library.empty}</div>
     {:else}
       <ul class="cards">
-        {#each meetings as m (m.id)}
+        {#each notes as m (m.id)}
           <li class="row">
-            <button class="card card-main" onclick={() => openMeeting(m.id)}>
+            <button class="card card-main" onclick={() => openNote(m.id)}>
               <div class="card-top">
                 <span class="card-title">{m.title}</span>
                 <span class="card-date">{fmtDate(m.started_at_ms)}</span>
