@@ -278,6 +278,14 @@ export const en = {
     hotkey: "Hotkey",
     accessibilityNote: "⚠ Needs Accessibility permission to type into other apps.",
     openSettings: "Open Settings",
+    storage: "Storage",
+    storageIntro:
+      "Where Wisp keeps your models, meeting library, and app data on this device. Click Open to reveal a location in your file manager.",
+    autoSaveMeetings: "Auto-save meetings to library",
+    storageModels: "Models",
+    storageMeetings: "Meeting library",
+    storageData: "App data",
+    openFolder: "Open",
   },
 
   // AI assist / notes panel (AiNotes.svelte). "✦ Models" / "AI" / "API" / provider names stay

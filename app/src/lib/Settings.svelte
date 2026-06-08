@@ -4,15 +4,19 @@
   import { fade, scale } from "svelte/transition";
   import { cubicOut } from "svelte/easing";
   import { invoke } from "@tauri-apps/api/core";
+  import { appDataDir, join } from "@tauri-apps/api/path";
+  import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
   import EndpointsManager from "$lib/EndpointsManager.svelte";
   import { i18n } from "$lib/i18n.svelte";
 
-  let { open = $bindable(false) }: { open?: boolean } = $props();
+  let { open = $bindable(false), autoSave = $bindable(false) }: { open?: boolean; autoSave?: boolean } =
+    $props();
 
-  type Section = "models" | "dictation";
+  type Section = "models" | "dictation" | "storage";
   const sections = $derived<{ id: Section; label: string }[]>([
     { id: "models", label: i18n.t.settings.aiModels },
     { id: "dictation", label: i18n.t.settings.dictation },
+    { id: "storage", label: i18n.t.settings.storage },
   ]);
   let section = $state<Section>("models");
 
@@ -64,10 +68,39 @@
     }
   }
 
-  // Refresh dictation status whenever the dialog opens (so a permission granted in System Settings,
-  // or the current hotkey, shows correctly).
+  // ── Storage category ────────────────────────────────────────────────────────────────────────────
+  // Where Wisp keeps things on disk, resolved from the Tauri app-data dir — the same dir the Rust side
+  // opens the SQLite library and the model store under.
+  type StoragePaths = { models: string; database: string; data: string };
+  let paths = $state<StoragePaths | null>(null);
+  let storageError = $state("");
+
+  async function loadPaths() {
+    try {
+      const data = await appDataDir();
+      paths = { data, models: await join(data, "models"), database: await join(data, "library.db") };
+      storageError = "";
+    } catch (e) {
+      storageError = String(e);
+    }
+  }
+
+  // Reveal a file in its folder, or open a folder directly — both surface it in the OS file manager.
+  async function openLocation(path: string, reveal: boolean) {
+    try {
+      if (reveal) await revealItemInDir(path);
+      else await openPath(path);
+    } catch (e) {
+      storageError = String(e);
+    }
+  }
+
+  // Refresh dictation status + the storage paths whenever the dialog opens.
   $effect(() => {
-    if (open) loadDictation();
+    if (open) {
+      loadDictation();
+      loadPaths();
+    }
   });
 </script>
 
@@ -153,6 +186,30 @@
             {/if}
 
             {#if dictationError}<p class="set-error">{dictationError}</p>{/if}
+          {:else if section === "storage"}
+            <p class="set-intro">{i18n.t.settings.storageIntro}</p>
+
+            <div class="set-row">
+              <span class="set-label">{i18n.t.settings.autoSaveMeetings}</span>
+              <button class="set-btn" class:on={autoSave} onclick={() => (autoSave = !autoSave)}>
+                {autoSave ? i18n.t.settings.on : i18n.t.settings.off}
+              </button>
+            </div>
+
+            {#if storageError}<p class="set-error">{storageError}</p>{/if}
+            {#if paths}
+              {#each [{ label: i18n.t.settings.storageModels, path: paths.models, reveal: false }, { label: i18n.t.settings.storageMeetings, path: paths.database, reveal: true }, { label: i18n.t.settings.storageData, path: paths.data, reveal: false }] as loc (loc.path)}
+                <div class="store-row">
+                  <div class="store-info">
+                    <span class="set-label">{loc.label}</span>
+                    <span class="store-path" title={loc.path}>{loc.path}</span>
+                  </div>
+                  <button class="set-btn" onclick={() => openLocation(loc.path, loc.reveal)}>
+                    {i18n.t.settings.openFolder}
+                  </button>
+                </div>
+              {/each}
+            {/if}
           {/if}
         </div>
       </div>
@@ -352,5 +409,30 @@
     margin: 0;
     font-size: 12.5px;
     color: var(--danger, #c0392b);
+  }
+
+  .store-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 10px 0;
+    border-top: 1px solid var(--border);
+  }
+
+  .store-info {
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+
+  .store-path {
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 </style>

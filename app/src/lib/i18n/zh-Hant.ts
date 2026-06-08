@@ -244,6 +244,13 @@ export const zhHant: Messages = {
     hotkey: "快捷鍵",
     accessibilityNote: "⚠ 需要「輔助使用」權限才能輸入到其他 app。",
     openSettings: "打開系統設定",
+    storage: "儲存空間",
+    storageIntro: "Wisp 在此裝置上存放模型、會議庫與 app 資料的位置。點「開啟」即可在檔案總管中顯示。",
+    autoSaveMeetings: "結束後自動將會議存入庫",
+    storageModels: "模型",
+    storageMeetings: "會議庫",
+    storageData: "App 資料",
+    openFolder: "開啟",
   },
 
   assist: {
