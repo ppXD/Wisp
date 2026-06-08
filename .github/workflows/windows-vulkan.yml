@@ -71,10 +71,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: wisp-windows-gpu-installer
-          if-no-files-found: warn
-          path: |
-            D:\b\release\bundle\nsis\*-setup.exe
-            app/src-tauri/target/release/bundle/nsis/*-setup.exe
+          if-no-files-found: error
+          # tauri honours CARGO_TARGET_DIR, so the NSIS bundle lands under D:\b (confirmed by the
+          # locate step). A single absolute path keeps upload-artifact's root unambiguous.
+          path: D:\b\release\bundle\nsis\*-setup.exe
       # Always list what the CMake build actually produced, so a link-path/lib-name mismatch in
       # build.rs is visible from the log even when the build fails at the link step.
       - name: List the produced whisper/ggml libs (diagnostic)
