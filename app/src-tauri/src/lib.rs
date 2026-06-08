@@ -44,6 +44,7 @@ use wisp_engine_sherpa::{
     GtcrnDenoiser, ParaformerEngine, ParakeetEngine, SenseVoiceEngine, SherpaDiarizer,
     SherpaLiveDiarizer, SileroSegmenter, StreamingTransducerEngine, WhisperEngine,
 };
+use wisp_library::{Library, Meeting, MeetingSummary, SearchHit, Segment};
 #[cfg(target_os = "windows")]
 use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
@@ -153,6 +154,9 @@ struct AppState {
     /// Committed finals from the current/most-recent live session (both mic and system streams),
     /// retained so the meeting can be exported after it ends. Cleared when a new session starts.
     live_segments: Mutex<Vec<TranscriptSegment>>,
+    /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
+    /// here; a single connection behind a mutex (a personal library has no concurrency needs).
+    library: Mutex<Library>,
     /// Per-stream live mute flags shared with the running capture (via `MutedSource`), so the Live bar
     /// can mute/unmute "You" (mic) and "Them" (system) mid-session. Reset to unmuted on each start.
     mic_muted: Arc<AtomicBool>,
@@ -4057,6 +4061,96 @@ fn export_transcript(
     Ok(())
 }
 
+/// One stored meeting with its segments, for the Library detail view.
+#[derive(Serialize)]
+struct LibraryMeetingDetail {
+    meeting: Meeting,
+    segments: Vec<Segment>,
+}
+
+/// Saves the just-finished transcript (`source` `"live"` by default, or `"file"`) into the meeting
+/// library under a caller-supplied `id` and `started_at_ms` — the frontend owns those, mirroring
+/// `export_transcript`. Re-saving the same `id` replaces the stored meeting.
+#[tauri::command]
+fn save_meeting(
+    state: State<'_, AppState>,
+    id: String,
+    meta: MarkdownMetaInput,
+    started_at_ms: i64,
+    source: Option<String>,
+) -> Result<(), String> {
+    let buffer = match source.as_deref() {
+        Some("file") => &state.file_segments,
+        _ => &state.live_segments,
+    };
+    let mut segments = buffer
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?
+        .clone();
+    segments.sort_by_key(|s| s.start);
+
+    let mut library = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    library
+        .save_meeting(&id, &meta.into(), started_at_ms, &segments)
+        .map_err(|e| e.to_string())
+}
+
+/// Every stored meeting, newest first, for the Library list.
+#[tauri::command]
+fn list_library_meetings(state: State<'_, AppState>) -> Result<Vec<MeetingSummary>, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .list_meetings()
+        .map_err(|e| e.to_string())
+}
+
+/// One stored meeting with its segments, or `null` if it no longer exists.
+#[tauri::command]
+fn get_library_meeting(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Option<LibraryMeetingDetail>, String> {
+    let detail = state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .get_meeting(&id)
+        .map_err(|e| e.to_string())?
+        .map(|(meeting, segments)| LibraryMeetingDetail { meeting, segments });
+    Ok(detail)
+}
+
+/// Full-text search across stored meetings (default cap 50 hits).
+#[tauri::command]
+fn search_library(
+    state: State<'_, AppState>,
+    query: String,
+    limit: Option<usize>,
+) -> Result<Vec<SearchHit>, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .search(&query, limit.unwrap_or(50))
+        .map_err(|e| e.to_string())
+}
+
+/// Deletes a stored meeting; returns whether it existed.
+#[tauri::command]
+fn delete_library_meeting(state: State<'_, AppState>, id: String) -> Result<bool, String> {
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .delete_meeting(&id)
+        .map_err(|e| e.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -4099,6 +4193,9 @@ pub fn run() {
                 })
                 .or_else(|| Some(recommended_default_model(&detect_machine(), &asr_catalog)));
 
+            let _ = fs::create_dir_all(&data_dir);
+            let library = Library::open(data_dir.join("library.db"))?;
+
             app.manage(AppState {
                 store,
                 sessions: Mutex::new(Vec::new()),
@@ -4123,6 +4220,7 @@ pub fn run() {
                 file_cancel: Arc::new(AtomicBool::new(false)),
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
+                library: Mutex::new(library),
                 mic_muted: Arc::new(AtomicBool::new(false)),
                 system_muted: Arc::new(AtomicBool::new(false)),
                 active_model_path,
@@ -4185,7 +4283,12 @@ pub fn run() {
             dictation::dictation_status,
             dictation::set_dictation_enabled,
             dictation::open_accessibility_settings,
-            set_stream_muted
+            set_stream_muted,
+            save_meeting,
+            list_library_meetings,
+            get_library_meeting,
+            search_library,
+            delete_library_meeting
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
