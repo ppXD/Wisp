@@ -11,6 +11,10 @@ repository.workspace = true
 default = ["http"]
 # Provides HttpDownloader (network model downloads via ureq).
 http = ["dep:ureq"]
+# Set when the app is built with the whisper.cpp Vulkan GPU backend, so the catalog offers Whisper
+# models on Windows (they run on the GPU, or on CPU via the backend's fallback). Off, Whisper stays
+# macOS/Metal-only. The app's `whisper-vulkan` feature turns this on.
+whisper-vulkan = []
 
 [dependencies]
 wisp-core = { path = "../wisp-core" }

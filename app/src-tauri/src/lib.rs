@@ -475,9 +475,9 @@ fn coerce_param(raw: &serde_json::Value, kind: &ParamKind) -> Option<ParamValue>
     }
 }
 
-/// Builds the GPU (Metal) whisper.cpp engine from a downloaded GGUF model. macOS only; elsewhere
-/// this family isn't offered, so the stub just reports it.
-#[cfg(target_os = "macos")]
+/// Builds the GPU whisper.cpp engine from a downloaded GGUF model — Metal on macOS, Vulkan on Windows
+/// (under the `whisper-vulkan` feature). Where the engine isn't built, the stub below reports it.
+#[cfg(any(target_os = "macos", all(target_os = "windows", feature = "whisper-vulkan")))]
 fn build_whisper_cpp_engine(
     descriptor: &ModelDescriptor,
     dir: &Path,
@@ -493,14 +493,14 @@ fn build_whisper_cpp_engine(
     Ok(Box::new(engine))
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", all(target_os = "windows", feature = "whisper-vulkan"))))]
 fn build_whisper_cpp_engine(
     _descriptor: &ModelDescriptor,
     _dir: &Path,
     _language: &str,
 ) -> WispResult<Box<dyn AsrEngine>> {
     Err(WispError::Engine(
-        "the whisper.cpp GPU engine is only available on macOS".to_owned(),
+        "the whisper.cpp GPU engine is only available on macOS, and on Windows GPU builds".to_owned(),
     ))
 }
 
