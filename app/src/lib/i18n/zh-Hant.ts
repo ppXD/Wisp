@@ -11,6 +11,7 @@ export const zhHant: Messages = {
     expandSidebar: "展開側欄",
     live: "即時",
     file: "檔案",
+    library: "會議庫",
     settings: "設定",
     themeToLight: "切換到淺色主題",
     themeToDark: "切換到深色主題",
@@ -19,6 +20,20 @@ export const zhHant: Messages = {
     darkMode: "深色模式",
     language: "語言",
     languageMenu: "選擇語言",
+  },
+
+  library: {
+    title: "會議庫",
+    searchPlaceholder: "搜尋會議…",
+    empty: "還沒有會議。結束的工作階段會自動存到這裡。",
+    noResults: "沒有符合的結果。",
+    back: "返回",
+    delete: "刪除",
+    cancel: "取消",
+    deleteTitle: "刪除會議",
+    deleteConfirm: "確定要刪除這場會議?此動作無法復原。",
+    you: "你",
+    them: "對方",
   },
 
   live: {

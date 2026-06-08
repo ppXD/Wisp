@@ -14,6 +14,7 @@ export const en = {
     expandSidebar: "Expand sidebar",
     live: "Live",
     file: "File",
+    library: "Library",
     settings: "Settings",
     themeToLight: "Switch to light theme",
     themeToDark: "Switch to dark theme",
@@ -22,6 +23,20 @@ export const en = {
     darkMode: "Dark mode",
     language: "Language",
     languageMenu: "Choose language",
+  },
+
+  library: {
+    title: "Library",
+    searchPlaceholder: "Search meetings…",
+    empty: "No meetings yet. Finished sessions are saved here automatically.",
+    noResults: "No matches.",
+    back: "Back",
+    delete: "Delete",
+    cancel: "Cancel",
+    deleteTitle: "Delete meeting",
+    deleteConfirm: "Delete this meeting? This can't be undone.",
+    you: "You",
+    them: "Them",
   },
 
   // Live transcription screen.
