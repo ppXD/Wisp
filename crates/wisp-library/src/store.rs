@@ -1,17 +1,18 @@
 //! The SQLite-backed store: persistence, retrieval, and full-text search over past meetings.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use rusqlite::{Connection, OptionalExtension};
 use wisp_core::export::MeetingMeta;
 use wisp_core::transcript::{AudioSourceKind, SegmentStatus, TranscriptSegment};
 
+use crate::embed::{self, Embedder};
 use crate::record::{Note, NoteSummary, SearchHit, Segment};
 use crate::Result;
 
 /// On-disk schema version, bumped on schema changes (drives migration via `PRAGMA user_version`).
-const SCHEMA_VERSION: i64 = 1;
+const SCHEMA_VERSION: i64 = 2;
 
 /// Characters of transcript kept as a list preview.
 const PREVIEW_CHARS: usize = 160;
@@ -19,6 +20,16 @@ const PREVIEW_CHARS: usize = 160;
 /// Characters of the matching segment shown as a snippet for a LIKE-fallback hit. FTS hits use
 /// SQLite's own `snippet()` instead.
 const LIKE_SNIPPET_CHARS: usize = 120;
+
+/// Target size (characters) of a text chunk handed to the embedder — a coherent unit larger than one
+/// utterance but small enough to embed precisely.
+const CHUNK_CHARS: usize = 512;
+
+/// Reciprocal Rank Fusion damping constant for hybrid search (the conventional default).
+const RRF_K: f64 = 60.0;
+
+/// A chunk ready to store: its text plus its embedding serialized to little-endian bytes.
+type EmbeddedChunk = (String, Vec<u8>);
 
 /// Initial schema. `segment_fts` is an external-content FTS5 index (it stores no copy of the text,
 /// keeping the database small); the triggers keep it in sync with `segment`. The `trigram` tokenizer
@@ -62,9 +73,27 @@ CREATE TRIGGER segment_ad AFTER DELETE ON segment BEGIN
 END;
 ";
 
-/// A handle to the meeting knowledge base. Open once and reuse across queries.
+/// Schema v2 — semantic search. Each note's transcript is chunked and each chunk's embedding vector
+/// is stored as a little-endian f32 BLOB. Written only when an [`Embedder`] is configured; the
+/// cascade from `meeting` clears a note's chunks on delete or re-save. Added as a separate migration
+/// so existing v1 databases gain the table without losing data.
+const SCHEMA_V2: &str = "\
+CREATE TABLE chunk (
+    id         INTEGER PRIMARY KEY,
+    meeting_id TEXT NOT NULL REFERENCES meeting (id) ON DELETE CASCADE,
+    idx        INTEGER NOT NULL,
+    text       TEXT NOT NULL,
+    embedding  BLOB NOT NULL
+);
+CREATE INDEX chunk_meeting ON chunk (meeting_id);
+";
+
+/// A handle to the meeting knowledge base. Open once and reuse across queries. With no embedder it
+/// is full-text only; configure one via [`Library::set_embedder`] to enable semantic and hybrid
+/// search.
 pub struct Library {
     conn: Connection,
+    embedder: Option<Box<dyn Embedder>>,
 }
 
 impl Library {
@@ -78,9 +107,18 @@ impl Library {
         Self::init(Connection::open_in_memory()?)
     }
 
+    /// Sets (or with `None` clears) the embedder used to index and search notes semantically. New
+    /// saves embed their chunks; existing notes keep whatever was indexed when they were saved.
+    pub fn set_embedder(&mut self, embedder: Option<Box<dyn Embedder>>) {
+        self.embedder = embedder;
+    }
+
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
-        let mut lib = Self { conn };
+        let mut lib = Self {
+            conn,
+            embedder: None,
+        };
         lib.migrate()?;
         Ok(lib)
     }
@@ -91,6 +129,9 @@ impl Library {
             .pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version < 1 {
             self.conn.execute_batch(SCHEMA_V1)?;
+        }
+        if version < 2 {
+            self.conn.execute_batch(SCHEMA_V2)?;
         }
         self.conn
             .pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -124,6 +165,9 @@ impl Library {
             .clone()
             .unwrap_or_else(|| "Untitled meeting".to_owned());
 
+        // Embed before opening the transaction — inference touches no DB and may be slow.
+        let chunks = self.embed_chunks(&finals)?;
+
         let tx = self.conn.transaction()?;
         tx.execute("DELETE FROM meeting WHERE id = ?1", [id])?;
         tx.execute(
@@ -142,8 +186,37 @@ impl Library {
             ],
         )?;
         insert_segments(&tx, id, &finals)?;
+        if let Some(chunks) = &chunks {
+            insert_chunks(&tx, id, chunks)?;
+        }
         tx.commit()?;
         Ok(())
+    }
+
+    /// Chunks a note's finalized text and embeds each chunk, when an embedder is configured. Each
+    /// entry is `(chunk text, serialized vector)`; returns `None` in full-text-only mode so the
+    /// caller writes no `chunk` rows.
+    fn embed_chunks(&self, finals: &[&TranscriptSegment]) -> Result<Option<Vec<EmbeddedChunk>>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(None);
+        };
+
+        let texts: Vec<&str> = finals.iter().map(|s| s.text.trim()).collect();
+        let chunks = embed::chunk_texts(&texts, CHUNK_CHARS);
+        if chunks.is_empty() {
+            return Ok(Some(Vec::new()));
+        }
+
+        let refs: Vec<&str> = chunks.iter().map(String::as_str).collect();
+        let vectors = embedder.embed(&refs)?;
+
+        Ok(Some(
+            chunks
+                .into_iter()
+                .zip(vectors)
+                .map(|(text, vector)| (text, embed::to_bytes(&vector)))
+                .collect(),
+        ))
     }
 
     /// Every meeting, newest first, each with a short transcript preview — for the Library list.
@@ -306,6 +379,96 @@ impl Library {
         Ok(best_per_meeting(hits, limit))
     }
 
+    /// Semantic search: embeds `query` and ranks notes by the cosine similarity of their chunk
+    /// vectors, returning the best-scoring snippet per note (most similar first, capped at `limit`).
+    /// Yields nothing when no embedder is configured or the query is blank. A personal library is
+    /// small, so this scans every chunk rather than maintaining an approximate index.
+    pub fn search_semantic(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        let Some(embedder) = &self.embedder else {
+            return Ok(Vec::new());
+        };
+        let query = query.trim();
+        if query.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let qvec = embedder
+            .embed(&[query])?
+            .into_iter()
+            .next()
+            .unwrap_or_default();
+
+        let mut stmt = self.conn.prepare(
+            "SELECT c.meeting_id, m.title, m.started_at_ms, c.text, c.embedding
+             FROM chunk c JOIN meeting m ON m.id = c.meeting_id",
+        )?;
+        let mut hits = stmt
+            .query_map([], |r| {
+                let text: String = r.get(3)?;
+                let blob: Vec<u8> = r.get(4)?;
+                Ok(SearchHit {
+                    meeting_id: r.get(0)?,
+                    title: r.get(1)?,
+                    started_at_ms: r.get(2)?,
+                    snippet: truncate_chars(&text, LIKE_SNIPPET_CHARS),
+                    score: f64::from(embed::dot(&qvec, &embed::from_bytes(&blob))),
+                })
+            })?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+
+        // Drop non-matches (orthogonal / negatively-correlated chunks), then rank by similarity
+        // (higher is better, unlike BM25) and keep the best chunk per note.
+        hits.retain(|h| h.score > 0.0);
+        hits.sort_by(|a, b| {
+            b.score
+                .partial_cmp(&a.score)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        Ok(best_per_meeting(hits, limit))
+    }
+
+    /// Hybrid search: fuses the full-text and semantic rankings with Reciprocal Rank Fusion — the
+    /// most accurate mode, since lexical and semantic matches reinforce each other. Falls back to
+    /// plain [`Library::search`] when no embedder is configured. The fused RRF value becomes the
+    /// score; the snippet prefers the highlighted full-text one.
+    pub fn search_hybrid(&self, query: &str, limit: usize) -> Result<Vec<SearchHit>> {
+        if self.embedder.is_none() {
+            return self.search(query, limit);
+        }
+
+        let pool = limit.max(20);
+        let fts = self.search(query, pool)?;
+        let semantic = self.search_semantic(query, pool)?;
+
+        let rankings: [Vec<String>; 2] = [
+            fts.iter().map(|h| h.meeting_id.clone()).collect(),
+            semantic.iter().map(|h| h.meeting_id.clone()).collect(),
+        ];
+        let fused = embed::rrf_fuse(&rankings, RRF_K);
+
+        // FTS chained last so it overwrites the semantic entry for a shared note — its «»-highlighted
+        // snippet is the better one to show.
+        let by_id: HashMap<&str, &SearchHit> = semantic
+            .iter()
+            .chain(fts.iter())
+            .map(|h| (h.meeting_id.as_str(), h))
+            .collect();
+
+        Ok(fused
+            .into_iter()
+            .take(limit)
+            .filter_map(|(id, score)| {
+                by_id.get(id.as_str()).map(|h| SearchHit {
+                    meeting_id: id,
+                    title: h.title.clone(),
+                    started_at_ms: h.started_at_ms,
+                    snippet: h.snippet.clone(),
+                    score,
+                })
+            })
+            .collect())
+    }
+
     /// Deletes a meeting and its segments + search index. Returns whether a meeting existed.
     pub fn delete_note(&self, id: &str) -> Result<bool> {
         let affected = self
@@ -353,6 +516,21 @@ fn insert_segments(
             source_label(seg.source),
             seg.text.trim(),
         ])?;
+    }
+    Ok(())
+}
+
+/// Inserts a note's embedded chunks (text + serialized vector) into the open transaction. Factored
+/// out of [`Library::save_note`] to keep that method a flat pipeline.
+fn insert_chunks(
+    tx: &rusqlite::Transaction,
+    meeting_id: &str,
+    chunks: &[EmbeddedChunk],
+) -> rusqlite::Result<()> {
+    let mut stmt =
+        tx.prepare("INSERT INTO chunk (meeting_id, idx, text, embedding) VALUES (?1, ?2, ?3, ?4)")?;
+    for (idx, (text, embedding)) in chunks.iter().enumerate() {
+        stmt.execute(rusqlite::params![meeting_id, idx as i64, text, embedding])?;
     }
     Ok(())
 }
@@ -428,6 +606,48 @@ mod tests {
             language: Some("en".to_owned()),
             summary: None,
         }
+    }
+
+    /// Deterministic test embedder: each whitespace-delimited token bumps one (hashed) dimension and
+    /// the vector is L2-normalized. Texts sharing tokens get similar vectors — enough to exercise
+    /// storage, scoring, ranking, and fusion without loading a real model.
+    struct HashingEmbedder {
+        dim: usize,
+    }
+
+    impl Embedder for HashingEmbedder {
+        fn dim(&self) -> usize {
+            self.dim
+        }
+
+        fn embed(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Ok(texts
+                .iter()
+                .map(|t| {
+                    let mut v = vec![0f32; self.dim];
+                    for tok in t.split_whitespace() {
+                        let h = tok
+                            .bytes()
+                            .fold(0usize, |a, b| a.wrapping_mul(31).wrapping_add(b as usize));
+                        v[h % self.dim] += 1.0;
+                    }
+                    let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
+                    if norm > 0.0 {
+                        for x in &mut v {
+                            *x /= norm;
+                        }
+                    }
+                    v
+                })
+                .collect())
+        }
+    }
+
+    /// An in-memory library with the deterministic test embedder configured.
+    fn lib_with_embedder() -> Library {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 64 })));
+        lib
     }
 
     #[test]
@@ -839,7 +1059,205 @@ mod tests {
             )
             .unwrap();
         }
-        let lib = Library::open(&path).unwrap(); // second open: user_version is 1, schema skipped
+        let lib = Library::open(&path).unwrap(); // second open: user_version is 2, schema skipped
         assert_eq!(lib.count().unwrap(), 1);
+    }
+
+    #[test]
+    fn semantic_search_is_empty_without_an_embedder() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+        assert!(lib.search_semantic("budget", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn save_without_an_embedder_indexes_no_chunks() {
+        // Saved full-text-only, then an embedder is attached: there are no chunks to find, so
+        // semantic search stays empty until the note is re-saved with embedding on.
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+        lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 256 })));
+        assert!(lib.search_semantic("budget", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn semantic_search_finds_and_ranks_notes_by_content() {
+        let mut lib = lib_with_embedder();
+        lib.save_note(
+            "budget",
+            &meta("Budget"),
+            1,
+            &[seg(
+                1,
+                0,
+                100,
+                "the annual budget report",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+        lib.save_note(
+            "schedule",
+            &meta("Schedule"),
+            2,
+            &[seg(
+                1,
+                0,
+                100,
+                "the weekly schedule planning",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+
+        // Each query's exact-token note ranks first (it owns that dimension outright).
+        assert_eq!(
+            lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
+            "budget"
+        );
+        assert_eq!(
+            lib.search_semantic("schedule", 10).unwrap()[0].meeting_id,
+            "schedule"
+        );
+    }
+
+    #[test]
+    fn semantic_search_groups_a_multi_chunk_note_to_one_hit() {
+        let mut lib = lib_with_embedder();
+        // Two long segments exceed CHUNK_CHARS together, so they store as two chunks of one note.
+        let long = "keyword ".repeat(60);
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[
+                seg(1, 0, 100, &long, AudioSourceKind::Microphone),
+                seg(2, 100, 200, &long, AudioSourceKind::System),
+            ],
+        )
+        .unwrap();
+        // Both chunks match, but the result collapses to a single hit for the note.
+        assert_eq!(lib.search_semantic("keyword", 10).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn hybrid_search_returns_the_matching_note() {
+        let mut lib = lib_with_embedder();
+        lib.save_note(
+            "budget",
+            &meta("Budget"),
+            1,
+            &[seg(
+                1,
+                0,
+                100,
+                "the annual budget report",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+        lib.save_note(
+            "schedule",
+            &meta("Schedule"),
+            2,
+            &[seg(
+                1,
+                0,
+                100,
+                "the weekly schedule planning",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+
+        // Full-text and semantic both surface the budget note for "budget", so it fuses to the top.
+        assert_eq!(
+            lib.search_hybrid("budget", 10).unwrap()[0].meeting_id,
+            "budget"
+        );
+    }
+
+    #[test]
+    fn hybrid_search_without_an_embedder_falls_back_to_full_text() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(
+                1,
+                0,
+                100,
+                "the annual budget report",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+        // No embedder → identical to the full-text search.
+        let hybrid = lib.search_hybrid("budget", 10).unwrap();
+        assert_eq!(hybrid.len(), 1);
+        assert_eq!(hybrid[0].meeting_id, "m1");
+    }
+
+    #[test]
+    fn delete_removes_a_notes_chunks() {
+        let mut lib = lib_with_embedder();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+        assert_eq!(lib.search_semantic("budget", 10).unwrap().len(), 1);
+
+        assert!(lib.delete_note("m1").unwrap());
+        assert!(lib.search_semantic("budget", 10).unwrap().is_empty()); // chunks gone via cascade
+    }
+
+    #[test]
+    fn migration_adds_the_chunk_table_to_a_v1_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("lib.db");
+
+        // Build a v1 database by hand: the original schema, a stored note, user_version = 1.
+        {
+            let conn = Connection::open(&path).unwrap();
+            conn.execute_batch(SCHEMA_V1).unwrap();
+            conn.execute(
+                "INSERT INTO meeting (id, title, started_at_ms, duration_ms, segment_count)
+                 VALUES ('old', 'Old', 1000, 0, 0)",
+                [],
+            )
+            .unwrap();
+            conn.pragma_update(None, "user_version", 1).unwrap();
+        }
+
+        // Opening runs the v1→v2 migration: the chunk table appears and existing data survives.
+        let mut lib = Library::open(&path).unwrap();
+        assert_eq!(lib.count().unwrap(), 1);
+
+        lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 256 })));
+        lib.save_note(
+            "new",
+            &meta("New"),
+            2000,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+        // The new note's chunk is searchable — proving the chunk table exists and works.
+        assert_eq!(lib.search_semantic("budget", 10).unwrap().len(), 1);
     }
 }

@@ -5,11 +5,14 @@
 //! [`wisp_core`] domain types (via [`wisp_core::export::format_markdown`]). The store is engine- and
 //! shell-agnostic — the desktop app is one caller, a CLI or sync agent could be another.
 //!
-//! This is the persistence + full-text foundation; semantic search and RAG build on it later.
+//! Full-text search is always on; semantic and hybrid search are optional, enabled by configuring
+//! an [`Embedder`]. RAG builds on this later.
 
+mod embed;
 mod record;
 mod store;
 
+pub use embed::Embedder;
 pub use record::{Note, NoteSummary, SearchHit, Segment};
 pub use store::Library;
 
@@ -19,6 +22,9 @@ pub enum LibraryError {
     /// The underlying SQLite database returned an error.
     #[error("library database error: {0}")]
     Db(#[from] rusqlite::Error),
+    /// An [`Embedder`] failed to produce vectors (model load or inference error).
+    #[error("embedding error: {0}")]
+    Embed(String),
 }
 
 /// Result of a library operation.
