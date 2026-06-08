@@ -612,8 +612,7 @@ mod tests {
             seg(1, 0, 1000, "Hello there", AudioSourceKind::Microphone),
             seg(2, 1000, 2500, "General Kenobi", AudioSourceKind::System),
         ];
-        lib.save_note("m1", &meta("Standup"), 1000, &segs)
-            .unwrap();
+        lib.save_note("m1", &meta("Standup"), 1000, &segs).unwrap();
 
         assert_eq!(lib.count().unwrap(), 1);
         let (m, rows) = lib.get_note("m1").unwrap().unwrap();
