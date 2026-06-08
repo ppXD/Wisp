@@ -28,6 +28,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - name: rustfmt
         run: cargo fmt --all -- --check
+      # The Tauri app crate (app/src-tauri) is its own workspace, excluded from the root, so `--all`
+      # above skips it. Check it explicitly so its formatting is gated too. `cargo fmt` only parses
+      # source (no native deps), so it runs cleanly on Linux even though the app targets macOS/Windows.
+      - name: rustfmt (app crate)
+        run: cargo fmt --manifest-path app/src-tauri/Cargo.toml -- --check
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
