@@ -1,28 +1,45 @@
 <script lang="ts">
-  // Settings → Notes search: choose how the Library searches (full-text / semantic / hybrid) and
-  // which local embedding model powers semantic + hybrid. Picking a model downloads it on first use
-  // (blocking, so the row shows a "downloading…" state) and installs it as the library's embedder.
+  // Settings → Notes search: pick how the Library searches (full-text / semantic / hybrid) and which
+  // embedding model powers semantic + hybrid. Models download explicitly (a Download button, never on
+  // a stray click) on a worker thread so the UI never freezes; installed models can be activated or
+  // deleted to reclaim disk. Mirrors the LIVE / FILE model pickers.
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
+  import Modal from "$lib/Modal.svelte";
 
-  type EmbModel = { id: string; label: string; dim: number; size_mb: number };
+  type EmbModel = {
+    id: string;
+    label: string;
+    dim: number;
+    sizeMb: number;
+    installed: boolean;
+    active: boolean;
+    kind: string;
+  };
 
   let mode = $state("fulltext");
-  let selected = $state<string | null>(null); // active embedding model id, null = off (full-text only)
   let models = $state<EmbModel[]>([]);
-  let busy = $state(""); // id currently downloading/loading ("off" while clearing)
+  let busy = $state(""); // id with an in-flight download/activate ("off" while clearing)
   let error = $state("");
+
+  let deleteOpen = $state(false);
+  let pendingDelete = $state<EmbModel | null>(null);
+  let deleting = $state("");
+
+  const active = $derived(models.find((m) => m.active) ?? null);
+
+  async function refresh() {
+    models = await invoke<EmbModel[]>("list_embedding_models");
+  }
 
   async function load() {
     try {
-      const [m, sel, list] = await Promise.all([
+      const [m, list] = await Promise.all([
         invoke<string>("search_mode"),
-        invoke<string | null>("embedding_model"),
         invoke<EmbModel[]>("list_embedding_models"),
       ]);
       mode = m;
-      selected = sel;
       models = list;
     } catch (e) {
       error = String(e);
@@ -41,18 +58,52 @@
     }
   }
 
-  async function pick(id: string | null) {
+  // Explicit download, then activate — mirrors the ASR picker's download → select.
+  async function download(id: string) {
     if (busy) return;
-    busy = id ?? "off";
+    busy = id;
     error = "";
     try {
+      await invoke("download_embedding_model", { id });
       await invoke("set_embedding_model", { id });
-      selected = id;
+      await refresh();
     } catch (e) {
       error = String(e);
     }
     busy = "";
   }
+
+  // Activate an already-installed model, or turn embedding off (null = full-text only).
+  async function activate(id: string | null) {
+    if (busy) return;
+    busy = id ?? "off";
+    error = "";
+    try {
+      await invoke("set_embedding_model", { id });
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+    busy = "";
+  }
+
+  async function confirmDelete() {
+    if (!pendingDelete) return;
+    deleting = pendingDelete.id;
+    error = "";
+    try {
+      await invoke("delete_embedding_model", { id: pendingDelete.id });
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+    deleting = "";
+    deleteOpen = false;
+  }
+
+  $effect(() => {
+    if (!deleteOpen) pendingDelete = null;
+  });
 
   function sizeLabel(mb: number): string {
     return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;
@@ -79,28 +130,83 @@
 <div class="emb-head">{i18n.t.settings.embedModel}</div>
 
 <ul class="emb-list">
-  <li>
-    <button class="emb" class:on={selected === null} disabled={!!busy} onclick={() => pick(null)}>
+  <li class="emb-row">
+    <button class="emb-main" class:on={!active} disabled={!!busy} onclick={() => activate(null)}>
       <span class="emb-name">{i18n.t.settings.embedOff}</span>
       <span class="emb-meta">{i18n.t.settings.embedOffHint}</span>
     </button>
   </li>
+
+  <li class="sec">{i18n.t.settings.embedLocal}</li>
+
   {#each models as m (m.id)}
-    <li>
-      <button class="emb" class:on={selected === m.id} disabled={!!busy} onclick={() => pick(m.id)}>
-        <span class="emb-name">{m.label}</span>
-        <span class="emb-meta">
-          {m.dim}d · {sizeLabel(m.size_mb)}{selected === m.id
-            ? ` · ${i18n.t.settings.embedActive}`
-            : ""}{busy === m.id ? ` · ${i18n.t.settings.embedDownloading}` : ""}
+    <li class="emb-row">
+      <button
+        class="emb-main"
+        class:on={m.active}
+        disabled={!!busy || !m.installed}
+        onclick={() => activate(m.id)}
+      >
+        <span class="emb-name">
+          {m.label}
+          {#if m.active}
+            <span class="badge on">{i18n.t.settings.embedActive}</span>
+          {:else if m.installed}
+            <span class="badge">{i18n.t.settings.embedInstalled}</span>
+          {/if}
         </span>
+        <span class="emb-meta">{m.dim}d · {sizeLabel(m.sizeMb)}</span>
       </button>
+
+      <div class="emb-actions">
+        {#if busy === m.id}
+          {#if m.installed}
+            <span class="spin" aria-label={i18n.t.settings.embedWorking}></span>
+          {:else}
+            <span class="dl-busy"><span class="spin"></span>{i18n.t.settings.embedDownloading}</span>
+          {/if}
+        {:else if !m.installed}
+          <button class="dl" disabled={!!busy} onclick={() => download(m.id)}>
+            ↓ {i18n.t.settings.embedDownload} · {sizeLabel(m.sizeMb)}
+          </button>
+        {:else}
+          <button
+            class="trash"
+            disabled={!!busy}
+            aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
+            title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
+            onclick={() => {
+              pendingDelete = m;
+              deleteOpen = true;
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+            </svg>
+          </button>
+        {/if}
+      </div>
     </li>
   {/each}
 </ul>
 
 {#if error}<p class="set-error">{error}</p>{/if}
-<p class="set-note">{i18n.t.settings.embedCustomSoon}</p>
+<p class="set-note">{i18n.t.settings.embedCloudSoon}</p>
+
+<Modal bind:open={deleteOpen} title={i18n.t.live.deleteModel.title}>
+  {#if pendingDelete}
+    <p class="del-body">{i18n.t.live.deleteModel.body(pendingDelete.label, sizeLabel(pendingDelete.sizeMb))}</p>
+    <p class="del-sub">{i18n.t.live.deleteModel.sub}</p>
+    <div class="del-actions">
+      <button class="btn ghost" disabled={!!deleting} onclick={() => (deleteOpen = false)}>
+        {i18n.t.common.cancel}
+      </button>
+      <button class="btn danger" disabled={!!deleting} onclick={confirmDelete}>
+        {deleting ? i18n.t.live.deleteModel.deleting : i18n.t.live.deleteModel.confirm}
+      </button>
+    </div>
+  {/if}
+</Modal>
 
 <style>
   .set-intro,
@@ -168,11 +274,27 @@
     flex-direction: column;
     gap: 6px;
   }
-  .emb {
-    width: 100%;
+  .sec {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin: 6px 2px 0;
+  }
+
+  .emb-row {
+    position: relative;
+    display: flex;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .emb-main {
+    flex: 1;
+    min-width: 0;
     display: flex;
     flex-direction: column;
-    gap: 2px;
+    gap: 3px;
     text-align: left;
     padding: 11px 13px;
     background: var(--surface);
@@ -185,23 +307,168 @@
       border-color 0.15s,
       background 0.15s;
   }
-  .emb:hover:not(:disabled) {
+  .emb-main:hover:not(:disabled) {
     border-color: var(--border-strong);
     background: var(--surface-active);
   }
-  .emb:disabled {
+  .emb-main:disabled {
     cursor: default;
-    opacity: 0.7;
   }
-  .emb.on {
+  .emb-main.on {
     border-color: var(--accent);
+    background: var(--surface-active);
   }
   .emb-name {
+    display: flex;
+    align-items: center;
+    gap: 7px;
     font-size: 13.5px;
     font-weight: 600;
   }
   .emb-meta {
     font-size: 12px;
     color: var(--muted);
+  }
+
+  .badge {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: var(--muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 5px;
+    padding: 1px 6px;
+  }
+  .badge.on {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .emb-actions {
+    flex: none;
+    display: flex;
+    align-items: center;
+  }
+  .dl {
+    font-family: inherit;
+    font-size: 12px;
+    font-weight: 500;
+    white-space: nowrap;
+    color: var(--accent);
+    background: var(--bg);
+    border: 1px solid var(--accent);
+    border-radius: 9px;
+    padding: 0 12px;
+    height: 100%;
+    cursor: pointer;
+    transition:
+      background 0.15s,
+      opacity 0.15s;
+  }
+  .dl:hover:not(:disabled) {
+    background: var(--surface-active);
+  }
+  .dl:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+  .trash {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 38px;
+    height: 100%;
+    color: var(--muted);
+    background: transparent;
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    cursor: pointer;
+    transition:
+      color 0.15s,
+      border-color 0.15s,
+      background 0.15s;
+  }
+  .trash:hover:not(:disabled) {
+    color: var(--stop);
+    border-color: var(--stop);
+    background: var(--surface-active);
+  }
+  .trash:disabled {
+    opacity: 0.5;
+    cursor: default;
+  }
+
+  .dl-busy {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+    padding: 0 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .spin {
+    display: inline-block;
+    width: 13px;
+    height: 13px;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: spin 0.7s linear infinite;
+  }
+  @keyframes spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+
+  .del-body {
+    margin: 0;
+    font-size: 14px;
+    line-height: 1.5;
+    color: var(--text);
+  }
+  .del-sub {
+    margin: 0;
+    font-size: 12.5px;
+    color: var(--muted);
+  }
+  .del-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-top: 4px;
+  }
+  .btn {
+    font-family: inherit;
+    font-size: 13px;
+    font-weight: 500;
+    border-radius: 9px;
+    padding: 7px 14px;
+    cursor: pointer;
+    border: 1px solid transparent;
+    transition:
+      background 0.15s,
+      opacity 0.15s;
+  }
+  .btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .ghost {
+    color: var(--text);
+    background: transparent;
+    border-color: var(--border-strong);
+  }
+  .ghost:hover:not(:disabled) {
+    background: var(--surface-active);
+  }
+  .danger {
+    color: #fff;
+    background: var(--stop);
+  }
+  .danger:hover:not(:disabled) {
+    filter: brightness(1.05);
   }
 </style>
