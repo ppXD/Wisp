@@ -4184,6 +4184,8 @@ struct EmbeddingModelInfo {
     size_mb: u32,
     /// `"local"` (downloaded, run on-device) or `"cloud"` (a hosted API).
     kind: String,
+    /// Provider / family for the picker's left-pane grouping (e.g. `"Multilingual E5"`, `"OpenAI"`).
+    group: String,
     /// Local only: whether the model's files are downloaded on this device.
     installed: bool,
     /// Whether it can be activated right now — a local model is downloaded, or a cloud model's API
@@ -4238,6 +4240,7 @@ fn list_embedding_models(state: State<'_, AppState>) -> Vec<EmbeddingModelInfo> 
                 dim: m.dim,
                 size_mb: m.size_mb,
                 kind: "local".to_owned(),
+                group: m.group.to_owned(),
                 installed,
                 ready: installed,
                 provider: None,
@@ -4255,6 +4258,7 @@ fn list_embedding_models(state: State<'_, AppState>) -> Vec<EmbeddingModelInfo> 
                 dim: m.dim,
                 size_mb: 0,
                 kind: "cloud".to_owned(),
+                group: m.group.to_owned(),
                 installed: false,
                 ready: cloud_provider_keyed(&state, m.provider),
                 provider: Some(m.provider.to_owned()),

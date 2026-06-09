@@ -1,14 +1,16 @@
 <script lang="ts">
-  // Settings → Notes search: pick how the Library searches (full-text / semantic / hybrid) and which
-  // embedding model powers semantic + hybrid. The model picker is a dropdown (trigger → drop-open
-  // list, like the LIVE picker) so the list stays compact and aligned. Local models download
-  // explicitly on a worker thread (never on a stray click) so the UI never freezes, and can be
-  // deleted; cloud models run through the provider's API with the user's own key.
+  // Settings → Notes search: pick the search mode (full-text / semantic / hybrid) and the embedding
+  // model that powers semantic + hybrid. The model picker is a dropdown holding a LIVE-style two-pane
+  // layout: tabs (Device | Cloud) → left a provider/family list (+ Import) → right that provider's
+  // models. Local models download explicitly on a worker thread (never on a stray click), show
+  // installed/active state, and can be deleted; cloud models run through the provider's API key.
   import { onMount } from "svelte";
   import { slide } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
+
+  const IMPORT = "__import__";
 
   type EmbModel = {
     id: string;
@@ -16,6 +18,7 @@
     dim: number;
     sizeMb: number;
     kind: "local" | "cloud";
+    group: string;
     installed: boolean;
     ready: boolean;
     provider: string | null;
@@ -24,31 +27,33 @@
 
   let mode = $state("fulltext");
   let models = $state<EmbModel[]>([]);
-  let open = $state(false); // dropdown open
-  let busy = $state(""); // id with an in-flight download/activate ("off" while clearing)
+  let open = $state(false);
+  let tab = $state<"device" | "cloud">("device");
+  let sel = $state(""); // selected provider/group, or IMPORT
+  let busy = $state("");
   let error = $state("");
 
   let deleteOpen = $state(false);
   let pendingDelete = $state<EmbModel | null>(null);
   let deleting = $state("");
 
-  // Cloud API-key entry drafts, keyed by provider id.
   let keyDraft = $state<Record<string, string>>({});
   let savingKey = $state("");
 
   const active = $derived(models.find((m) => m.active) ?? null);
-  const local = $derived(models.filter((m) => m.kind === "local"));
-  const cloud = $derived(models.filter((m) => m.kind === "cloud"));
-  // Distinct cloud providers whose key isn't saved yet, with a display name from the model label.
-  const unkeyed = $derived(
-    [
-      ...new Map(
-        cloud
-          .filter((m) => !m.ready && m.provider)
-          .map((m) => [m.provider as string, m.label.split("·")[0].trim()]),
-      ),
-    ].map(([provider, name]) => ({ provider, name })),
+  const tabModels = $derived(
+    models.filter((m) => (tab === "device" ? m.kind === "local" : m.kind === "cloud")),
   );
+  const providers = $derived([...new Set(tabModels.map((m) => m.group))]);
+  const selModels = $derived(tabModels.filter((m) => m.group === sel));
+  const selProviderId = $derived(selModels.find((m) => m.provider)?.provider ?? null);
+  const selUnkeyed = $derived(tab === "cloud" && selModels.length > 0 && selModels.some((m) => !m.ready));
+
+  // Keep `sel` valid for the current tab (Import is device-only).
+  $effect(() => {
+    const valid = tab === "device" ? [...providers, IMPORT] : providers;
+    if (open && !valid.includes(sel)) sel = providers[0] ?? "";
+  });
 
   async function refresh() {
     models = await invoke<EmbModel[]>("list_embedding_models");
@@ -68,6 +73,14 @@
   }
   onMount(load);
 
+  function toggle() {
+    open = !open;
+    if (open) {
+      tab = active?.kind === "cloud" ? "cloud" : "device";
+      sel = active?.group ?? "";
+    }
+  }
+
   async function setMode(m: string) {
     const prev = mode;
     mode = m;
@@ -79,8 +92,8 @@
     }
   }
 
-  // Explicit download, then activate — mirrors the ASR picker's download → select. Keeps the menu
-  // open so its row spinner is visible during the (possibly long) download.
+  // Explicit download, then activate — keeps the menu open so its row spinner shows during the
+  // (possibly long) download.
   async function download(id: string) {
     if (busy) return;
     busy = id;
@@ -96,8 +109,6 @@
     busy = "";
   }
 
-  // Activate a ready model (local installed, or cloud keyed), or turn embedding off (null), then
-  // collapse the dropdown.
   async function activate(id: string | null) {
     if (busy) return;
     busy = id ?? "off";
@@ -112,8 +123,6 @@
     busy = "";
   }
 
-  // Route a click on a model row: a not-yet-downloaded local model downloads first; everything else
-  // (installed local, keyed cloud) activates directly.
   function pick(m: EmbModel) {
     if (m.kind === "local" && !m.installed) download(m.id);
     else activate(m.id);
@@ -163,6 +172,42 @@
   }}
 />
 
+{#snippet modelOpt(m: EmbModel)}
+  <div class="opt-row">
+    <button class="opt" class:sel={m.active} disabled={!!busy || (m.kind === "cloud" && !m.ready)} onclick={() => pick(m)}>
+      <span class="opt-name">{m.label}</span>
+      {#if busy === m.id}
+        <span class="spin"></span>
+      {:else if m.active}
+        <span class="tag on">{i18n.t.settings.embedActive}</span>
+      {:else if m.kind === "local" && m.installed}
+        <span class="tag">{i18n.t.settings.embedInstalled}</span>
+      {:else if m.kind === "local"}
+        <span class="opt-size">↓ {sizeLabel(m.sizeMb)}</span>
+      {:else if !m.ready}
+        <span class="opt-note">{i18n.t.settings.embedNeedsKey}</span>
+      {:else}
+        <span class="opt-size">{i18n.t.settings.embedApi}</span>
+      {/if}
+    </button>
+    {#if m.kind === "local" && m.installed && !busy}
+      <button
+        class="del"
+        title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
+        aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
+        onclick={() => {
+          pendingDelete = m;
+          deleteOpen = true;
+        }}
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+        </svg>
+      </button>
+    {/if}
+  </div>
+{/snippet}
+
 <p class="set-intro">{i18n.t.settings.searchIntro}</p>
 
 <div class="field">
@@ -184,7 +229,7 @@
   <span class="field-label">{i18n.t.settings.embedModel}</span>
 
   <div class="picker">
-    <button class="trigger" class:open onclick={() => (open = !open)}>
+    <button class="trigger" class:open onclick={toggle}>
       {#if busy}<span class="spin sm"></span>{/if}
       <span class="trigger-label">{active ? active.label : i18n.t.settings.embedOff}</span>
       <span class="caret"></span>
@@ -192,94 +237,75 @@
 
     {#if open}
       <div class="menu" transition:slide={{ duration: 140 }}>
-        <button class="opt" class:sel={!active} disabled={!!busy} onclick={() => activate(null)}>
+        <button class="opt off" class:sel={!active} disabled={!!busy} onclick={() => activate(null)}>
           <span class="opt-name">{i18n.t.settings.embedOff}</span>
           <span class="opt-note">{i18n.t.settings.embedOffHint}</span>
         </button>
 
-        <div class="sec">{i18n.t.settings.embedLocal}</div>
-        {#each local as m (m.id)}
-          <div class="opt-row">
-            <button class="opt" class:sel={m.active} disabled={!!busy} onclick={() => pick(m)}>
-              <span class="opt-name">{m.label}</span>
-              {#if busy === m.id}
-                <span class="spin"></span>
-              {:else if m.active}
-                <span class="tag on">{i18n.t.settings.embedActive}</span>
-              {:else if m.installed}
-                <span class="tag">{i18n.t.settings.embedInstalled}</span>
-              {:else}
-                <span class="opt-size">↓ {sizeLabel(m.sizeMb)}</span>
-              {/if}
-            </button>
-            {#if m.installed && !busy}
-              <button
-                class="del"
-                title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
-                aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
-                onclick={() => {
-                  pendingDelete = m;
-                  deleteOpen = true;
-                }}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-                  <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
-                </svg>
+        <div class="tabs">
+          <button class="tab" class:on={tab === "device"} onclick={() => (tab = "device")}>
+            {i18n.t.settings.embedTabDevice}
+          </button>
+          <button class="tab" class:on={tab === "cloud"} onclick={() => (tab = "cloud")}>
+            {i18n.t.settings.embedTabCloud}
+          </button>
+        </div>
+
+        <div class="panes">
+          <div class="cats">
+            {#each providers as g (g)}
+              <button class="cat" class:on={sel === g} onclick={() => (sel = g)}>{g}</button>
+            {/each}
+            {#if tab === "device"}
+              <button class="cat import" class:on={sel === IMPORT} onclick={() => (sel = IMPORT)}>
+                ＋ {i18n.t.settings.embedImport}
               </button>
             {/if}
           </div>
-        {/each}
 
-        <div class="sec">{i18n.t.settings.embedCloud}</div>
-        {#each cloud as m (m.id)}
-          <button
-            class="opt"
-            class:sel={m.active}
-            disabled={!!busy || !m.ready}
-            onclick={() => pick(m)}
-          >
-            <span class="opt-name">{m.label}</span>
-            {#if busy === m.id}
-              <span class="spin"></span>
-            {:else if m.active}
-              <span class="tag on">{i18n.t.settings.embedActive}</span>
-            {:else if !m.ready}
-              <span class="opt-note">{i18n.t.settings.embedNeedsKey}</span>
+          <div class="detail">
+            {#if sel === IMPORT}
+              <p class="import-hint">{i18n.t.settings.embedImportHint}</p>
+              <div class="keyrow">
+                <input class="keyinput" type="text" placeholder="org/model-onnx" disabled />
+                <button class="keysave" disabled>{i18n.t.settings.embedDownload}</button>
+              </div>
+              <p class="import-soon">{i18n.t.settings.embedImportSoon}</p>
             {:else}
-              <span class="opt-size">{i18n.t.settings.embedApi}</span>
+              {#if selUnkeyed && selProviderId}
+                {@const pid = selProviderId}
+                <div class="keybox">
+                  <label class="keylabel" for="emb-key">{i18n.t.settings.embedKeyLabel(sel)}</label>
+                  <div class="keyrow">
+                    <input
+                      id="emb-key"
+                      class="keyinput"
+                      type="password"
+                      autocomplete="off"
+                      placeholder={i18n.t.settings.embedKeyPlaceholder}
+                      value={keyDraft[pid] ?? ""}
+                      oninput={(e) => (keyDraft[pid] = e.currentTarget.value)}
+                      onkeydown={(e) => {
+                        if (e.key === "Enter") saveKey(pid);
+                      }}
+                    />
+                    <button
+                      class="keysave"
+                      disabled={savingKey === pid || !(keyDraft[pid] ?? "").trim()}
+                      onclick={() => saveKey(pid)}
+                    >
+                      {savingKey === pid ? i18n.t.settings.embedWorking : i18n.t.settings.embedKeySave}
+                    </button>
+                  </div>
+                </div>
+              {/if}
+              {#each selModels as m (m.id)}{@render modelOpt(m)}{/each}
             {/if}
-          </button>
-        {/each}
+          </div>
+        </div>
       </div>
     {/if}
   </div>
-
-  {#each unkeyed as p (p.provider)}
-    <div class="keybox">
-      <label class="keylabel" for={`k-${p.provider}`}>{i18n.t.settings.embedKeyLabel(p.name)}</label>
-      <div class="keyrow">
-        <input
-          id={`k-${p.provider}`}
-          class="keyinput"
-          type="password"
-          autocomplete="off"
-          placeholder={i18n.t.settings.embedKeyPlaceholder}
-          value={keyDraft[p.provider] ?? ""}
-          oninput={(e) => (keyDraft[p.provider] = e.currentTarget.value)}
-          onkeydown={(e) => {
-            if (e.key === "Enter") saveKey(p.provider);
-          }}
-        />
-        <button
-          class="keysave"
-          disabled={savingKey === p.provider || !(keyDraft[p.provider] ?? "").trim()}
-          onclick={() => saveKey(p.provider)}
-        >
-          {savingKey === p.provider ? i18n.t.settings.embedWorking : i18n.t.settings.embedKeySave}
-        </button>
-      </div>
-    </div>
-  {/each}
 </div>
 
 {#if error}<p class="set-error">{error}</p>{/if}
@@ -411,7 +437,6 @@
     margin-top: 6px;
     display: flex;
     flex-direction: column;
-    gap: 1px;
     background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: 12px;
@@ -419,13 +444,94 @@
     padding: 6px;
   }
 
-  .sec {
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
+  .off {
+    margin-bottom: 2px;
+  }
+
+  .tabs {
+    display: flex;
+    gap: 2px;
+    padding: 4px;
+    margin: 2px 0 6px;
+    background: var(--bg);
+    border-radius: 9px;
+  }
+  .tab {
+    flex: 1;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
     color: var(--muted);
-    padding: 8px 10px 4px;
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 6px 0;
+    cursor: pointer;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+  .tab.on {
+    background: var(--surface);
+    color: var(--accent);
+    box-shadow: 0 1px 2px rgba(40, 30, 20, 0.1);
+  }
+
+  .panes {
+    display: flex;
+    gap: 6px;
+    min-height: 120px;
+  }
+  .cats {
+    flex: none;
+    width: 132px;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    border-right: 1px solid var(--border);
+    padding-right: 6px;
+  }
+  .cat {
+    font-family: inherit;
+    font-size: 12.5px;
+    text-align: left;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 7px;
+    padding: 7px 9px;
+    cursor: pointer;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    transition:
+      background 0.12s,
+      color 0.12s;
+  }
+  .cat:hover {
+    background: var(--surface-active);
+  }
+  .cat.on {
+    background: var(--surface-active);
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .cat.import {
+    color: var(--muted);
+    margin-top: 2px;
+  }
+  .cat.import.on {
+    color: var(--accent);
+  }
+
+  .detail {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    max-height: 232px;
+    overflow-y: auto;
   }
 
   .opt-row {
@@ -440,7 +546,7 @@
     align-items: center;
     gap: 10px;
     font-family: inherit;
-    font-size: 13.5px;
+    font-size: 13px;
     color: var(--text);
     background: transparent;
     border: none;
@@ -459,6 +565,11 @@
   .opt.sel {
     color: var(--accent);
     font-weight: 500;
+  }
+  .opt.off {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
   }
   .opt-name {
     flex: 1;
@@ -535,15 +646,29 @@
     }
   }
 
+  /* ── Import pane (custom HF repo) ── */
+  .import-hint {
+    margin: 4px 2px;
+    font-size: 12.5px;
+    line-height: 1.45;
+    color: var(--muted);
+  }
+  .import-soon {
+    margin: 6px 2px 2px;
+    font-size: 11.5px;
+    color: var(--accent);
+  }
+
   /* ── Cloud key entry ── */
   .keybox {
     display: flex;
     flex-direction: column;
     gap: 6px;
-    padding: 11px 13px;
-    background: var(--surface);
+    padding: 8px;
+    margin-bottom: 4px;
+    background: var(--bg);
     border: 1px solid var(--border);
-    border-radius: 11px;
+    border-radius: 9px;
   }
   .keylabel {
     font-size: 12px;
@@ -552,33 +677,36 @@
   }
   .keyrow {
     display: flex;
-    gap: 8px;
+    gap: 6px;
   }
   .keyinput {
     flex: 1;
     min-width: 0;
     font: inherit;
-    font-size: 13px;
+    font-size: 12.5px;
     color: var(--text);
-    background: var(--bg);
+    background: var(--surface);
     border: 1px solid var(--border-strong);
     border-radius: 8px;
-    padding: 7px 10px;
+    padding: 6px 9px;
   }
   .keyinput:focus {
     outline: none;
     border-color: var(--accent);
   }
+  .keyinput:disabled {
+    opacity: 0.55;
+  }
   .keysave {
     flex: none;
     font-family: inherit;
-    font-size: 12.5px;
+    font-size: 12px;
     font-weight: 500;
     color: #fff;
     background: var(--accent);
     border: none;
     border-radius: 8px;
-    padding: 0 14px;
+    padding: 0 12px;
     cursor: pointer;
     transition:
       filter 0.15s,

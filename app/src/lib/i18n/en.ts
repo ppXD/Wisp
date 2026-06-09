@@ -278,8 +278,9 @@ export const en = {
     embedModel: "Embedding model",
     embedOff: "Off — full-text only",
     embedOffHint: "No download. Matches exact words.",
-    embedLocal: "Local · on-device",
-    embedCloud: "Cloud · your API key",
+    embedTabDevice: "Device",
+    embedTabCloud: "Cloud",
+    embedImport: "Import",
     embedActive: "active",
     embedInstalled: "installed",
     embedDownload: "Download",
@@ -290,6 +291,9 @@ export const en = {
     embedKeyLabel: (name: string): string => `${name} API key`,
     embedKeyPlaceholder: "Paste your API key",
     embedKeySave: "Save",
+    embedImportHint:
+      "Paste a Hugging Face repo that ships ONNX (an encoder embedder like BGE-M3 or gte-multilingual) to download and run it on-device.",
+    embedImportSoon: "Custom import is wired up next in this PR.",
     embedCloudNote: "Cloud models send note text to the provider; local models stay fully on-device.",
     dictation: "Dictation",
     dictationIntro:
