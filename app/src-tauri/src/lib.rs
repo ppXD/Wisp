@@ -4569,14 +4569,9 @@ pub fn run() {
                 .filter(|s| matches!(s.as_str(), "semantic" | "hybrid"))
                 .unwrap_or_else(|| "fulltext".to_owned());
 
-            if let Some(id) = embed_model.clone() {
-                let handle = app.handle().clone();
-                std::thread::spawn(move || {
-                    if let Err(e) = load_embedder(&handle, &id) {
-                        eprintln!("restoring embedding model {id} failed: {e}");
-                    }
-                });
-            }
+            // Captured before `manage` moves `embed_model`; the restore thread is spawned *after*
+            // `manage` (below), because `load_embedder` calls `state()`.
+            let restore_embed = embed_model.clone();
 
             app.manage(AppState {
                 store,
@@ -4620,6 +4615,18 @@ pub fn run() {
                 custom_models: Mutex::new(custom_models),
                 custom_models_dir,
             });
+
+            // Restore the persisted embedding model in the background — loading may download and be
+            // slow. Spawned after `manage` so the `state()` call inside `load_embedder` resolves.
+            if let Some(id) = restore_embed {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = load_embedder(&handle, &id) {
+                        eprintln!("restoring embedding model {id} failed: {e}");
+                    }
+                });
+            }
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
