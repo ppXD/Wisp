@@ -261,7 +261,7 @@ export const zhHans: Messages = {
     embedKeySave: "保存",
     embedImportHint:
       "粘贴一个提供 ONNX 的 Hugging Face repo(像 BGE-M3、gte-multilingual 这类 encoder 嵌入模型),即可下载并在设备端运行。",
-    embedImportSoon: "自定义导入会在这个 PR 接着接上。",
+    embedImportSoon: "自定义导入即将推出。",
     embedCloudNote: "云端模型会把笔记内容发送给服务商;本地模型则完全留在设备端。",
     dictation: "听写",
     dictationIntro: "按住快捷键说话、松开 —— Wisp 会把它输入到当前聚焦的 app，全程在设备端（Apple 语音）。",

@@ -294,7 +294,7 @@ export const en = {
     embedKeySave: "Save",
     embedImportHint:
       "Paste a Hugging Face repo that ships ONNX (an encoder embedder like BGE-M3 or gte-multilingual) to download and run it on-device.",
-    embedImportSoon: "Custom import is wired up next in this PR.",
+    embedImportSoon: "Custom import is coming soon.",
     embedCloudNote: "Cloud models send note text to the provider; local models stay fully on-device.",
     dictation: "Dictation",
     dictationIntro:
