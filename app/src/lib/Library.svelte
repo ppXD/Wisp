@@ -145,8 +145,13 @@
 
 <section class="library">
   {#if detail}
-    <header class="lib-head detail-head">
-      <button class="back" onclick={() => (detail = null)}>← {i18n.t.library.back}</button>
+    <header class="detail-head">
+      <div class="detail-bar">
+        <button class="back" onclick={() => (detail = null)}>← {i18n.t.library.back}</button>
+        <button class="del-btn" onclick={() => askDelete(detail!.meeting.id)}>
+          {i18n.t.library.delete}
+        </button>
+      </div>
       <div class="lib-titles">
         <h2 class="lib-h2">{detail.meeting.title}</h2>
         <span class="lib-meta">
@@ -156,9 +161,6 @@
             : ""}
         </span>
       </div>
-      <button class="del-btn" onclick={() => askDelete(detail!.meeting.id)}>
-        {i18n.t.library.delete}
-      </button>
     </header>
 
     {#if detail.meeting.summary}
@@ -435,8 +437,19 @@
     color: var(--stop);
   }
 
+  /* Detail header stacks: a top action bar (back ↔ delete), then the title block full-width below,
+     so a long title is never squeezed between the two buttons. */
   .detail-head {
-    align-items: flex-start;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    flex: none;
+  }
+  .detail-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
   }
   .back {
     flex: none;
@@ -464,7 +477,6 @@
     color: var(--muted);
   }
   .del-btn {
-    margin-left: auto;
     flex: none;
     padding: 7px 13px;
     font: inherit;
