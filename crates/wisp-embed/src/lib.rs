@@ -19,6 +19,8 @@ pub struct CatalogModel {
     pub id: &'static str,
     /// Human-facing name for the picker.
     pub label: &'static str,
+    /// Provider / family this belongs to (the picker's left-pane grouping), e.g. `"Multilingual E5"`.
+    pub group: &'static str,
     /// Embedding dimension (vector length stored per chunk).
     pub dim: usize,
     /// Approximate fp32 download size in MiB (fastembed serves full-precision ONNX).
@@ -39,6 +41,7 @@ pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "e5-small",
         label: "Multilingual E5 small",
+        group: "Multilingual E5",
         dim: 384,
         size_mb: 470,
         model: EmbeddingModel::MultilingualE5Small,
@@ -48,6 +51,7 @@ pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "e5-base",
         label: "Multilingual E5 base",
+        group: "Multilingual E5",
         dim: 768,
         size_mb: 1100,
         model: EmbeddingModel::MultilingualE5Base,
@@ -57,6 +61,7 @@ pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "e5-large",
         label: "Multilingual E5 large",
+        group: "Multilingual E5",
         dim: 1024,
         size_mb: 2200,
         model: EmbeddingModel::MultilingualE5Large,
@@ -66,6 +71,7 @@ pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "bge-small-zh",
         label: "BGE small · Chinese",
+        group: "BGE · Chinese",
         dim: 512,
         size_mb: 95,
         model: EmbeddingModel::BGESmallZHV15,
@@ -75,6 +81,7 @@ pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "bge-large-zh",
         label: "BGE large · Chinese",
+        group: "BGE · Chinese",
         dim: 1024,
         size_mb: 1300,
         model: EmbeddingModel::BGELargeZHV15,

@@ -14,6 +14,8 @@ pub struct CloudCatalogModel {
     pub id: &'static str,
     /// Human-facing name for the picker.
     pub label: &'static str,
+    /// Provider / family this belongs to (the picker's left-pane grouping), e.g. `"OpenAI"`.
+    pub group: &'static str,
     /// Embedding dimension (vector length stored per chunk).
     pub dim: usize,
     /// Key-store provider id whose API key authorizes this model (e.g. `"openai"`).
@@ -30,6 +32,7 @@ pub const CLOUD_CATALOG: &[CloudCatalogModel] = &[
     CloudCatalogModel {
         id: "openai-3-small",
         label: "OpenAI · text-embedding-3-small",
+        group: "OpenAI",
         dim: 1536,
         provider: "openai",
         base_url: "https://api.openai.com/v1",
@@ -38,6 +41,7 @@ pub const CLOUD_CATALOG: &[CloudCatalogModel] = &[
     CloudCatalogModel {
         id: "openai-3-large",
         label: "OpenAI · text-embedding-3-large",
+        group: "OpenAI",
         dim: 3072,
         provider: "openai",
         base_url: "https://api.openai.com/v1",
