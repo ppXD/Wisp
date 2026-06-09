@@ -13,6 +13,9 @@ use wisp_library::{Embedder, LibraryError, Result};
 mod cloud;
 pub use cloud::{cloud_catalog_model, CloudCatalogModel, CloudEmbedder, CLOUD_CATALOG};
 
+mod ort_embed;
+pub use ort_embed::{OrtEmbedder, Pooling, Recipe};
+
 /// A vetted, downloadable embedding model the picker can offer.
 pub struct CatalogModel {
     /// Stable id persisted as the user's choice and used to look the model back up.

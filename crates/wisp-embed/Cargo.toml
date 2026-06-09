@@ -17,3 +17,10 @@ fastembed = "4"
 # reqwest::blocking). Already in the tree via hf-hub, so it adds no new build cost.
 ureq = { version = "2.12", features = ["json"] }
 serde_json = "1"
+# Direct ONNX Runtime + tokenizer access for the generic recipe-driven embedder (`OrtEmbedder`): runs
+# any local ONNX model — encoder (CLS/Mean) or decoder (last-token, e.g. Qwen3) — from a downloaded
+# model dir. Same `ort` version fastembed pulls, so the onnxruntime native lib stays shared (no
+# duplicate runtime); model weights are runtime downloads, not bundled.
+ort = { version = "=2.0.0-rc.9", features = ["ndarray", "download-binaries"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+ndarray = "0.16"
