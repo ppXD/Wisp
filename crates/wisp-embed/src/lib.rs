@@ -10,6 +10,9 @@ use std::path::PathBuf;
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
 use wisp_library::{Embedder, LibraryError, Result};
 
+mod cloud;
+pub use cloud::{cloud_catalog_model, CloudCatalogModel, CloudEmbedder, CLOUD_CATALOG};
+
 /// A vetted, downloadable embedding model the picker can offer.
 pub struct CatalogModel {
     /// Stable id persisted as the user's choice and used to look the model back up.

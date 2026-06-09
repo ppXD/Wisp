@@ -157,6 +157,16 @@ struct AppState {
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
+    /// The chosen embedding model's catalog id (`None` = full-text only). Setting it loads the model
+    /// into the library's `Embedder`; persisted to `embed_model_path`, model files cache under
+    /// `embed_cache_dir`.
+    embed_model: Mutex<Option<String>>,
+    embed_model_path: PathBuf,
+    embed_cache_dir: PathBuf,
+    /// Notes search mode — `"fulltext"` (default), `"semantic"`, or `"hybrid"`. Persists to
+    /// `search_mode_path`.
+    search_mode: Mutex<String>,
+    search_mode_path: PathBuf,
     /// Per-stream live mute flags shared with the running capture (via `MutedSource`), so the Live bar
     /// can mute/unmute "You" (mic) and "Them" (system) mid-session. Reset to unmuted on each start.
     mic_muted: Arc<AtomicBool>,
@@ -4125,19 +4135,32 @@ fn get_library_note(
     Ok(detail)
 }
 
-/// Full-text search across stored meetings (default cap 50 hits).
+/// Searches stored notes by the active mode — full-text, semantic, or hybrid (default cap 50 hits).
+/// Semantic and hybrid degrade gracefully (to empty / full-text) when no embedder is configured.
 #[tauri::command]
 fn search_library(
     state: State<'_, AppState>,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<SearchHit>, String> {
-    state
+    let mode = state
+        .search_mode
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "fulltext".to_owned());
+
+    let library = state
         .library
         .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .search(&query, limit.unwrap_or(50))
-        .map_err(|e| e.to_string())
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let limit = limit.unwrap_or(50);
+
+    match mode.as_str() {
+        "semantic" => library.search_semantic(&query, limit),
+        "hybrid" => library.search_hybrid(&query, limit),
+        _ => library.search(&query, limit),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Deletes a stored meeting; returns whether it existed.
@@ -4151,27 +4174,264 @@ fn delete_library_note(state: State<'_, AppState>, id: String) -> Result<bool, S
         .map_err(|e| e.to_string())
 }
 
-/// One downloadable local embedding model the Settings picker can offer.
+/// One embedding model the Settings picker can offer, with its install / key + active state.
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct EmbeddingModelInfo {
     id: String,
     label: String,
     dim: usize,
     size_mb: u32,
+    /// `"local"` (downloaded, run on-device) or `"cloud"` (a hosted API).
+    kind: String,
+    /// Local only: whether the model's files are downloaded on this device.
+    installed: bool,
+    /// Whether it can be activated right now — a local model is downloaded, or a cloud model's API
+    /// key is saved.
+    ready: bool,
+    /// Cloud only: the key-store provider whose API key this model needs (e.g. `"openai"`).
+    provider: Option<String>,
+    /// Whether it is the active embedder powering semantic / hybrid search.
+    active: bool,
 }
 
-/// The catalog of vetted local embedding models for semantic / hybrid note search.
+/// Per-model cache directory: each model is isolated under `embed-models/<id>/`, so it can be
+/// detected and deleted independently of the others.
+fn embed_model_dir(cache_root: &Path, id: &str) -> PathBuf {
+    cache_root.join(id)
+}
+
+/// Marker written once a model finishes downloading, so a half-finished download never reads as
+/// installed.
+const EMBED_READY_MARKER: &str = ".ready";
+
+/// Whether a model's files are fully downloaded (its ready-marker is present).
+fn embed_installed(cache_root: &Path, id: &str) -> bool {
+    embed_model_dir(cache_root, id)
+        .join(EMBED_READY_MARKER)
+        .exists()
+}
+
+/// Whether a cloud provider's API key is saved (non-empty).
+fn cloud_provider_keyed(state: &AppState, provider: &str) -> bool {
+    state
+        .cloud_keys
+        .lock()
+        .map(|k| k.get(provider).is_some_and(|v| !v.trim().is_empty()))
+        .unwrap_or(false)
+}
+
+/// The embedding catalog — local (on-device) then cloud (hosted) — with each model's install / key
+/// and active state, for the picker.
 #[tauri::command]
-fn list_embedding_models() -> Vec<EmbeddingModelInfo> {
-    wisp_embed::CATALOG
+fn list_embedding_models(state: State<'_, AppState>) -> Vec<EmbeddingModelInfo> {
+    let active = state.embed_model.lock().ok().and_then(|g| g.clone());
+    let is_active = |id: &str| active.as_deref() == Some(id);
+
+    let mut out: Vec<EmbeddingModelInfo> = wisp_embed::CATALOG
         .iter()
-        .map(|m| EmbeddingModelInfo {
-            id: m.id.to_owned(),
-            label: m.label.to_owned(),
-            dim: m.dim,
-            size_mb: m.size_mb,
+        .map(|m| {
+            let installed = embed_installed(&state.embed_cache_dir, m.id);
+            EmbeddingModelInfo {
+                id: m.id.to_owned(),
+                label: m.label.to_owned(),
+                dim: m.dim,
+                size_mb: m.size_mb,
+                kind: "local".to_owned(),
+                installed,
+                ready: installed,
+                provider: None,
+                active: is_active(m.id),
+            }
         })
-        .collect()
+        .collect();
+
+    out.extend(
+        wisp_embed::CLOUD_CATALOG
+            .iter()
+            .map(|m| EmbeddingModelInfo {
+                id: m.id.to_owned(),
+                label: m.label.to_owned(),
+                dim: m.dim,
+                size_mb: 0,
+                kind: "cloud".to_owned(),
+                installed: false,
+                ready: cloud_provider_keyed(&state, m.provider),
+                provider: Some(m.provider.to_owned()),
+                active: is_active(m.id),
+            }),
+    );
+
+    out
+}
+
+/// Resolves a model id to its embedder — a local fastembed model loaded from its per-model cache
+/// dir, or a cloud embedder built from the catalog + the provider's saved API key.
+fn resolve_embedder(state: &AppState, id: &str) -> Result<Box<dyn wisp_library::Embedder>, String> {
+    if let Some(local) = wisp_embed::catalog_model(id) {
+        let embedder =
+            wisp_embed::FastEmbedder::load(local, embed_model_dir(&state.embed_cache_dir, id))
+                .map_err(|e| e.to_string())?;
+        return Ok(Box::new(embedder));
+    }
+
+    if let Some(cloud) = wisp_embed::cloud_catalog_model(id) {
+        let key = cloud_key(state, cloud.provider)?;
+        return Ok(Box::new(wisp_embed::CloudEmbedder::from_catalog(
+            cloud, &key,
+        )));
+    }
+
+    Err(format!("unknown embedding model: {id}"))
+}
+
+/// Installs a model (local or cloud) as the library's active embedder. Fast for cached local models;
+/// cloud models just need their saved API key.
+fn load_embedder(handle: &AppHandle, id: &str) -> Result<(), String> {
+    let state = handle.state::<AppState>();
+    let embedder = resolve_embedder(&state, id)?;
+    state
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_embedder(Some(embedder));
+    Ok(())
+}
+
+/// Downloads a catalog embedding model's files into its per-model cache dir. Network I/O runs on a
+/// worker thread so the UI never freezes; does not activate the model — the frontend activates via
+/// [`set_embedding_model`] afterward, mirroring the ASR picker.
+#[tauri::command]
+async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), String> {
+    let cache_root = app.state::<AppState>().embed_cache_dir.clone();
+
+    tauri::async_runtime::spawn_blocking(move || {
+        let model = wisp_embed::catalog_model(&id)
+            .ok_or_else(|| format!("unknown embedding model: {id}"))?;
+        let dir = embed_model_dir(&cache_root, &id);
+
+        // Loading triggers fastembed's download into `dir`; we only need the files cached, so the
+        // loaded model is dropped immediately. The marker is written last, marking success.
+        wisp_embed::FastEmbedder::load(model, dir.clone()).map_err(|e| e.to_string())?;
+        let _ = fs::write(dir.join(EMBED_READY_MARKER), b"");
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// The currently selected embedding model id, or `None` for full-text-only.
+#[tauri::command]
+fn embedding_model(state: State<'_, AppState>) -> Option<String> {
+    state.embed_model.lock().ok().and_then(|g| g.clone())
+}
+
+/// Activates an already-downloaded embedding model (or clears it with `None`) and re-embeds the
+/// library so semantic search covers existing notes. Loading + reindex run on a worker thread so the
+/// UI never freezes.
+#[tauri::command]
+async fn set_embedding_model(app: AppHandle, id: Option<String>) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || apply_embedding_model(&app, id))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// The blocking body of [`set_embedding_model`].
+fn apply_embedding_model(app: &AppHandle, id: Option<String>) -> Result<(), String> {
+    let state = app.state::<AppState>();
+
+    match &id {
+        Some(model_id) => {
+            // Local models must be downloaded first; cloud models just need their saved key (which
+            // is checked when the embedder resolves).
+            if wisp_embed::catalog_model(model_id).is_some()
+                && !embed_installed(&state.embed_cache_dir, model_id)
+            {
+                return Err(format!("embedding model not downloaded: {model_id}"));
+            }
+
+            load_embedder(app, model_id)?;
+            let _ = fs::write(&state.embed_model_path, model_id);
+
+            // Re-embed existing notes with the new model so semantic search covers them too (and so a
+            // model switch never mixes vectors of different dimensions). Best-effort: the model is
+            // already active for new saves even if this pass fails.
+            if let Err(e) = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?
+                .reindex_all()
+            {
+                eprintln!("reindex after embedding-model change failed: {e}");
+            }
+        }
+        None => {
+            state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?
+                .set_embedder(None);
+            let _ = fs::remove_file(&state.embed_model_path);
+        }
+    }
+
+    *state
+        .embed_model
+        .lock()
+        .map_err(|_| "embed_model lock poisoned".to_owned())? = id;
+    Ok(())
+}
+
+/// Deletes a downloaded embedding model's files to reclaim disk space. If it was the active model,
+/// clears the active embedder (search falls back to full-text) so nothing points at missing files.
+#[tauri::command]
+fn delete_embedding_model(state: State<'_, AppState>, id: String) -> Result<(), String> {
+    let _ = fs::remove_dir_all(embed_model_dir(&state.embed_cache_dir, &id));
+
+    let was_active = state
+        .embed_model
+        .lock()
+        .map(|g| g.as_deref() == Some(id.as_str()))
+        .unwrap_or(false);
+
+    if was_active {
+        state
+            .library
+            .lock()
+            .map_err(|_| "library lock poisoned".to_owned())?
+            .set_embedder(None);
+        let _ = fs::remove_file(&state.embed_model_path);
+        *state
+            .embed_model
+            .lock()
+            .map_err(|_| "embed_model lock poisoned".to_owned())? = None;
+    }
+
+    Ok(())
+}
+
+/// The active notes search mode — `"fulltext"`, `"semantic"`, or `"hybrid"`.
+#[tauri::command]
+fn search_mode(state: State<'_, AppState>) -> String {
+    state
+        .search_mode
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "fulltext".to_owned())
+}
+
+/// Sets the notes search mode and persists it.
+#[tauri::command]
+fn set_search_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    if !matches!(mode.as_str(), "fulltext" | "semantic" | "hybrid") {
+        return Err(format!("unknown search mode: {mode}"));
+    }
+    let _ = fs::write(&state.search_mode_path, &mode);
+    *state
+        .search_mode
+        .lock()
+        .map_err(|_| "search_mode lock poisoned".to_owned())? = mode;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4219,6 +4479,36 @@ pub fn run() {
             let _ = fs::create_dir_all(&data_dir);
             let library = Library::open(data_dir.join("library.db"))?;
 
+            // Notes semantic search: restore the chosen embedding model (loaded in the background so
+            // startup never blocks on a model download) and the persisted search mode.
+            let embed_model_path = data_dir.join("embed-model");
+            let embed_cache_dir = data_dir.join("embed-models");
+            let _ = fs::create_dir_all(&embed_cache_dir);
+            // Keep a persisted choice only if it can still be restored: a downloaded local model, or
+            // any cloud model (its key is validated when the embedder loads).
+            let embed_model = fs::read_to_string(&embed_model_path)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| {
+                    (wisp_embed::catalog_model(s).is_some() && embed_installed(&embed_cache_dir, s))
+                        || wisp_embed::cloud_catalog_model(s).is_some()
+                });
+            let search_mode_path = data_dir.join("search-mode");
+            let search_mode = fs::read_to_string(&search_mode_path)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| matches!(s.as_str(), "semantic" | "hybrid"))
+                .unwrap_or_else(|| "fulltext".to_owned());
+
+            if let Some(id) = embed_model.clone() {
+                let handle = app.handle().clone();
+                std::thread::spawn(move || {
+                    if let Err(e) = load_embedder(&handle, &id) {
+                        eprintln!("restoring embedding model {id} failed: {e}");
+                    }
+                });
+            }
+
             app.manage(AppState {
                 store,
                 sessions: Mutex::new(Vec::new()),
@@ -4244,6 +4534,11 @@ pub fn run() {
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
                 library: Mutex::new(library),
+                embed_model: Mutex::new(embed_model),
+                embed_model_path,
+                embed_cache_dir,
+                search_mode: Mutex::new(search_mode),
+                search_mode_path,
                 mic_muted: Arc::new(AtomicBool::new(false)),
                 system_muted: Arc::new(AtomicBool::new(false)),
                 active_model_path,
@@ -4312,7 +4607,13 @@ pub fn run() {
             get_library_note,
             search_library,
             delete_library_note,
-            list_embedding_models
+            list_embedding_models,
+            download_embedding_model,
+            embedding_model,
+            set_embedding_model,
+            delete_embedding_model,
+            search_mode,
+            set_search_mode
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
