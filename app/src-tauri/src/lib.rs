@@ -4207,15 +4207,21 @@ fn embed_model_dir(cache_root: &Path, id: &str) -> PathBuf {
     cache_root.join(id)
 }
 
-/// Marker written once a model finishes downloading, so a half-finished download never reads as
-/// installed.
+/// Marker written once a model finishes downloading. Retained for non-catalog ids; catalog models are
+/// detected by their actual files (below).
 const EMBED_READY_MARKER: &str = ".ready";
 
-/// Whether a model's files are fully downloaded (its ready-marker is present).
+/// Whether a model is fully downloaded in the layout the loader expects — every file its catalog
+/// recipe lists is present in the model dir. Checking the real files (not just a marker) means a model
+/// left over from the old fastembed cache layout (a nested `models--…` dir under a `.ready` marker)
+/// correctly reads as "not installed", so it is offered for a clean re-download instead of failing to
+/// load. Non-catalog ids fall back to the marker.
 fn embed_installed(cache_root: &Path, id: &str) -> bool {
-    embed_model_dir(cache_root, id)
-        .join(EMBED_READY_MARKER)
-        .exists()
+    let dir = embed_model_dir(cache_root, id);
+    match wisp_embed::catalog_model(id) {
+        Some(model) => model.files.iter().all(|f| dir.join(f).exists()),
+        None => dir.join(EMBED_READY_MARKER).exists(),
+    }
 }
 
 /// Total size in bytes of everything under `path` (recursive). Used to track download progress by

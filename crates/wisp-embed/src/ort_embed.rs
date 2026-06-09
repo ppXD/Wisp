@@ -746,4 +746,86 @@ mod tests {
             "the budget query should rank the budget passage above the cat one"
         );
     }
+
+    // BGE-M3 (XLM-RoBERTa encoder, CLS pooling, 1024-dim, 100+ languages) via the int8 ONNX (~600 MB).
+    #[test]
+    #[ignore]
+    fn bge_m3_embeds_with_cls_pooling() {
+        let dir = std::env::temp_dir().join("wisp-ort-bge-m3");
+        let repo = "Xenova/bge-m3";
+        for f in [
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ] {
+            download_file(repo, f, &dir.join(f));
+        }
+
+        let recipe = Recipe {
+            onnx_file: "onnx/model_quantized.onnx",
+            pooling: Pooling::Cls,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        };
+        let emb = OrtEmbedder::load(&dir, &recipe).unwrap();
+        assert_eq!(emb.dim(), 1024);
+
+        let passages = emb
+            .embed_passages(&["年度预算已经批准", "猫睡在垫子上"])
+            .unwrap();
+        assert_eq!(passages[0].len(), 1024);
+
+        let q = emb.embed_query("预算").unwrap();
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        assert!(
+            dot(&q, &passages[0]) > dot(&q, &passages[1]),
+            "the budget query should rank the budget passage above the cat one"
+        );
+    }
+
+    // gte-multilingual-base (Alibaba mGTE encoder, CLS pooling, 768-dim) via the fp32 ONNX (~300 MB).
+    #[test]
+    #[ignore]
+    fn gte_multilingual_embeds_with_cls_pooling() {
+        let dir = std::env::temp_dir().join("wisp-ort-gte-multilingual");
+        let repo = "onnx-community/gte-multilingual-base";
+        for f in [
+            "onnx/model.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ] {
+            download_file(repo, f, &dir.join(f));
+        }
+
+        let recipe = Recipe {
+            onnx_file: "onnx/model.onnx",
+            pooling: Pooling::Cls,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 768,
+            max_length: 512,
+        };
+        let emb = OrtEmbedder::load(&dir, &recipe).unwrap();
+        assert_eq!(emb.dim(), 768);
+
+        let passages = emb
+            .embed_passages(&["the annual budget was approved", "the cat slept on the mat"])
+            .unwrap();
+        assert_eq!(passages[0].len(), 768);
+
+        let q = emb.embed_query("budget").unwrap();
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        assert!(
+            dot(&q, &passages[0]) > dot(&q, &passages[1]),
+            "the budget query should rank the budget passage above the cat one"
+        );
+    }
 }
