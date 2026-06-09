@@ -4174,7 +4174,7 @@ fn delete_library_note(state: State<'_, AppState>, id: String) -> Result<bool, S
         .map_err(|e| e.to_string())
 }
 
-/// One embedding model the Settings picker can offer, with its install + active state.
+/// One embedding model the Settings picker can offer, with its install / key + active state.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct EmbeddingModelInfo {
@@ -4182,12 +4182,17 @@ struct EmbeddingModelInfo {
     label: String,
     dim: usize,
     size_mb: u32,
-    /// Whether the model's files are downloaded on this device.
+    /// `"local"` (downloaded, run on-device) or `"cloud"` (a hosted API).
+    kind: String,
+    /// Local only: whether the model's files are downloaded on this device.
     installed: bool,
+    /// Whether it can be activated right now — a local model is downloaded, or a cloud model's API
+    /// key is saved.
+    ready: bool,
+    /// Cloud only: the key-store provider whose API key this model needs (e.g. `"openai"`).
+    provider: Option<String>,
     /// Whether it is the active embedder powering semantic / hybrid search.
     active: bool,
-    /// `"local"` — downloaded and run on-device. (Cloud models add `"cloud"` later.)
-    kind: String,
 }
 
 /// Per-model cache directory: each model is isolated under `embed-models/<id>/`, so it can be
@@ -4207,38 +4212,89 @@ fn embed_installed(cache_root: &Path, id: &str) -> bool {
         .exists()
 }
 
-/// The embedding catalog with each model's install + active state, for the picker.
+/// Whether a cloud provider's API key is saved (non-empty).
+fn cloud_provider_keyed(state: &AppState, provider: &str) -> bool {
+    state
+        .cloud_keys
+        .lock()
+        .map(|k| k.get(provider).is_some_and(|v| !v.trim().is_empty()))
+        .unwrap_or(false)
+}
+
+/// The embedding catalog — local (on-device) then cloud (hosted) — with each model's install / key
+/// and active state, for the picker.
 #[tauri::command]
 fn list_embedding_models(state: State<'_, AppState>) -> Vec<EmbeddingModelInfo> {
     let active = state.embed_model.lock().ok().and_then(|g| g.clone());
+    let is_active = |id: &str| active.as_deref() == Some(id);
 
-    wisp_embed::CATALOG
+    let mut out: Vec<EmbeddingModelInfo> = wisp_embed::CATALOG
         .iter()
-        .map(|m| EmbeddingModelInfo {
-            id: m.id.to_owned(),
-            label: m.label.to_owned(),
-            dim: m.dim,
-            size_mb: m.size_mb,
-            installed: embed_installed(&state.embed_cache_dir, m.id),
-            active: active.as_deref() == Some(m.id),
-            kind: "local".to_owned(),
+        .map(|m| {
+            let installed = embed_installed(&state.embed_cache_dir, m.id);
+            EmbeddingModelInfo {
+                id: m.id.to_owned(),
+                label: m.label.to_owned(),
+                dim: m.dim,
+                size_mb: m.size_mb,
+                kind: "local".to_owned(),
+                installed,
+                ready: installed,
+                provider: None,
+                active: is_active(m.id),
+            }
         })
-        .collect()
+        .collect();
+
+    out.extend(
+        wisp_embed::CLOUD_CATALOG
+            .iter()
+            .map(|m| EmbeddingModelInfo {
+                id: m.id.to_owned(),
+                label: m.label.to_owned(),
+                dim: m.dim,
+                size_mb: 0,
+                kind: "cloud".to_owned(),
+                installed: false,
+                ready: cloud_provider_keyed(&state, m.provider),
+                provider: Some(m.provider.to_owned()),
+                active: is_active(m.id),
+            }),
+    );
+
+    out
 }
 
-/// Loads an already-downloaded catalog model from its per-model cache dir and installs it as the
-/// library's embedder. Fast (no network) when the model is cached.
-fn load_embedder(handle: &AppHandle, id: &str, cache_root: &Path) -> Result<(), String> {
-    let model =
-        wisp_embed::catalog_model(id).ok_or_else(|| format!("unknown embedding model: {id}"))?;
-    let embedder = wisp_embed::FastEmbedder::load(model, embed_model_dir(cache_root, id))
-        .map_err(|e| e.to_string())?;
-    handle
-        .state::<AppState>()
+/// Resolves a model id to its embedder — a local fastembed model loaded from its per-model cache
+/// dir, or a cloud embedder built from the catalog + the provider's saved API key.
+fn resolve_embedder(state: &AppState, id: &str) -> Result<Box<dyn wisp_library::Embedder>, String> {
+    if let Some(local) = wisp_embed::catalog_model(id) {
+        let embedder =
+            wisp_embed::FastEmbedder::load(local, embed_model_dir(&state.embed_cache_dir, id))
+                .map_err(|e| e.to_string())?;
+        return Ok(Box::new(embedder));
+    }
+
+    if let Some(cloud) = wisp_embed::cloud_catalog_model(id) {
+        let key = cloud_key(state, cloud.provider)?;
+        return Ok(Box::new(wisp_embed::CloudEmbedder::from_catalog(
+            cloud, &key,
+        )));
+    }
+
+    Err(format!("unknown embedding model: {id}"))
+}
+
+/// Installs a model (local or cloud) as the library's active embedder. Fast for cached local models;
+/// cloud models just need their saved API key.
+fn load_embedder(handle: &AppHandle, id: &str) -> Result<(), String> {
+    let state = handle.state::<AppState>();
+    let embedder = resolve_embedder(&state, id)?;
+    state
         .library
         .lock()
         .map_err(|_| "library lock poisoned".to_owned())?
-        .set_embedder(Some(Box::new(embedder)));
+        .set_embedder(Some(embedder));
     Ok(())
 }
 
@@ -4286,11 +4342,15 @@ fn apply_embedding_model(app: &AppHandle, id: Option<String>) -> Result<(), Stri
 
     match &id {
         Some(model_id) => {
-            if !embed_installed(&state.embed_cache_dir, model_id) {
+            // Local models must be downloaded first; cloud models just need their saved key (which
+            // is checked when the embedder resolves).
+            if wisp_embed::catalog_model(model_id).is_some()
+                && !embed_installed(&state.embed_cache_dir, model_id)
+            {
                 return Err(format!("embedding model not downloaded: {model_id}"));
             }
 
-            load_embedder(app, model_id, &state.embed_cache_dir)?;
+            load_embedder(app, model_id)?;
             let _ = fs::write(&state.embed_model_path, model_id);
 
             // Re-embed existing notes with the new model so semantic search covers them too (and so a
@@ -4424,11 +4484,15 @@ pub fn run() {
             let embed_model_path = data_dir.join("embed-model");
             let embed_cache_dir = data_dir.join("embed-models");
             let _ = fs::create_dir_all(&embed_cache_dir);
+            // Keep a persisted choice only if it can still be restored: a downloaded local model, or
+            // any cloud model (its key is validated when the embedder loads).
             let embed_model = fs::read_to_string(&embed_model_path)
                 .ok()
                 .map(|s| s.trim().to_owned())
-                .filter(|s| wisp_embed::catalog_model(s).is_some())
-                .filter(|s| embed_installed(&embed_cache_dir, s));
+                .filter(|s| {
+                    (wisp_embed::catalog_model(s).is_some() && embed_installed(&embed_cache_dir, s))
+                        || wisp_embed::cloud_catalog_model(s).is_some()
+                });
             let search_mode_path = data_dir.join("search-mode");
             let search_mode = fs::read_to_string(&search_mode_path)
                 .ok()
@@ -4438,9 +4502,8 @@ pub fn run() {
 
             if let Some(id) = embed_model.clone() {
                 let handle = app.handle().clone();
-                let cache = embed_cache_dir.clone();
                 std::thread::spawn(move || {
-                    if let Err(e) = load_embedder(&handle, &id, &cache) {
+                    if let Err(e) = load_embedder(&handle, &id) {
                         eprintln!("restoring embedding model {id} failed: {e}");
                     }
                 });

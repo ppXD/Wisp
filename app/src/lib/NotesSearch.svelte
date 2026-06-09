@@ -1,8 +1,8 @@
 <script lang="ts">
   // Settings → Notes search: pick how the Library searches (full-text / semantic / hybrid) and which
-  // embedding model powers semantic + hybrid. Models download explicitly (a Download button, never on
-  // a stray click) on a worker thread so the UI never freezes; installed models can be activated or
-  // deleted to reclaim disk. Mirrors the LIVE / FILE model pickers.
+  // embedding model powers semantic + hybrid. Local models download explicitly (a Download button,
+  // never on a stray click) on a worker thread so the UI never freezes, and can be deleted. Cloud
+  // models run through the provider's API with the user's own key. Mirrors the LIVE / FILE pickers.
   import { onMount } from "svelte";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
@@ -13,9 +13,11 @@
     label: string;
     dim: number;
     sizeMb: number;
+    kind: "local" | "cloud";
     installed: boolean;
+    ready: boolean;
+    provider: string | null;
     active: boolean;
-    kind: string;
   };
 
   let mode = $state("fulltext");
@@ -27,7 +29,23 @@
   let pendingDelete = $state<EmbModel | null>(null);
   let deleting = $state("");
 
+  // Cloud API-key entry drafts, keyed by provider id.
+  let keyDraft = $state<Record<string, string>>({});
+  let savingKey = $state("");
+
   const active = $derived(models.find((m) => m.active) ?? null);
+  const local = $derived(models.filter((m) => m.kind === "local"));
+  const cloud = $derived(models.filter((m) => m.kind === "cloud"));
+  // Distinct cloud providers whose key isn't saved yet, with a display name from the model label.
+  const unkeyed = $derived(
+    [
+      ...new Map(
+        cloud
+          .filter((m) => !m.ready && m.provider)
+          .map((m) => [m.provider as string, m.label.split("·")[0].trim()]),
+      ),
+    ].map(([provider, name]) => ({ provider, name })),
+  );
 
   async function refresh() {
     models = await invoke<EmbModel[]>("list_embedding_models");
@@ -73,7 +91,7 @@
     busy = "";
   }
 
-  // Activate an already-installed model, or turn embedding off (null = full-text only).
+  // Activate a ready model (local installed, or cloud keyed), or turn embedding off (null).
   async function activate(id: string | null) {
     if (busy) return;
     busy = id ?? "off";
@@ -85,6 +103,21 @@
       error = String(e);
     }
     busy = "";
+  }
+
+  async function saveKey(provider: string) {
+    const key = (keyDraft[provider] ?? "").trim();
+    if (!key || savingKey) return;
+    savingKey = provider;
+    error = "";
+    try {
+      await invoke("set_cloud_key", { provider, key });
+      keyDraft[provider] = "";
+      await refresh();
+    } catch (e) {
+      error = String(e);
+    }
+    savingKey = "";
   }
 
   async function confirmDelete() {
@@ -109,6 +142,60 @@
     return mb >= 1000 ? `${(mb / 1000).toFixed(1)} GB` : `${mb} MB`;
   }
 </script>
+
+{#snippet row(m: EmbModel)}
+  <li class="emb-row">
+    <button
+      class="emb-main"
+      class:on={m.active}
+      disabled={!!busy || !m.ready}
+      onclick={() => activate(m.id)}
+    >
+      <span class="emb-name">
+        {m.label}
+        {#if m.active}
+          <span class="badge on">{i18n.t.settings.embedActive}</span>
+        {:else if m.kind === "local" && m.installed}
+          <span class="badge">{i18n.t.settings.embedInstalled}</span>
+        {/if}
+      </span>
+      <span class="emb-meta">
+        {m.dim}d · {m.kind === "cloud" ? i18n.t.settings.embedApi : sizeLabel(m.sizeMb)}
+      </span>
+    </button>
+
+    <div class="emb-actions">
+      {#if busy === m.id}
+        {#if m.kind === "local" && !m.installed}
+          <span class="dl-busy"><span class="spin"></span>{i18n.t.settings.embedDownloading}</span>
+        {:else}
+          <span class="spin" aria-label={i18n.t.settings.embedWorking}></span>
+        {/if}
+      {:else if m.kind === "local" && !m.installed}
+        <button class="dl" disabled={!!busy} onclick={() => download(m.id)}>
+          ↓ {i18n.t.settings.embedDownload} · {sizeLabel(m.sizeMb)}
+        </button>
+      {:else if m.kind === "local"}
+        <button
+          class="trash"
+          disabled={!!busy}
+          aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
+          title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
+          onclick={() => {
+            pendingDelete = m;
+            deleteOpen = true;
+          }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+          </svg>
+        </button>
+      {:else if !m.ready}
+        <span class="needkey">{i18n.t.settings.embedNeedsKey}</span>
+      {/if}
+    </div>
+  </li>
+{/snippet}
 
 <p class="set-intro">{i18n.t.settings.searchIntro}</p>
 
@@ -138,60 +225,40 @@
   </li>
 
   <li class="sec">{i18n.t.settings.embedLocal}</li>
+  {#each local as m (m.id)}{@render row(m)}{/each}
 
-  {#each models as m (m.id)}
-    <li class="emb-row">
-      <button
-        class="emb-main"
-        class:on={m.active}
-        disabled={!!busy || !m.installed}
-        onclick={() => activate(m.id)}
-      >
-        <span class="emb-name">
-          {m.label}
-          {#if m.active}
-            <span class="badge on">{i18n.t.settings.embedActive}</span>
-          {:else if m.installed}
-            <span class="badge">{i18n.t.settings.embedInstalled}</span>
-          {/if}
-        </span>
-        <span class="emb-meta">{m.dim}d · {sizeLabel(m.sizeMb)}</span>
-      </button>
-
-      <div class="emb-actions">
-        {#if busy === m.id}
-          {#if m.installed}
-            <span class="spin" aria-label={i18n.t.settings.embedWorking}></span>
-          {:else}
-            <span class="dl-busy"><span class="spin"></span>{i18n.t.settings.embedDownloading}</span>
-          {/if}
-        {:else if !m.installed}
-          <button class="dl" disabled={!!busy} onclick={() => download(m.id)}>
-            ↓ {i18n.t.settings.embedDownload} · {sizeLabel(m.sizeMb)}
-          </button>
-        {:else}
-          <button
-            class="trash"
-            disabled={!!busy}
-            aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
-            title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
-            onclick={() => {
-              pendingDelete = m;
-              deleteOpen = true;
-            }}
-          >
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
-            </svg>
-          </button>
-        {/if}
+  <li class="sec">{i18n.t.settings.embedCloud}</li>
+  {#each unkeyed as p (p.provider)}
+    <li class="keybox">
+      <label class="keylabel" for={`k-${p.provider}`}>{i18n.t.settings.embedKeyLabel(p.name)}</label>
+      <div class="keyrow">
+        <input
+          id={`k-${p.provider}`}
+          class="keyinput"
+          type="password"
+          autocomplete="off"
+          placeholder={i18n.t.settings.embedKeyPlaceholder}
+          value={keyDraft[p.provider] ?? ""}
+          oninput={(e) => (keyDraft[p.provider] = e.currentTarget.value)}
+          onkeydown={(e) => {
+            if (e.key === "Enter") saveKey(p.provider);
+          }}
+        />
+        <button
+          class="keysave"
+          disabled={savingKey === p.provider || !(keyDraft[p.provider] ?? "").trim()}
+          onclick={() => saveKey(p.provider)}
+        >
+          {savingKey === p.provider ? i18n.t.settings.embedWorking : i18n.t.settings.embedKeySave}
+        </button>
       </div>
     </li>
   {/each}
+  {#each cloud as m (m.id)}{@render row(m)}{/each}
 </ul>
 
 {#if error}<p class="set-error">{error}</p>{/if}
-<p class="set-note">{i18n.t.settings.embedCloudSoon}</p>
+<p class="set-note">{i18n.t.settings.embedCloudNote}</p>
 
 <Modal bind:open={deleteOpen} title={i18n.t.live.deleteModel.title}>
   {#if pendingDelete}
@@ -399,6 +466,11 @@
     opacity: 0.5;
     cursor: default;
   }
+  .needkey {
+    font-size: 11.5px;
+    color: var(--muted);
+    padding-right: 4px;
+  }
 
   .dl-busy {
     display: inline-flex;
@@ -421,6 +493,62 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  .keybox {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+    padding: 11px 13px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 11px;
+  }
+  .keylabel {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .keyrow {
+    display: flex;
+    gap: 8px;
+  }
+  .keyinput {
+    flex: 1;
+    min-width: 0;
+    font: inherit;
+    font-size: 13px;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 8px;
+    padding: 7px 10px;
+  }
+  .keyinput:focus {
+    outline: none;
+    border-color: var(--accent);
+  }
+  .keysave {
+    flex: none;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 8px;
+    padding: 0 14px;
+    cursor: pointer;
+    transition:
+      filter 0.15s,
+      opacity 0.15s;
+  }
+  .keysave:hover:not(:disabled) {
+    filter: brightness(1.05);
+  }
+  .keysave:disabled {
+    opacity: 0.5;
+    cursor: default;
   }
 
   .del-body {

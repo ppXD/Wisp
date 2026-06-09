@@ -7574,6 +7574,8 @@ name = "wisp-embed"
 version = "0.0.0"
 dependencies = [
  "fastembed",
+ "serde_json",
+ "ureq",
  "wisp-library",
 ]
 
