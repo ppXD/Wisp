@@ -1,9 +1,11 @@
 <script lang="ts">
   // Settings → Notes search: pick how the Library searches (full-text / semantic / hybrid) and which
-  // embedding model powers semantic + hybrid. Local models download explicitly (a Download button,
-  // never on a stray click) on a worker thread so the UI never freezes, and can be deleted. Cloud
-  // models run through the provider's API with the user's own key. Mirrors the LIVE / FILE pickers.
+  // embedding model powers semantic + hybrid. The model picker is a dropdown (trigger → drop-open
+  // list, like the LIVE picker) so the list stays compact and aligned. Local models download
+  // explicitly on a worker thread (never on a stray click) so the UI never freezes, and can be
+  // deleted; cloud models run through the provider's API with the user's own key.
   import { onMount } from "svelte";
+  import { slide } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
@@ -22,6 +24,7 @@
 
   let mode = $state("fulltext");
   let models = $state<EmbModel[]>([]);
+  let open = $state(false); // dropdown open
   let busy = $state(""); // id with an in-flight download/activate ("off" while clearing)
   let error = $state("");
 
@@ -76,7 +79,8 @@
     }
   }
 
-  // Explicit download, then activate — mirrors the ASR picker's download → select.
+  // Explicit download, then activate — mirrors the ASR picker's download → select. Keeps the menu
+  // open so its row spinner is visible during the (possibly long) download.
   async function download(id: string) {
     if (busy) return;
     busy = id;
@@ -85,13 +89,15 @@
       await invoke("download_embedding_model", { id });
       await invoke("set_embedding_model", { id });
       await refresh();
+      open = false;
     } catch (e) {
       error = String(e);
     }
     busy = "";
   }
 
-  // Activate a ready model (local installed, or cloud keyed), or turn embedding off (null).
+  // Activate a ready model (local installed, or cloud keyed), or turn embedding off (null), then
+  // collapse the dropdown.
   async function activate(id: string | null) {
     if (busy) return;
     busy = id ?? "off";
@@ -99,10 +105,18 @@
     try {
       await invoke("set_embedding_model", { id });
       await refresh();
+      open = false;
     } catch (e) {
       error = String(e);
     }
     busy = "";
+  }
+
+  // Route a click on a model row: a not-yet-downloaded local model downloads first; everything else
+  // (installed local, keyed cloud) activates directly.
+  function pick(m: EmbModel) {
+    if (m.kind === "local" && !m.installed) download(m.id);
+    else activate(m.id);
   }
 
   async function saveKey(provider: string) {
@@ -143,64 +157,16 @@
   }
 </script>
 
-{#snippet row(m: EmbModel)}
-  <li class="emb-row">
-    <button
-      class="emb-main"
-      class:on={m.active}
-      disabled={!!busy || !m.ready}
-      onclick={() => activate(m.id)}
-    >
-      <span class="emb-name">
-        {m.label}
-        {#if m.active}
-          <span class="badge on">{i18n.t.settings.embedActive}</span>
-        {:else if m.kind === "local" && m.installed}
-          <span class="badge">{i18n.t.settings.embedInstalled}</span>
-        {/if}
-      </span>
-      <span class="emb-meta">
-        {m.dim}d · {m.kind === "cloud" ? i18n.t.settings.embedApi : sizeLabel(m.sizeMb)}
-      </span>
-    </button>
-
-    <div class="emb-actions">
-      {#if busy === m.id}
-        {#if m.kind === "local" && !m.installed}
-          <span class="dl-busy"><span class="spin"></span>{i18n.t.settings.embedDownloading}</span>
-        {:else}
-          <span class="spin" aria-label={i18n.t.settings.embedWorking}></span>
-        {/if}
-      {:else if m.kind === "local" && !m.installed}
-        <button class="dl" disabled={!!busy} onclick={() => download(m.id)}>
-          ↓ {i18n.t.settings.embedDownload} · {sizeLabel(m.sizeMb)}
-        </button>
-      {:else if m.kind === "local"}
-        <button
-          class="trash"
-          disabled={!!busy}
-          aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
-          title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
-          onclick={() => {
-            pendingDelete = m;
-            deleteOpen = true;
-          }}
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
-          </svg>
-        </button>
-      {:else if !m.ready}
-        <span class="needkey">{i18n.t.settings.embedNeedsKey}</span>
-      {/if}
-    </div>
-  </li>
-{/snippet}
+<svelte:window
+  onkeydown={(e) => {
+    if (e.key === "Escape") open = false;
+  }}
+/>
 
 <p class="set-intro">{i18n.t.settings.searchIntro}</p>
 
-<div class="row">
-  <span class="label">{i18n.t.settings.searchMode}</span>
+<div class="field">
+  <span class="field-label">{i18n.t.settings.searchMode}</span>
   <div class="seg">
     <button class="seg-btn" class:on={mode === "fulltext"} onclick={() => setMode("fulltext")}>
       {i18n.t.settings.modeFulltext}
@@ -214,22 +180,82 @@
   </div>
 </div>
 
-<div class="emb-head">{i18n.t.settings.embedModel}</div>
+<div class="field col">
+  <span class="field-label">{i18n.t.settings.embedModel}</span>
 
-<ul class="emb-list">
-  <li class="emb-row">
-    <button class="emb-main" class:on={!active} disabled={!!busy} onclick={() => activate(null)}>
-      <span class="emb-name">{i18n.t.settings.embedOff}</span>
-      <span class="emb-meta">{i18n.t.settings.embedOffHint}</span>
+  <div class="picker">
+    <button class="trigger" class:open onclick={() => (open = !open)}>
+      {#if busy}<span class="spin sm"></span>{/if}
+      <span class="trigger-label">{active ? active.label : i18n.t.settings.embedOff}</span>
+      <span class="caret"></span>
     </button>
-  </li>
 
-  <li class="sec">{i18n.t.settings.embedLocal}</li>
-  {#each local as m (m.id)}{@render row(m)}{/each}
+    {#if open}
+      <div class="menu" transition:slide={{ duration: 140 }}>
+        <button class="opt" class:sel={!active} disabled={!!busy} onclick={() => activate(null)}>
+          <span class="opt-name">{i18n.t.settings.embedOff}</span>
+          <span class="opt-note">{i18n.t.settings.embedOffHint}</span>
+        </button>
 
-  <li class="sec">{i18n.t.settings.embedCloud}</li>
+        <div class="sec">{i18n.t.settings.embedLocal}</div>
+        {#each local as m (m.id)}
+          <div class="opt-row">
+            <button class="opt" class:sel={m.active} disabled={!!busy} onclick={() => pick(m)}>
+              <span class="opt-name">{m.label}</span>
+              {#if busy === m.id}
+                <span class="spin"></span>
+              {:else if m.active}
+                <span class="tag on">{i18n.t.settings.embedActive}</span>
+              {:else if m.installed}
+                <span class="tag">{i18n.t.settings.embedInstalled}</span>
+              {:else}
+                <span class="opt-size">↓ {sizeLabel(m.sizeMb)}</span>
+              {/if}
+            </button>
+            {#if m.installed && !busy}
+              <button
+                class="del"
+                title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
+                aria-label={i18n.t.live.deleteModel.trashAria(m.label, sizeLabel(m.sizeMb))}
+                onclick={() => {
+                  pendingDelete = m;
+                  deleteOpen = true;
+                }}
+              >
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 12a2 2 0 0 0 2 2h6a2 2 0 0 0 2-2l1-12" />
+                </svg>
+              </button>
+            {/if}
+          </div>
+        {/each}
+
+        <div class="sec">{i18n.t.settings.embedCloud}</div>
+        {#each cloud as m (m.id)}
+          <button
+            class="opt"
+            class:sel={m.active}
+            disabled={!!busy || !m.ready}
+            onclick={() => pick(m)}
+          >
+            <span class="opt-name">{m.label}</span>
+            {#if busy === m.id}
+              <span class="spin"></span>
+            {:else if m.active}
+              <span class="tag on">{i18n.t.settings.embedActive}</span>
+            {:else if !m.ready}
+              <span class="opt-note">{i18n.t.settings.embedNeedsKey}</span>
+            {:else}
+              <span class="opt-size">{i18n.t.settings.embedApi}</span>
+            {/if}
+          </button>
+        {/each}
+      </div>
+    {/if}
+  </div>
+
   {#each unkeyed as p (p.provider)}
-    <li class="keybox">
+    <div class="keybox">
       <label class="keylabel" for={`k-${p.provider}`}>{i18n.t.settings.embedKeyLabel(p.name)}</label>
       <div class="keyrow">
         <input
@@ -252,10 +278,9 @@
           {savingKey === p.provider ? i18n.t.settings.embedWorking : i18n.t.settings.embedKeySave}
         </button>
       </div>
-    </li>
+    </div>
   {/each}
-  {#each cloud as m (m.id)}{@render row(m)}{/each}
-</ul>
+</div>
 
 {#if error}<p class="set-error">{error}</p>{/if}
 <p class="set-note">{i18n.t.settings.embedCloudNote}</p>
@@ -289,13 +314,18 @@
     color: var(--stop);
   }
 
-  .row {
+  .field {
     display: flex;
     align-items: center;
     justify-content: space-between;
     gap: 12px;
   }
-  .label {
+  .field.col {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+  }
+  .field-label {
     font-size: 13px;
     color: var(--text);
   }
@@ -327,160 +357,166 @@
     font-weight: 500;
   }
 
-  .emb-head {
-    font-size: 12px;
-    font-weight: 600;
-    color: var(--muted);
-    margin-top: 4px;
+  /* ── Model dropdown ── */
+  .picker {
+    position: relative;
   }
-  .emb-list {
-    list-style: none;
-    margin: 0;
-    padding: 0;
+  .trigger {
+    width: 100%;
     display: flex;
-    flex-direction: column;
-    gap: 6px;
+    align-items: center;
+    gap: 8px;
+    font-family: inherit;
+    font-size: 13.5px;
+    font-weight: 500;
+    color: var(--text);
+    background: var(--bg);
+    border: 1px solid var(--border-strong);
+    border-radius: 9px;
+    padding: 9px 12px;
+    cursor: pointer;
+    transition:
+      border-color 0.15s,
+      background 0.15s;
   }
-  .sec {
-    font-size: 11px;
-    font-weight: 600;
-    letter-spacing: 0.04em;
-    text-transform: uppercase;
-    color: var(--muted);
-    margin: 6px 2px 0;
+  .trigger:hover,
+  .trigger.open {
+    border-color: var(--muted);
+    background: var(--surface-active);
+  }
+  .trigger-label {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    text-align: left;
+  }
+  .caret {
+    flex: none;
+    width: 11px;
+    height: 7px;
+    background-color: var(--muted);
+    -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 1.5L5.5 5.5L9.5 1.5'/%3E%3C/svg%3E")
+      no-repeat center;
+    mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='11' height='7' viewBox='0 0 11 7' fill='none' stroke='%23000' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M1.5 1.5L5.5 5.5L9.5 1.5'/%3E%3C/svg%3E")
+      no-repeat center;
+    transition: transform 0.15s;
+  }
+  .trigger.open .caret {
+    transform: rotate(180deg);
   }
 
-  .emb-row {
-    position: relative;
+  .menu {
+    margin-top: 6px;
     display: flex;
-    align-items: stretch;
-    gap: 8px;
+    flex-direction: column;
+    gap: 1px;
+    background: var(--surface);
+    border: 1px solid var(--border-strong);
+    border-radius: 12px;
+    box-shadow: 0 14px 34px -10px rgba(40, 30, 20, 0.28);
+    padding: 6px;
   }
-  .emb-main {
+
+  .sec {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+    color: var(--muted);
+    padding: 8px 10px 4px;
+  }
+
+  .opt-row {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .opt {
     flex: 1;
     min-width: 0;
     display: flex;
-    flex-direction: column;
-    gap: 3px;
-    text-align: left;
-    padding: 11px 13px;
-    background: var(--surface);
-    border: 1px solid var(--border);
-    border-radius: 11px;
-    cursor: pointer;
-    font: inherit;
-    color: var(--text);
-    transition:
-      border-color 0.15s,
-      background 0.15s;
-  }
-  .emb-main:hover:not(:disabled) {
-    border-color: var(--border-strong);
-    background: var(--surface-active);
-  }
-  .emb-main:disabled {
-    cursor: default;
-  }
-  .emb-main.on {
-    border-color: var(--accent);
-    background: var(--surface-active);
-  }
-  .emb-name {
-    display: flex;
     align-items: center;
-    gap: 7px;
-    font-size: 13.5px;
-    font-weight: 600;
-  }
-  .emb-meta {
-    font-size: 12px;
-    color: var(--muted);
-  }
-
-  .badge {
-    font-size: 10.5px;
-    font-weight: 600;
-    letter-spacing: 0.02em;
-    text-transform: uppercase;
-    color: var(--muted);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 5px;
-    padding: 1px 6px;
-  }
-  .badge.on {
-    color: var(--accent);
-    border-color: var(--accent);
-  }
-
-  .emb-actions {
-    flex: none;
-    display: flex;
-    align-items: center;
-  }
-  .dl {
+    gap: 10px;
     font-family: inherit;
-    font-size: 12px;
-    font-weight: 500;
-    white-space: nowrap;
-    color: var(--accent);
-    background: var(--bg);
-    border: 1px solid var(--accent);
-    border-radius: 9px;
-    padding: 0 12px;
-    height: 100%;
+    font-size: 13.5px;
+    color: var(--text);
+    background: transparent;
+    border: none;
+    border-radius: 8px;
+    padding: 8px 10px;
     cursor: pointer;
-    transition:
-      background 0.15s,
-      opacity 0.15s;
+    text-align: left;
+    transition: background 0.12s;
   }
-  .dl:hover:not(:disabled) {
+  .opt:hover:not(:disabled) {
     background: var(--surface-active);
   }
-  .dl:disabled {
-    opacity: 0.5;
+  .opt:disabled {
     cursor: default;
   }
-  .trash {
+  .opt.sel {
+    color: var(--accent);
+    font-weight: 500;
+  }
+  .opt-name {
+    flex: 1;
+    min-width: 0;
+    overflow-wrap: anywhere;
+    line-height: 1.35;
+  }
+  .opt-size {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .opt-note {
+    flex: none;
+    font-size: 11.5px;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .tag {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+  }
+  .tag.on {
+    color: var(--accent);
+  }
+
+  .del {
+    flex: none;
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    width: 38px;
-    height: 100%;
+    width: 28px;
+    height: 28px;
     color: var(--muted);
     background: transparent;
-    border: 1px solid var(--border);
-    border-radius: 9px;
+    border: none;
+    border-radius: 7px;
     cursor: pointer;
     transition:
-      color 0.15s,
-      border-color 0.15s,
-      background 0.15s;
+      color 0.12s,
+      background 0.12s;
   }
-  .trash:hover:not(:disabled) {
+  .opt-row:hover .del {
+    color: var(--text);
+  }
+  .del:hover {
     color: var(--stop);
-    border-color: var(--stop);
     background: var(--surface-active);
   }
-  .trash:disabled {
-    opacity: 0.5;
-    cursor: default;
-  }
-  .needkey {
-    font-size: 11.5px;
-    color: var(--muted);
-    padding-right: 4px;
-  }
 
-  .dl-busy {
-    display: inline-flex;
-    align-items: center;
-    gap: 7px;
-    padding: 0 10px;
-    font-size: 12px;
-    color: var(--muted);
-  }
   .spin {
+    flex: none;
     display: inline-block;
     width: 13px;
     height: 13px;
@@ -489,12 +525,17 @@
     border-radius: 50%;
     animation: spin 0.7s linear infinite;
   }
+  .spin.sm {
+    width: 12px;
+    height: 12px;
+  }
   @keyframes spin {
     to {
       transform: rotate(360deg);
     }
   }
 
+  /* ── Cloud key entry ── */
   .keybox {
     display: flex;
     flex-direction: column;
@@ -551,6 +592,7 @@
     cursor: default;
   }
 
+  /* ── Delete confirm ── */
   .del-body {
     margin: 0;
     font-size: 14px;
