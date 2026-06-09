@@ -1,14 +1,14 @@
 <script lang="ts">
   // Settings → Notes search: pick the search mode (full-text / semantic / hybrid) and the embedding
-  // model that powers semantic + hybrid. The model picker is a dropdown holding a LIVE-style two-pane
+  // model that powers semantic + hybrid. The picker is a dropdown holding a LIVE-style two-pane
   // layout: tabs (Device | Cloud) → left a provider/family list (+ Import) → right that provider's
-  // models. Local models download explicitly on a worker thread (never on a stray click), show
-  // installed/active state, and can be deleted; cloud models run through the provider's API key.
-  import { onMount, onDestroy } from "svelte";
+  // models. Clicking a not-downloaded model selects it; an explicit Download button then runs the
+  // download in the background (tracked in `embedDownload`, so it survives this dialog closing).
+  import { onMount } from "svelte";
   import { slide } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
-  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { i18n } from "$lib/i18n.svelte";
+  import { dl, dlPct, runDownload } from "$lib/embedDownload.svelte";
   import Modal from "$lib/Modal.svelte";
 
   const IMPORT = "__import__";
@@ -32,7 +32,7 @@
   let tab = $state<"device" | "cloud">("device");
   let sel = $state(""); // selected provider/group, or IMPORT
   let chosen = $state<string | null>(null); // a not-yet-downloaded model the user picked (awaits Download)
-  let busy = $state("");
+  let busy = $state(""); // a short op (activate / off) — downloads live in `dl`
   let error = $state("");
 
   let deleteOpen = $state(false);
@@ -42,15 +42,7 @@
   let keyDraft = $state<Record<string, string>>({});
   let savingKey = $state("");
 
-  // Live download progress per model id, streamed from the backend (cache-dir size vs total).
-  let progress = $state<Record<string, { downloaded: number; total: number }>>({});
-  let unlisten: UnlistenFn | undefined;
-
-  function pct(id: string): number {
-    const p = progress[id];
-    return p && p.total > 0 ? Math.min(100, Math.round((p.downloaded / p.total) * 100)) : 0;
-  }
-
+  const anyBusy = $derived(!!busy || !!dl.id);
   const active = $derived(models.find((m) => m.active) ?? null);
   const chosenModel = $derived(models.find((m) => m.id === chosen) ?? null);
   const tabModels = $derived(
@@ -67,12 +59,19 @@
     if (open && !valid.includes(sel)) sel = providers[0] ?? "";
   });
 
-  // Drop the pending Download selection when the menu closes or the provider/tab changes, so the
-  // Download button never lingers on a model the user navigated away from.
+  // Drop the pending Download selection when the menu closes or the provider/tab changes.
   $effect(() => {
     void open;
     void sel;
     chosen = null;
+  });
+
+  // Refresh the list when a download finishes (dl.id clears) — even if another mount started it.
+  let prevDl: string | null = null;
+  $effect(() => {
+    const cur = dl.id;
+    if (prevDl && !cur) refresh();
+    prevDl = cur;
   });
 
   async function refresh() {
@@ -91,16 +90,7 @@
       error = String(e);
     }
   }
-  onMount(async () => {
-    await load();
-    unlisten = await listen<{ id: string; downloaded: number; total: number }>(
-      "embed-download://progress",
-      (e) => {
-        progress[e.payload.id] = { downloaded: e.payload.downloaded, total: e.payload.total };
-      },
-    );
-  });
-  onDestroy(() => unlisten?.());
+  onMount(load);
 
   function toggle() {
     open = !open;
@@ -121,25 +111,17 @@
     }
   }
 
-  // Explicit download, then activate — keeps the menu open so its row spinner shows during the
-  // (possibly long) download.
-  async function download(id: string) {
-    if (busy) return;
-    busy = id;
-    error = "";
-    try {
-      await invoke("download_embedding_model", { id });
-      await invoke("set_embedding_model", { id });
-      await refresh();
-      open = false;
-    } catch (e) {
-      error = String(e);
-    }
-    busy = "";
+  // Fire-and-forget: the module-level download survives this component unmounting; the dl-effect
+  // above refreshes the list when it completes.
+  function download(id: string) {
+    if (anyBusy) return;
+    chosen = null;
+    const m = models.find((x) => x.id === id);
+    runDownload(id, m?.label ?? id);
   }
 
   async function activate(id: string | null) {
-    if (busy) return;
+    if (anyBusy) return;
     chosen = null;
     busy = id ?? "off";
     error = "";
@@ -206,7 +188,7 @@
 
 {#snippet modelOpt(m: EmbModel)}
   <div class="opt-row">
-    <button class="opt" class:sel={m.active} class:chosen={chosen === m.id} disabled={!!busy || (m.kind === "cloud" && !m.ready)} onclick={() => pick(m)}>
+    <button class="opt" class:sel={m.active} class:chosen={chosen === m.id} disabled={anyBusy || (m.kind === "cloud" && !m.ready)} onclick={() => pick(m)}>
       <span class="opt-name">{m.label}</span>
       {#if busy === m.id}
         <span class="spin"></span>
@@ -222,7 +204,7 @@
         <span class="opt-size">{i18n.t.settings.embedApi}</span>
       {/if}
     </button>
-    {#if m.kind === "local" && m.installed && !busy}
+    {#if m.kind === "local" && m.installed && !anyBusy}
       <button
         class="del"
         title={i18n.t.live.deleteModel.trashTitle(sizeLabel(m.sizeMb))}
@@ -262,9 +244,10 @@
 
   <div class="picker">
     <button class="trigger" class:open onclick={toggle}>
-      {#if busy}
+      {#if dl.id}
+        <span class="spin sm"></span><span class="trig-pct">{dlPct()}%</span>
+      {:else if busy}
         <span class="spin sm"></span>
-        {#if progress[busy]}<span class="trig-pct">{pct(busy)}%</span>{/if}
       {/if}
       <span class="trigger-label">{active ? active.label : i18n.t.settings.embedOff}</span>
       <span class="caret"></span>
@@ -272,7 +255,15 @@
 
     {#if open}
       <div class="menu" transition:slide={{ duration: 140 }}>
-        <button class="opt off" class:sel={!active} disabled={!!busy} onclick={() => activate(null)}>
+        {#if dl.id}
+          <div class="dl-prog">
+            <div class="dl-head"><span class="dl-name">↓ {dl.label}</span><span>{dlPct()}%</span></div>
+            <div class="dl-bar"><div class="dl-fill" style="width:{dlPct()}%"></div></div>
+            <span class="dl-bg">{i18n.t.settings.embedBgHint}</span>
+          </div>
+        {/if}
+
+        <button class="opt off" class:sel={!active} disabled={anyBusy} onclick={() => activate(null)}>
           <span class="opt-name">{i18n.t.settings.embedOff}</span>
           <span class="opt-note">{i18n.t.settings.embedOffHint}</span>
         </button>
@@ -339,29 +330,22 @@
           </div>
         </div>
 
-        {#if chosenModel && chosenModel.kind === "local" && !chosenModel.installed}
+        {#if tab === "cloud"}
+          <p class="cloud-note">{i18n.t.settings.embedCloudNote}</p>
+        {/if}
+
+        {#if chosenModel && chosenModel.kind === "local" && !chosenModel.installed && !dl.id}
           {@const cm = chosenModel}
-          {#if busy === cm.id}
-            <div class="dl-prog">
-              <div class="dl-bar"><div class="dl-fill" style="width:{pct(cm.id)}%"></div></div>
-              <div class="dl-meta">
-                <span>{i18n.t.settings.embedDownloading} {pct(cm.id)}%</span>
-                <span class="dl-bg">{i18n.t.settings.embedBgHint}</span>
-              </div>
-            </div>
-          {:else}
-            <button class="dl-btn" disabled={!!busy} onclick={() => download(cm.id)}>
-              ↓ {i18n.t.settings.embedDownload} · {sizeLabel(cm.sizeMb)}
-            </button>
-          {/if}
+          <button class="dl-btn" disabled={anyBusy} onclick={() => download(cm.id)}>
+            ↓ {i18n.t.settings.embedDownload} · {sizeLabel(cm.sizeMb)}
+          </button>
         {/if}
       </div>
     {/if}
   </div>
 </div>
 
-{#if error}<p class="set-error">{error}</p>{/if}
-<p class="set-note">{i18n.t.settings.embedCloudNote}</p>
+{#if error || dl.error}<p class="set-error">{error || dl.error}</p>{/if}
 
 <Modal bind:open={deleteOpen} title={i18n.t.live.deleteModel.title}>
   {#if pendingDelete}
@@ -379,8 +363,7 @@
 </Modal>
 
 <style>
-  .set-intro,
-  .set-note {
+  .set-intro {
     margin: 0;
     font-size: 13px;
     line-height: 1.5;
@@ -484,6 +467,12 @@
   .trigger.open .caret {
     transform: rotate(180deg);
   }
+  .trig-pct {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
+  }
 
   .menu {
     margin-top: 6px;
@@ -496,8 +485,47 @@
     padding: 6px;
   }
 
-  .off {
-    margin-bottom: 2px;
+  /* ── In-flight download banner ── */
+  .dl-prog {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    padding: 8px 10px;
+    margin-bottom: 4px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+  }
+  .dl-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .dl-name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .dl-bar {
+    height: 6px;
+    background: var(--surface-active);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .dl-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.2s ease;
+  }
+  .dl-bg {
+    font-size: 11px;
+    color: var(--live);
   }
 
   .tabs {
@@ -623,69 +651,6 @@
     background: var(--surface-active);
     box-shadow: inset 0 0 0 1px var(--accent);
   }
-
-  .dl-btn {
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    gap: 7px;
-    margin-top: 6px;
-    font-family: inherit;
-    font-size: 12.5px;
-    font-weight: 500;
-    color: #fff;
-    background: var(--accent);
-    border: none;
-    border-radius: 9px;
-    padding: 9px;
-    cursor: pointer;
-    transition:
-      filter 0.15s,
-      opacity 0.15s;
-  }
-  .dl-btn:hover:not(:disabled) {
-    filter: brightness(1.05);
-  }
-  .dl-btn:disabled {
-    opacity: 0.6;
-    cursor: default;
-  }
-
-  .dl-prog {
-    margin-top: 8px;
-    display: flex;
-    flex-direction: column;
-    gap: 5px;
-  }
-  .dl-bar {
-    height: 6px;
-    background: var(--surface-active);
-    border-radius: 999px;
-    overflow: hidden;
-  }
-  .dl-fill {
-    height: 100%;
-    background: var(--accent);
-    border-radius: 999px;
-    transition: width 0.2s ease;
-  }
-  .dl-meta {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 8px;
-    font-size: 11.5px;
-    color: var(--muted);
-  }
-  .dl-bg {
-    color: var(--live);
-  }
-  .trig-pct {
-    flex: none;
-    font-family: var(--font-mono);
-    font-size: 11.5px;
-    color: var(--muted);
-  }
   .opt.off {
     flex-direction: column;
     align-items: flex-start;
@@ -764,6 +729,40 @@
     to {
       transform: rotate(360deg);
     }
+  }
+
+  .dl-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    margin-top: 6px;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 9px;
+    padding: 9px;
+    cursor: pointer;
+    transition:
+      filter 0.15s,
+      opacity 0.15s;
+  }
+  .dl-btn:hover:not(:disabled) {
+    filter: brightness(1.05);
+  }
+  .dl-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+
+  .cloud-note {
+    margin: 6px 4px 2px;
+    font-size: 11px;
+    line-height: 1.45;
+    color: var(--muted);
   }
 
   /* ── Import pane (custom HF repo) ── */
