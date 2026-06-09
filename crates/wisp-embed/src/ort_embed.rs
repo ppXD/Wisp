@@ -655,6 +655,49 @@ mod tests {
         );
     }
 
+    // Verifies the EXTERNAL-WEIGHTS path: e5-large ships `model.onnx` plus a separate
+    // `model.onnx_data`, which ONNX Runtime loads automatically when both sit in the dir. ~2.2 GB.
+    #[test]
+    #[ignore]
+    fn e5_large_embeds_with_external_weights() {
+        let dir = std::env::temp_dir().join("wisp-ort-e5-large");
+        let repo = "Qdrant/multilingual-e5-large-onnx";
+        for f in [
+            "model.onnx",
+            "model.onnx_data",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ] {
+            download_file(repo, f, &dir.join(f));
+        }
+
+        let recipe = Recipe {
+            onnx_file: "model.onnx",
+            pooling: Pooling::Mean,
+            passage_prefix: "passage: ",
+            query_prefix: "query: ",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        };
+        let emb = OrtEmbedder::load(&dir, &recipe).unwrap();
+        assert_eq!(emb.dim(), 1024);
+
+        let passages = emb
+            .embed_passages(&["the annual budget was approved", "the cat slept on the mat"])
+            .unwrap();
+        assert_eq!(passages[0].len(), 1024);
+
+        let q = emb.embed_query("budget").unwrap();
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        assert!(
+            dot(&q, &passages[0]) > dot(&q, &passages[1]),
+            "the budget query should match the budget passage more than the cat one"
+        );
+    }
+
     // Proves the DECODER path end-to-end: last-token pooling + the auto-detected `position_ids` input
     // + Qwen3's instruct query prompt, on the real Qwen3-Embedding-0.6B (int8 ONNX, ~600 MB, to keep
     // the download manageable). This is what fastembed cannot do. `cargo test -- --ignored`.
