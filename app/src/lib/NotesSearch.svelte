@@ -30,6 +30,7 @@
   let open = $state(false);
   let tab = $state<"device" | "cloud">("device");
   let sel = $state(""); // selected provider/group, or IMPORT
+  let chosen = $state<string | null>(null); // a not-yet-downloaded model the user picked (awaits Download)
   let busy = $state("");
   let error = $state("");
 
@@ -41,6 +42,7 @@
   let savingKey = $state("");
 
   const active = $derived(models.find((m) => m.active) ?? null);
+  const chosenModel = $derived(models.find((m) => m.id === chosen) ?? null);
   const tabModels = $derived(
     models.filter((m) => (tab === "device" ? m.kind === "local" : m.kind === "cloud")),
   );
@@ -53,6 +55,14 @@
   $effect(() => {
     const valid = tab === "device" ? [...providers, IMPORT] : providers;
     if (open && !valid.includes(sel)) sel = providers[0] ?? "";
+  });
+
+  // Drop the pending Download selection when the menu closes or the provider/tab changes, so the
+  // Download button never lingers on a model the user navigated away from.
+  $effect(() => {
+    void open;
+    void sel;
+    chosen = null;
   });
 
   async function refresh() {
@@ -111,6 +121,7 @@
 
   async function activate(id: string | null) {
     if (busy) return;
+    chosen = null;
     busy = id ?? "off";
     error = "";
     try {
@@ -123,8 +134,10 @@
     busy = "";
   }
 
+  // Clicking a model never downloads. A not-yet-downloaded local model just becomes the "chosen"
+  // model (the Download button then appears); installed local / keyed cloud models activate on click.
   function pick(m: EmbModel) {
-    if (m.kind === "local" && !m.installed) download(m.id);
+    if (m.kind === "local" && !m.installed) chosen = chosen === m.id ? null : m.id;
     else activate(m.id);
   }
 
@@ -174,7 +187,7 @@
 
 {#snippet modelOpt(m: EmbModel)}
   <div class="opt-row">
-    <button class="opt" class:sel={m.active} disabled={!!busy || (m.kind === "cloud" && !m.ready)} onclick={() => pick(m)}>
+    <button class="opt" class:sel={m.active} class:chosen={chosen === m.id} disabled={!!busy || (m.kind === "cloud" && !m.ready)} onclick={() => pick(m)}>
       <span class="opt-name">{m.label}</span>
       {#if busy === m.id}
         <span class="spin"></span>
@@ -183,7 +196,7 @@
       {:else if m.kind === "local" && m.installed}
         <span class="tag">{i18n.t.settings.embedInstalled}</span>
       {:else if m.kind === "local"}
-        <span class="opt-size">↓ {sizeLabel(m.sizeMb)}</span>
+        <span class="opt-size">{sizeLabel(m.sizeMb)}</span>
       {:else if !m.ready}
         <span class="opt-note">{i18n.t.settings.embedNeedsKey}</span>
       {:else}
@@ -303,6 +316,17 @@
             {/if}
           </div>
         </div>
+
+        {#if chosenModel && chosenModel.kind === "local" && !chosenModel.installed}
+          {@const cm = chosenModel}
+          <button class="dl-btn" disabled={!!busy} onclick={() => download(cm.id)}>
+            {#if busy === cm.id}
+              <span class="spin sm"></span>{i18n.t.settings.embedDownloading}
+            {:else}
+              ↓ {i18n.t.settings.embedDownload} · {sizeLabel(cm.sizeMb)}
+            {/if}
+          </button>
+        {/if}
       </div>
     {/if}
   </div>
@@ -565,6 +589,41 @@
   .opt.sel {
     color: var(--accent);
     font-weight: 500;
+  }
+  /* A not-yet-downloaded model the user picked — highlighted, awaiting the Download button below. */
+  .opt.chosen {
+    background: var(--surface-active);
+    box-shadow: inset 0 0 0 1px var(--accent);
+  }
+
+  .dl-btn {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 7px;
+    margin-top: 6px;
+    font-family: inherit;
+    font-size: 12.5px;
+    font-weight: 500;
+    color: #fff;
+    background: var(--accent);
+    border: none;
+    border-radius: 9px;
+    padding: 9px;
+    cursor: pointer;
+    transition:
+      filter 0.15s,
+      opacity 0.15s;
+  }
+  .dl-btn:hover:not(:disabled) {
+    filter: brightness(1.05);
+  }
+  .dl-btn:disabled {
+    opacity: 0.6;
+    cursor: default;
+  }
+  .dl-btn .spin {
+    border-top-color: #fff;
   }
   .opt.off {
     flex-direction: column;
