@@ -193,16 +193,78 @@ impl Library {
         Ok(())
     }
 
+    /// Re-embeds every stored note with the active embedder, replacing all existing chunk rows. Call
+    /// this after changing the embedding model: it indexes notes that were saved while no model was
+    /// set, and discards vectors from a previous model (whose dimension no longer matches the query).
+    /// Returns how many notes produced chunks; clears all chunks and returns 0 with no embedder set.
+    /// A personal library is small, so it re-embeds the whole corpus in a single pass.
+    pub fn reindex_all(&mut self) -> Result<usize> {
+        self.conn.execute("DELETE FROM chunk", [])?;
+
+        if self.embedder.is_none() {
+            return Ok(0);
+        }
+
+        // Embed every note before opening the write transaction — inference touches no DB and may be
+        // slow.
+        let mut indexed: Vec<(String, Vec<EmbeddedChunk>)> = Vec::new();
+        for id in self.note_ids()? {
+            let texts = self.segment_texts(&id)?;
+            let refs: Vec<&str> = texts.iter().map(String::as_str).collect();
+
+            if let Some(chunks) = self.embed_texts(&refs)? {
+                if !chunks.is_empty() {
+                    indexed.push((id, chunks));
+                }
+            }
+        }
+
+        let tx = self.conn.transaction()?;
+        for (id, chunks) in &indexed {
+            insert_chunks(&tx, id, chunks)?;
+        }
+        tx.commit()?;
+
+        Ok(indexed.len())
+    }
+
+    /// Every stored note's id.
+    fn note_ids(&self) -> Result<Vec<String>> {
+        let mut stmt = self.conn.prepare("SELECT id FROM meeting")?;
+        let ids = stmt
+            .query_map([], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(ids)
+    }
+
+    /// One note's segment texts, in order.
+    fn segment_texts(&self, meeting_id: &str) -> Result<Vec<String>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT text FROM segment WHERE meeting_id = ?1 ORDER BY idx")?;
+        let texts = stmt
+            .query_map([meeting_id], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(texts)
+    }
+
     /// Chunks a note's finalized text and embeds each chunk, when an embedder is configured. Each
     /// entry is `(chunk text, serialized vector)`; returns `None` in full-text-only mode so the
     /// caller writes no `chunk` rows.
     fn embed_chunks(&self, finals: &[&TranscriptSegment]) -> Result<Option<Vec<EmbeddedChunk>>> {
+        let texts: Vec<&str> = finals.iter().map(|s| s.text.trim()).collect();
+        self.embed_texts(&texts)
+    }
+
+    /// Chunks `texts`, embeds each chunk, and serializes the vectors — the shared core of
+    /// [`Self::save_note`] and [`Self::reindex_all`]. `None` in full-text-only mode (no embedder);
+    /// `Some(_)` otherwise, empty when `texts` hold no content.
+    fn embed_texts(&self, texts: &[&str]) -> Result<Option<Vec<EmbeddedChunk>>> {
         let Some(embedder) = &self.embedder else {
             return Ok(None);
         };
 
-        let texts: Vec<&str> = finals.iter().map(|s| s.text.trim()).collect();
-        let chunks = embed::chunk_texts(&texts, CHUNK_CHARS);
+        let chunks = embed::chunk_texts(texts, CHUNK_CHARS);
         if chunks.is_empty() {
             return Ok(Some(Vec::new()));
         }
@@ -1092,6 +1154,95 @@ mod tests {
         .unwrap();
         lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 256 })));
         assert!(lib.search_semantic("budget", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reindex_indexes_notes_saved_before_a_model_was_set() {
+        let mut lib = Library::open_in_memory().unwrap();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+
+        // Full-text-only save left no vectors, so attaching a model alone finds nothing.
+        lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 256 })));
+        assert!(lib.search_semantic("budget", 10).unwrap().is_empty());
+
+        // Reindex embeds the existing note, so semantic search now reaches it.
+        assert_eq!(lib.reindex_all().unwrap(), 1);
+        assert_eq!(
+            lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
+            "m1"
+        );
+    }
+
+    #[test]
+    fn reindex_without_an_embedder_clears_all_chunks() {
+        let mut lib = lib_with_embedder();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+        assert!(!lib.search_semantic("budget", 10).unwrap().is_empty());
+
+        // Turning embedding off drops every chunk and reports nothing indexed.
+        lib.set_embedder(None);
+        assert_eq!(lib.reindex_all().unwrap(), 0);
+
+        // Re-attaching the model finds nothing until a fresh reindex — the chunks were truly removed.
+        lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 64 })));
+        assert!(lib.search_semantic("budget", 10).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reindex_after_a_model_change_rebuilds_searchable_vectors() {
+        let mut lib = lib_with_embedder();
+        lib.save_note(
+            "budget",
+            &meta("Budget"),
+            1,
+            &[seg(
+                1,
+                0,
+                100,
+                "the annual budget report",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+        lib.save_note(
+            "schedule",
+            &meta("Schedule"),
+            2,
+            &[seg(
+                1,
+                0,
+                100,
+                "the weekly schedule planning",
+                AudioSourceKind::Microphone,
+            )],
+        )
+        .unwrap();
+
+        // Switch to a different-dimension model and reindex the whole corpus.
+        lib.set_embedder(Some(Box::new(HashingEmbedder { dim: 256 })));
+        assert_eq!(lib.reindex_all().unwrap(), 2);
+
+        // Both notes stay searchable under the new model, each ranking its own topic first.
+        assert_eq!(
+            lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
+            "budget"
+        );
+        assert_eq!(
+            lib.search_semantic("schedule", 10).unwrap()[0].meeting_id,
+            "schedule"
+        );
     }
 
     #[test]

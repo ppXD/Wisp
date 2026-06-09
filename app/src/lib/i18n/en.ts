@@ -268,6 +268,19 @@ export const en = {
   // Dictation settings (Settings.svelte). "Apple" / "macOS" stay English.
   settings: {
     aiModels: "AI models",
+    search: "Notes search",
+    searchIntro:
+      "How the Library searches your saved notes. Semantic and Hybrid understand meaning (not just exact words) — they need a local embedding model, downloaded once and run fully on-device.",
+    searchMode: "Search mode",
+    modeFulltext: "Full-text",
+    modeSemantic: "Semantic",
+    modeHybrid: "Hybrid",
+    embedModel: "Embedding model",
+    embedOff: "Off — full-text only",
+    embedOffHint: "No download. Matches exact words.",
+    embedActive: "active",
+    embedDownloading: "downloading…",
+    embedCustomSoon: "Custom Hugging Face models and a cloud option are coming next.",
     dictation: "Dictation",
     dictationIntro:
       "Hold the hotkey, speak, release — Wisp types it into whatever app has focus, fully on-device (Apple speech).",

@@ -235,6 +235,19 @@ export const zhHans: Messages = {
 
   settings: {
     aiModels: "AI 模型",
+    search: "笔记搜索",
+    searchIntro:
+      "笔记库如何搜索你保存的笔记。语义与混合搜索理解语义（不只是字面匹配）—— 需要一个本地嵌入模型，下载一次后全程在设备端运行。",
+    searchMode: "搜索模式",
+    modeFulltext: "全文",
+    modeSemantic: "语义",
+    modeHybrid: "混合",
+    embedModel: "嵌入模型",
+    embedOff: "关闭 —— 仅全文",
+    embedOffHint: "无需下载，仅匹配字面。",
+    embedActive: "使用中",
+    embedDownloading: "下载中…",
+    embedCustomSoon: "自定义 Hugging Face 模型与云端选项即将推出。",
     dictation: "听写",
     dictationIntro: "按住快捷键说话、松开 —— Wisp 会把它输入到当前聚焦的 app，全程在设备端（Apple 语音）。",
     dictationNote: "听写需要 Apple 设备端语音（macOS 26 或更新版本）。",

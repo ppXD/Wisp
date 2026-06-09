@@ -157,6 +157,16 @@ struct AppState {
     /// The on-disk meeting knowledge base (SQLite). Finished meetings are saved, listed, and searched
     /// here; a single connection behind a mutex (a personal library has no concurrency needs).
     library: Mutex<Library>,
+    /// The chosen embedding model's catalog id (`None` = full-text only). Setting it loads the model
+    /// into the library's `Embedder`; persisted to `embed_model_path`, model files cache under
+    /// `embed_cache_dir`.
+    embed_model: Mutex<Option<String>>,
+    embed_model_path: PathBuf,
+    embed_cache_dir: PathBuf,
+    /// Notes search mode — `"fulltext"` (default), `"semantic"`, or `"hybrid"`. Persists to
+    /// `search_mode_path`.
+    search_mode: Mutex<String>,
+    search_mode_path: PathBuf,
     /// Per-stream live mute flags shared with the running capture (via `MutedSource`), so the Live bar
     /// can mute/unmute "You" (mic) and "Them" (system) mid-session. Reset to unmuted on each start.
     mic_muted: Arc<AtomicBool>,
@@ -4125,19 +4135,32 @@ fn get_library_note(
     Ok(detail)
 }
 
-/// Full-text search across stored meetings (default cap 50 hits).
+/// Searches stored notes by the active mode — full-text, semantic, or hybrid (default cap 50 hits).
+/// Semantic and hybrid degrade gracefully (to empty / full-text) when no embedder is configured.
 #[tauri::command]
 fn search_library(
     state: State<'_, AppState>,
     query: String,
     limit: Option<usize>,
 ) -> Result<Vec<SearchHit>, String> {
-    state
+    let mode = state
+        .search_mode
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "fulltext".to_owned());
+
+    let library = state
         .library
         .lock()
-        .map_err(|_| "library lock poisoned".to_owned())?
-        .search(&query, limit.unwrap_or(50))
-        .map_err(|e| e.to_string())
+        .map_err(|_| "library lock poisoned".to_owned())?;
+    let limit = limit.unwrap_or(50);
+
+    match mode.as_str() {
+        "semantic" => library.search_semantic(&query, limit),
+        "hybrid" => library.search_hybrid(&query, limit),
+        _ => library.search(&query, limit),
+    }
+    .map_err(|e| e.to_string())
 }
 
 /// Deletes a stored meeting; returns whether it existed.
@@ -4172,6 +4195,93 @@ fn list_embedding_models() -> Vec<EmbeddingModelInfo> {
             size_mb: m.size_mb,
         })
         .collect()
+}
+
+/// Loads a catalog embedding model (downloading on first use) and installs it as the library's
+/// embedder. Blocking, so callers run it off the UI/setup thread.
+fn load_embedder(handle: &tauri::AppHandle, id: &str, cache_dir: PathBuf) -> Result<(), String> {
+    let model =
+        wisp_embed::catalog_model(id).ok_or_else(|| format!("unknown embedding model: {id}"))?;
+    let embedder = wisp_embed::FastEmbedder::load(model, cache_dir).map_err(|e| e.to_string())?;
+    handle
+        .state::<AppState>()
+        .library
+        .lock()
+        .map_err(|_| "library lock poisoned".to_owned())?
+        .set_embedder(Some(Box::new(embedder)));
+    Ok(())
+}
+
+/// The currently selected embedding model id, or `None` for full-text-only.
+#[tauri::command]
+fn embedding_model(state: State<'_, AppState>) -> Option<String> {
+    state.embed_model.lock().ok().and_then(|g| g.clone())
+}
+
+/// Selects (and downloads, blocking) a catalog embedding model, then re-embeds the existing library
+/// so semantic search covers it too; or clears the model with `None`.
+#[tauri::command]
+fn set_embedding_model(
+    app: tauri::AppHandle,
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> Result<(), String> {
+    match &id {
+        Some(model_id) => {
+            load_embedder(&app, model_id, state.embed_cache_dir.clone())?;
+            let _ = fs::write(&state.embed_model_path, model_id);
+
+            // Re-embed existing notes with the new model so semantic search covers them too (and so a
+            // model switch never mixes vectors of different dimensions). Best-effort: the model is
+            // already active for new saves even if this pass fails.
+            if let Err(e) = state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?
+                .reindex_all()
+            {
+                eprintln!("reindex after embedding-model change failed: {e}");
+            }
+        }
+        None => {
+            state
+                .library
+                .lock()
+                .map_err(|_| "library lock poisoned".to_owned())?
+                .set_embedder(None);
+            let _ = fs::remove_file(&state.embed_model_path);
+        }
+    }
+
+    *state
+        .embed_model
+        .lock()
+        .map_err(|_| "embed_model lock poisoned".to_owned())? = id;
+    Ok(())
+}
+
+/// The active notes search mode — `"fulltext"`, `"semantic"`, or `"hybrid"`.
+#[tauri::command]
+fn search_mode(state: State<'_, AppState>) -> String {
+    state
+        .search_mode
+        .lock()
+        .map(|g| g.clone())
+        .unwrap_or_else(|_| "fulltext".to_owned())
+}
+
+/// Sets the notes search mode and persists it.
+#[tauri::command]
+fn set_search_mode(state: State<'_, AppState>, mode: String) -> Result<(), String> {
+    if !matches!(mode.as_str(), "fulltext" | "semantic" | "hybrid") {
+        return Err(format!("unknown search mode: {mode}"));
+    }
+    let _ = fs::write(&state.search_mode_path, &mode);
+    *state
+        .search_mode
+        .lock()
+        .map_err(|_| "search_mode lock poisoned".to_owned())? = mode;
+    Ok(())
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -4219,6 +4329,28 @@ pub fn run() {
             let _ = fs::create_dir_all(&data_dir);
             let library = Library::open(data_dir.join("library.db"))?;
 
+            // Notes semantic search: restore the chosen embedding model (loaded in the background so
+            // startup never blocks on a model download) and the persisted search mode.
+            let embed_model_path = data_dir.join("embed-model");
+            let embed_cache_dir = data_dir.join("embed-models");
+            let _ = fs::create_dir_all(&embed_cache_dir);
+            let embed_model = fs::read_to_string(&embed_model_path)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| wisp_embed::catalog_model(s).is_some());
+            let search_mode_path = data_dir.join("search-mode");
+            let search_mode = fs::read_to_string(&search_mode_path)
+                .ok()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| matches!(s.as_str(), "semantic" | "hybrid"))
+                .unwrap_or_else(|| "fulltext".to_owned());
+
+            if let Some(id) = embed_model.clone() {
+                let handle = app.handle().clone();
+                let cache = embed_cache_dir.clone();
+                std::thread::spawn(move || load_embedder(&handle, &id, cache));
+            }
+
             app.manage(AppState {
                 store,
                 sessions: Mutex::new(Vec::new()),
@@ -4244,6 +4376,11 @@ pub fn run() {
                 file_busy: Arc::new(AtomicBool::new(false)),
                 live_segments: Mutex::new(Vec::new()),
                 library: Mutex::new(library),
+                embed_model: Mutex::new(embed_model),
+                embed_model_path,
+                embed_cache_dir,
+                search_mode: Mutex::new(search_mode),
+                search_mode_path,
                 mic_muted: Arc::new(AtomicBool::new(false)),
                 system_muted: Arc::new(AtomicBool::new(false)),
                 active_model_path,
@@ -4312,7 +4449,11 @@ pub fn run() {
             get_library_note,
             search_library,
             delete_library_note,
-            list_embedding_models
+            list_embedding_models,
+            embedding_model,
+            set_embedding_model,
+            search_mode,
+            set_search_mode
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

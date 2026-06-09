@@ -7,14 +7,16 @@
   import { appDataDir, join } from "@tauri-apps/api/path";
   import { openPath, revealItemInDir } from "@tauri-apps/plugin-opener";
   import EndpointsManager from "$lib/EndpointsManager.svelte";
+  import NotesSearch from "$lib/NotesSearch.svelte";
   import { i18n } from "$lib/i18n.svelte";
 
   let { open = $bindable(false), autoSave = $bindable(false) }: { open?: boolean; autoSave?: boolean } =
     $props();
 
-  type Section = "models" | "dictation" | "storage";
+  type Section = "models" | "search" | "dictation" | "storage";
   const sections = $derived<{ id: Section; label: string }[]>([
     { id: "models", label: i18n.t.settings.aiModels },
+    { id: "search", label: i18n.t.settings.search },
     { id: "dictation", label: i18n.t.settings.dictation },
     { id: "storage", label: i18n.t.settings.storage },
   ]);
@@ -150,6 +152,8 @@
         <div class="settings-content">
           {#if section === "models"}
             <EndpointsManager />
+          {:else if section === "search"}
+            <NotesSearch />
           {:else if section === "dictation"}
             <p class="set-intro">{i18n.t.settings.dictationIntro}</p>
 

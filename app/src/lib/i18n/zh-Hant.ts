@@ -235,6 +235,19 @@ export const zhHant: Messages = {
 
   settings: {
     aiModels: "AI 模型",
+    search: "筆記搜尋",
+    searchIntro:
+      "筆記庫如何搜尋你儲存的筆記。語意與混合搜尋理解語意（不只是字面比對）—— 需要一個本機嵌入模型，下載一次後全程在裝置端執行。",
+    searchMode: "搜尋模式",
+    modeFulltext: "全文",
+    modeSemantic: "語意",
+    modeHybrid: "混合",
+    embedModel: "嵌入模型",
+    embedOff: "關閉 —— 僅全文",
+    embedOffHint: "無需下載，僅比對字面。",
+    embedActive: "使用中",
+    embedDownloading: "下載中…",
+    embedCustomSoon: "自訂 Hugging Face 模型與雲端選項即將推出。",
     dictation: "聽寫",
     dictationIntro: "按住快捷鍵說話、放開 —— Wisp 會把它輸入到目前聚焦的 app，全程在裝置端（Apple 語音）。",
     dictationNote: "聽寫需要 Apple 裝置端語音（macOS 26 或更新版本）。",
