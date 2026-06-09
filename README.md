@@ -48,6 +48,7 @@ Your microphone **and** the meeting's audio become a live, per-speaker transcrip
 | 🔌 **Zero dependencies** | One-click system-audio capture — **no BlackHole**, no kernel extensions, no virtual devices |
 | 🎛️ **Truly customizable** | Choose, configure, and **delete** models freely. Language, accuracy/speed, decoding params — all in your hands |
 | 📄 **SOTA file transcription** | Accurate batch transcription with diarization, word-level timestamps, custom vocabulary, and structured export |
+| 🧠 **Private searchable memory** | Every meeting auto-saved to a local library you can search by **meaning**, not just keywords — on-device embeddings (Qwen3, BGE-M3, multilingual E5) with hybrid keyword + semantic ranking |
 | 🪶 **Tiny footprint** | An 8–22 MB installer; multi-GB models stream in only when you ask for them |
 
 ---
@@ -82,6 +83,19 @@ Drop in any audio or video file and get a transcript you can trust:
 <p align="center">
   <img src="branding/screenshot-file.png" alt="Wisp — file transcription with the AI Notes sidebar open beside the transcript" width="860">
 </p>
+
+## 🧠 A private, searchable memory
+
+Every meeting Wisp transcribes is saved to a **local notes library** — and you can search across all of them by *meaning*, fully on-device.
+
+- **Semantic + keyword, fused.** Search *"the budget discussion"* and Wisp finds the right note even if those exact words were never spoken — SQLite FTS5 keyword matching fused with vector similarity (hybrid). Every hit shows *why* it matched: keyword highlights and a semantic confidence score.
+- **SOTA local embeddings — your pick.** Download, switch, and delete on-device embedding models right in Settings:
+  - **Qwen3-Embedding 0.6B** — a state-of-the-art instruction-tuned **decoder** embedder
+  - **BGE-M3** — 1024-dim, 100+ languages, strong CJK
+  - plus **GTE multilingual**, **Multilingual E5** (small / base / large), and **BGE-Chinese**
+  
+  Switching models re-indexes your library **atomically** — an interrupted or failed switch never corrupts the existing index.
+- **Nothing leaves the device.** Notes are embedded and searched locally through ONNX Runtime. Prefer a hosted embedder for a job? OpenAI-compatible cloud models are **opt-in**, with your own key.
 
 ## 🔒 Local-first & genuinely private
 
