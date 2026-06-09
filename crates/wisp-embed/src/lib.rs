@@ -1,14 +1,14 @@
-//! Local ONNX text-embedding backend: wraps `fastembed` to satisfy [`wisp_library::Embedder`].
+//! Local + cloud text-embedding backends for the Wisp notes library.
 //!
-//! `fastembed` downloads the chosen model from the HuggingFace hub on first use, tokenizes, runs it
-//! through ONNX Runtime, and pools — so this crate only adds the notes-library contract: a small
-//! catalog of vetted multilingual models (the app pairs it with a custom slot) plus E5's distinct
-//! passage/query prefixes.
+//! Local models run on the generic [`OrtEmbedder`] (raw ONNX Runtime): each catalog entry carries a
+//! [`Recipe`] (ONNX file + pooling + prompts + dim) plus the HuggingFace repo and files to fetch, so
+//! a model is just "download these files, load them with this recipe". This one path covers encoder
+//! models (CLS / Mean pooling) and decoder models (last-token, e.g. Qwen3). Cloud models call an
+//! OpenAI-compatible `/embeddings` endpoint instead.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
-use wisp_library::{Embedder, LibraryError, Result};
+use wisp_library::{LibraryError, Result};
 
 mod cloud;
 pub use cloud::{cloud_catalog_model, CloudCatalogModel, CloudEmbedder, CLOUD_CATALOG};
@@ -24,72 +24,138 @@ pub struct CatalogModel {
     pub label: &'static str,
     /// Provider / family this belongs to (the picker's left-pane grouping), e.g. `"Multilingual E5"`.
     pub group: &'static str,
-    /// Embedding dimension (vector length stored per chunk).
-    pub dim: usize,
-    /// Approximate fp32 download size in MiB (fastembed serves full-precision ONNX).
+    /// Approximate download size in MiB (full-precision ONNX), shown before download.
     pub size_mb: u32,
-    /// The fastembed model this maps to.
-    model: EmbeddingModel,
-    /// Instruction prepended to stored passages — empty for symmetric models, `"passage: "` for E5.
-    passage_prefix: &'static str,
-    /// Instruction prepended to a search query — empty for symmetric models, `"query: "` for E5.
-    query_prefix: &'static str,
+    /// HuggingFace repo the model files download from.
+    pub repo: &'static str,
+    /// Files fetched into the model dir (the ONNX file + any external weights + tokenizer + config),
+    /// as repo-relative paths.
+    pub files: &'static [&'static str],
+    /// How to load + run the model (ONNX file within the dir, pooling, prompts, dim).
+    pub recipe: Recipe,
 }
 
-/// Built-in catalog: small, permissive, multilingual / Chinese models that fastembed serves
-/// directly. E5 is multilingual and asymmetric (passage/query prefixes); BGE-zh is Chinese-tuned and
-/// symmetric (v1.5 needs no instruction). The app pairs this with a custom-model slot, and a
-/// raw-ONNX path later covers decoder models like Qwen3-Embedding and quantized downloads.
+/// Built-in catalog: small, permissive, multilingual / Chinese models. E5 is multilingual and
+/// asymmetric (passage/query prefixes) with Mean pooling; BGE-zh is Chinese-tuned and symmetric
+/// (v1.5 needs no instruction) with CLS pooling. The app pairs this with a custom-model slot.
 pub const CATALOG: &[CatalogModel] = &[
     CatalogModel {
         id: "e5-small",
         label: "Multilingual E5 small",
         group: "Multilingual E5",
-        dim: 384,
         size_mb: 470,
-        model: EmbeddingModel::MultilingualE5Small,
-        passage_prefix: "passage: ",
-        query_prefix: "query: ",
+        repo: "intfloat/multilingual-e5-small",
+        files: &[
+            "onnx/model.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model.onnx",
+            pooling: Pooling::Mean,
+            passage_prefix: "passage: ",
+            query_prefix: "query: ",
+            normalize: true,
+            dim: 384,
+            max_length: 512,
+        },
     },
     CatalogModel {
         id: "e5-base",
         label: "Multilingual E5 base",
         group: "Multilingual E5",
-        dim: 768,
         size_mb: 1100,
-        model: EmbeddingModel::MultilingualE5Base,
-        passage_prefix: "passage: ",
-        query_prefix: "query: ",
+        repo: "intfloat/multilingual-e5-base",
+        files: &[
+            "onnx/model.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model.onnx",
+            pooling: Pooling::Mean,
+            passage_prefix: "passage: ",
+            query_prefix: "query: ",
+            normalize: true,
+            dim: 768,
+            max_length: 512,
+        },
     },
     CatalogModel {
         id: "e5-large",
         label: "Multilingual E5 large",
         group: "Multilingual E5",
-        dim: 1024,
         size_mb: 2200,
-        model: EmbeddingModel::MultilingualE5Large,
-        passage_prefix: "passage: ",
-        query_prefix: "query: ",
+        // This export keeps weights in an external `model.onnx_data` next to `model.onnx`; ONNX
+        // Runtime loads it automatically when both sit in the same dir, so both are in `files`.
+        repo: "Qdrant/multilingual-e5-large-onnx",
+        files: &[
+            "model.onnx",
+            "model.onnx_data",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "model.onnx",
+            pooling: Pooling::Mean,
+            passage_prefix: "passage: ",
+            query_prefix: "query: ",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        },
     },
     CatalogModel {
         id: "bge-small-zh",
         label: "BGE small · Chinese",
         group: "BGE · Chinese",
-        dim: 512,
         size_mb: 95,
-        model: EmbeddingModel::BGESmallZHV15,
-        passage_prefix: "",
-        query_prefix: "",
+        repo: "Xenova/bge-small-zh-v1.5",
+        files: &[
+            "onnx/model.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model.onnx",
+            pooling: Pooling::Cls,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 512,
+            max_length: 512,
+        },
     },
     CatalogModel {
         id: "bge-large-zh",
         label: "BGE large · Chinese",
         group: "BGE · Chinese",
-        dim: 1024,
         size_mb: 1300,
-        model: EmbeddingModel::BGELargeZHV15,
-        passage_prefix: "",
-        query_prefix: "",
+        repo: "Xenova/bge-large-zh-v1.5",
+        files: &[
+            "onnx/model.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model.onnx",
+            pooling: Pooling::Cls,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        },
     },
 ];
 
@@ -98,55 +164,54 @@ pub fn catalog_model(id: &str) -> Option<&'static CatalogModel> {
     CATALOG.iter().find(|m| m.id == id)
 }
 
-/// A loaded local embedder. Build with [`FastEmbedder::load`]; the model downloads on first use into
-/// `cache_dir` and is cached there afterward.
-pub struct FastEmbedder {
-    model: TextEmbedding,
-    dim: usize,
-    passage_prefix: &'static str,
-    query_prefix: &'static str,
+/// Downloads a catalog model's files from its HF repo into `dir` (creating it). Each file lands in a
+/// sibling `*.part` first and is renamed into place only after the full body is written, so an
+/// interrupted download never leaves a half-written file behind; already-present files are skipped,
+/// making a re-run resume. Callers observe progress by watching `dir` grow.
+pub fn download_model(model: &CatalogModel, dir: &Path) -> Result<()> {
+    for file in model.files {
+        let dest = dir.join(file);
+        if dest.exists() {
+            continue;
+        }
+
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).map_err(io_err)?;
+        }
+
+        let url = format!("https://huggingface.co/{}/resolve/main/{file}", model.repo);
+        fetch_atomic(&url, &dest)?;
+    }
+    Ok(())
 }
 
-impl FastEmbedder {
-    /// Loads a catalog model, downloading it into `cache_dir` if not already cached.
-    pub fn load(model: &CatalogModel, cache_dir: PathBuf) -> Result<Self> {
-        let opts = InitOptions::new(model.model.clone())
-            .with_cache_dir(cache_dir)
-            .with_show_download_progress(false);
-        let loaded =
-            TextEmbedding::try_new(opts).map_err(|e| LibraryError::Embed(e.to_string()))?;
-        Ok(Self {
-            model: loaded,
-            dim: model.dim,
-            passage_prefix: model.passage_prefix,
-            query_prefix: model.query_prefix,
-        })
+/// Streams `url` into `dest` via a sibling `*.part`, renamed into place only after the whole body is
+/// written; a failed transfer removes the `*.part` so it never lingers.
+fn fetch_atomic(url: &str, dest: &Path) -> Result<()> {
+    let mut part = dest.as_os_str().to_owned();
+    part.push(".part");
+    let part = PathBuf::from(part);
+
+    let streamed = (|| -> Result<()> {
+        let resp = ureq::get(url)
+            .call()
+            .map_err(|e| LibraryError::Embed(format!("download {url}: {e}")))?;
+        let mut reader = resp.into_reader();
+        let mut out = std::fs::File::create(&part).map_err(io_err)?;
+        std::io::copy(&mut reader, &mut out).map_err(io_err)?;
+        Ok(())
+    })();
+
+    if let Err(e) = streamed {
+        let _ = std::fs::remove_file(&part);
+        return Err(e);
     }
+
+    std::fs::rename(&part, dest).map_err(io_err)
 }
 
-impl Embedder for FastEmbedder {
-    fn dim(&self) -> usize {
-        self.dim
-    }
-
-    fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let docs: Vec<String> = texts
-            .iter()
-            .map(|t| format!("{}{t}", self.passage_prefix))
-            .collect();
-        self.model
-            .embed(docs, None)
-            .map_err(|e| LibraryError::Embed(e.to_string()))
-    }
-
-    fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
-        let q = format!("{}{text}", self.query_prefix);
-        let mut out = self
-            .model
-            .embed(vec![q], None)
-            .map_err(|e| LibraryError::Embed(e.to_string()))?;
-        Ok(out.pop().unwrap_or_default())
-    }
+fn io_err(e: std::io::Error) -> LibraryError {
+    LibraryError::Embed(format!("io: {e}"))
 }
 
 #[cfg(test)]
@@ -168,39 +233,65 @@ mod tests {
         // E5 is asymmetric (both prefixes set); BGE-zh v1.5 is symmetric (no instruction).
         for m in CATALOG {
             if m.id.starts_with("e5") {
-                assert_eq!(m.passage_prefix, "passage: ", "{}", m.id);
-                assert_eq!(m.query_prefix, "query: ", "{}", m.id);
+                assert_eq!(m.recipe.passage_prefix, "passage: ", "{}", m.id);
+                assert_eq!(m.recipe.query_prefix, "query: ", "{}", m.id);
             } else if m.id.starts_with("bge") {
-                assert_eq!(m.passage_prefix, "", "{}", m.id);
-                assert_eq!(m.query_prefix, "", "{}", m.id);
+                assert_eq!(m.recipe.passage_prefix, "", "{}", m.id);
+                assert_eq!(m.recipe.query_prefix, "", "{}", m.id);
             }
         }
     }
 
-    // Downloads ~470 MB (fp32) and runs real inference, so it is opt-in: `cargo test -- --ignored`.
+    #[test]
+    fn catalog_files_include_the_recipe_onnx_and_tokenizer() {
+        // The downloaded file set must contain the ONNX the recipe loads and the tokenizer the
+        // embedder reads, or a download would "succeed" yet fail to load.
+        for m in CATALOG {
+            assert!(
+                m.files.contains(&m.recipe.onnx_file),
+                "{} files omit its recipe onnx_file {}",
+                m.id,
+                m.recipe.onnx_file
+            );
+            assert!(
+                m.files.contains(&"tokenizer.json"),
+                "{} omits tokenizer.json",
+                m.id
+            );
+            assert!(m.recipe.dim > 0, "{} has a zero dim", m.id);
+        }
+    }
+
+    // The real picker path for a catalog model: self-download its files, then load + embed via the
+    // recipe — exactly what download_embedding_model + activation do. ~95 MB (bge-small-zh). Opt-in:
+    // `cargo test -- --ignored`.
     #[test]
     #[ignore]
-    fn e5_small_embeds_and_normalizes() {
-        let dir = std::env::temp_dir().join("wisp-embed-test");
-        let embedder = FastEmbedder::load(catalog_model("e5-small").unwrap(), dir).unwrap();
-        assert_eq!(embedder.dim(), 384);
+    fn download_model_then_load_and_embed() {
+        use wisp_library::Embedder;
 
-        let passages = embedder
-            .embed_passages(&["the budget was approved"])
-            .unwrap();
-        assert_eq!(passages[0].len(), 384);
-        let norm: f32 = passages[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+        let model = catalog_model("bge-small-zh").unwrap();
+        let dir = std::env::temp_dir().join("wisp-embed-dl-bge-small-zh");
+        download_model(model, &dir).unwrap();
+
+        // Every declared file landed and no `*.part` lingered.
+        for f in model.files {
+            assert!(dir.join(f).exists(), "missing downloaded file {f}");
+            let mut part = dir.join(f).into_os_string();
+            part.push(".part");
+            assert!(!Path::new(&part).exists(), "leftover .part for {f}");
+        }
+
+        // A second call is a no-op (files already present) and must still succeed.
+        download_model(model, &dir).unwrap();
+
+        let emb = OrtEmbedder::load(&dir, &model.recipe).unwrap();
+        assert_eq!(emb.dim(), model.recipe.dim);
+        let v = emb.embed_query("预算").unwrap();
+        let norm: f32 = v.iter().map(|x| x * x).sum::<f32>().sqrt();
         assert!(
             (norm - 1.0).abs() < 1e-3,
-            "passage vector not L2-normalized: {norm}"
+            "embedding not normalized: {norm}"
         );
-
-        // A query about the same topic is more similar than an unrelated one.
-        let q = embedder.embed_query("budget").unwrap();
-        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
-        let unrelated = embedder
-            .embed_passages(&["the cat slept on the mat"])
-            .unwrap();
-        assert!(dot(&q, &passages[0]) > dot(&q, &unrelated[0]));
     }
 }

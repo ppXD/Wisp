@@ -4219,7 +4219,7 @@ fn embed_installed(cache_root: &Path, id: &str) -> bool {
 }
 
 /// Total size in bytes of everything under `path` (recursive). Used to track download progress by
-/// watching the cache dir grow, since fastembed's downloader exposes no progress callback.
+/// watching the cache dir grow, since the model self-download exposes no UI progress callback.
 fn dir_size(path: &Path) -> u64 {
     let Ok(entries) = fs::read_dir(path) else {
         return 0;
@@ -4256,7 +4256,7 @@ fn list_embedding_models(state: State<'_, AppState>) -> Vec<EmbeddingModelInfo> 
             EmbeddingModelInfo {
                 id: m.id.to_owned(),
                 label: m.label.to_owned(),
-                dim: m.dim,
+                dim: m.recipe.dim,
                 size_mb: m.size_mb,
                 kind: "local".to_owned(),
                 group: m.group.to_owned(),
@@ -4288,13 +4288,13 @@ fn list_embedding_models(state: State<'_, AppState>) -> Vec<EmbeddingModelInfo> 
     out
 }
 
-/// Resolves a model id to its embedder — a local fastembed model loaded from its per-model cache
-/// dir, or a cloud embedder built from the catalog + the provider's saved API key.
+/// Resolves a model id to its embedder — a local ONNX model loaded (with its recipe) from its
+/// per-model cache dir, or a cloud embedder built from the catalog + the provider's saved API key.
 fn resolve_embedder(state: &AppState, id: &str) -> Result<Box<dyn wisp_library::Embedder>, String> {
     if let Some(local) = wisp_embed::catalog_model(id) {
+        let dir = embed_model_dir(&state.embed_cache_dir, id);
         let embedder =
-            wisp_embed::FastEmbedder::load(local, embed_model_dir(&state.embed_cache_dir, id))
-                .map_err(|e| e.to_string())?;
+            wisp_embed::OrtEmbedder::load(&dir, &local.recipe).map_err(|e| e.to_string())?;
         return Ok(Box::new(embedder));
     }
 
@@ -4351,9 +4351,9 @@ fn spawn_embed_progress_poller(
 }
 
 /// Downloads a catalog embedding model's files into its per-model cache dir, streaming progress to
-/// the UI by watching the dir grow (fastembed exposes no download callback). Network I/O runs on a
-/// worker thread so the UI never freezes; does not activate the model — the frontend activates via
-/// [`set_embedding_model`] afterward, mirroring the ASR picker.
+/// the UI by watching the dir grow (the self-download reports no byte callback across to the UI).
+/// Network I/O runs on a worker thread so the UI never freezes; does not activate the model — the
+/// frontend activates via [`set_embedding_model`] afterward, mirroring the ASR picker.
 #[tauri::command]
 async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), String> {
     let cache_root = app.state::<AppState>().embed_cache_dir.clone();
@@ -4364,8 +4364,8 @@ async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), Stri
         let dir = embed_model_dir(&cache_root, &id);
         let total = u64::from(model.size_mb) * 1024 * 1024;
 
-        // A side thread reports progress by polling the cache dir's on-disk size while fastembed
-        // downloads into it; it stops the moment the (blocking) load returns.
+        // A side thread reports progress by polling the cache dir's on-disk size while the files
+        // download into it; it stops the moment the (blocking) download returns.
         let stop = Arc::new(AtomicBool::new(false));
         let poller = spawn_embed_progress_poller(
             app.clone(),
@@ -4375,12 +4375,11 @@ async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), Stri
             Arc::clone(&stop),
         );
 
-        // Loading triggers the download; we only need the files cached, so the model is dropped.
-        let loaded = wisp_embed::FastEmbedder::load(model, dir.clone()).map(|_| ());
+        let downloaded = wisp_embed::download_model(model, &dir);
         stop.store(true, Ordering::Relaxed);
         let _ = poller.join();
 
-        loaded.map_err(|e| e.to_string())?;
+        downloaded.map_err(|e| e.to_string())?;
         emit_embed_progress(&app, &id, total, total);
         let _ = fs::write(dir.join(EMBED_READY_MARKER), b"");
         Ok::<(), String>(())
