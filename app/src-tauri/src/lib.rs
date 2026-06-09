@@ -83,6 +83,10 @@ const ASSIST_ERROR_EVENT: &str = "assist://error";
 /// Event channel the UI listens on for model-download progress.
 const DOWNLOAD_PROGRESS_EVENT: &str = "download://progress";
 
+/// Event channel for embedding-model download progress (kept separate from the ASR channel so the
+/// two pickers' progress bars never cross-talk).
+const EMBED_DOWNLOAD_PROGRESS_EVENT: &str = "embed-download://progress";
+
 /// Event channels for file transcription: total duration up front, decode progress (0–100), each
 /// segment as it's produced, and a completion signal.
 const FILE_META_EVENT: &str = "file://meta";
@@ -4214,6 +4218,21 @@ fn embed_installed(cache_root: &Path, id: &str) -> bool {
         .exists()
 }
 
+/// Total size in bytes of everything under `path` (recursive). Used to track download progress by
+/// watching the cache dir grow, since fastembed's downloader exposes no progress callback.
+fn dir_size(path: &Path) -> u64 {
+    let Ok(entries) = fs::read_dir(path) else {
+        return 0;
+    };
+    entries
+        .flatten()
+        .map(|e| match e.file_type() {
+            Ok(t) if t.is_dir() => dir_size(&e.path()),
+            _ => e.metadata().map(|m| m.len()).unwrap_or(0),
+        })
+        .sum()
+}
+
 /// Whether a cloud provider's API key is saved (non-empty).
 fn cloud_provider_keyed(state: &AppState, provider: &str) -> bool {
     state
@@ -4302,7 +4321,37 @@ fn load_embedder(handle: &AppHandle, id: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Downloads a catalog embedding model's files into its per-model cache dir. Network I/O runs on a
+/// Emits one embedding-download progress sample to the UI.
+fn emit_embed_progress(app: &AppHandle, id: &str, downloaded: u64, total: u64) {
+    let _ = app.emit(
+        EMBED_DOWNLOAD_PROGRESS_EVENT,
+        DownloadProgressDto {
+            id: id.to_owned(),
+            downloaded,
+            total,
+        },
+    );
+}
+
+/// Spawns a thread that streams download progress (cache-dir size vs `total`) every 200 ms until
+/// `stop` is set.
+fn spawn_embed_progress_poller(
+    app: AppHandle,
+    id: String,
+    dir: PathBuf,
+    total: u64,
+    stop: Arc<AtomicBool>,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        while !stop.load(Ordering::Relaxed) {
+            emit_embed_progress(&app, &id, dir_size(&dir).min(total), total);
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    })
+}
+
+/// Downloads a catalog embedding model's files into its per-model cache dir, streaming progress to
+/// the UI by watching the dir grow (fastembed exposes no download callback). Network I/O runs on a
 /// worker thread so the UI never freezes; does not activate the model — the frontend activates via
 /// [`set_embedding_model`] afterward, mirroring the ASR picker.
 #[tauri::command]
@@ -4313,10 +4362,26 @@ async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), Stri
         let model = wisp_embed::catalog_model(&id)
             .ok_or_else(|| format!("unknown embedding model: {id}"))?;
         let dir = embed_model_dir(&cache_root, &id);
+        let total = u64::from(model.size_mb) * 1024 * 1024;
 
-        // Loading triggers fastembed's download into `dir`; we only need the files cached, so the
-        // loaded model is dropped immediately. The marker is written last, marking success.
-        wisp_embed::FastEmbedder::load(model, dir.clone()).map_err(|e| e.to_string())?;
+        // A side thread reports progress by polling the cache dir's on-disk size while fastembed
+        // downloads into it; it stops the moment the (blocking) load returns.
+        let stop = Arc::new(AtomicBool::new(false));
+        let poller = spawn_embed_progress_poller(
+            app.clone(),
+            id.clone(),
+            dir.clone(),
+            total,
+            Arc::clone(&stop),
+        );
+
+        // Loading triggers the download; we only need the files cached, so the model is dropped.
+        let loaded = wisp_embed::FastEmbedder::load(model, dir.clone()).map(|_| ());
+        stop.store(true, Ordering::Relaxed);
+        let _ = poller.join();
+
+        loaded.map_err(|e| e.to_string())?;
+        emit_embed_progress(&app, &id, total, total);
         let _ = fs::write(dir.join(EMBED_READY_MARKER), b"");
         Ok::<(), String>(())
     })

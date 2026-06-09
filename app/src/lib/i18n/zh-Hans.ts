@@ -252,6 +252,7 @@ export const zhHans: Messages = {
     embedInstalled: "已下载",
     embedDownload: "下载",
     embedDownloading: "下载中…",
+    embedBgHint: "在后台进行 —— 可继续其他操作。",
     embedWorking: "处理中…",
     embedApi: "API",
     embedNeedsKey: "需要 API 密钥",

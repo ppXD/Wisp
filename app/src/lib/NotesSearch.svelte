@@ -4,9 +4,10 @@
   // layout: tabs (Device | Cloud) → left a provider/family list (+ Import) → right that provider's
   // models. Local models download explicitly on a worker thread (never on a stray click), show
   // installed/active state, and can be deleted; cloud models run through the provider's API key.
-  import { onMount } from "svelte";
+  import { onMount, onDestroy } from "svelte";
   import { slide } from "svelte/transition";
   import { invoke } from "@tauri-apps/api/core";
+  import { listen, type UnlistenFn } from "@tauri-apps/api/event";
   import { i18n } from "$lib/i18n.svelte";
   import Modal from "$lib/Modal.svelte";
 
@@ -40,6 +41,15 @@
 
   let keyDraft = $state<Record<string, string>>({});
   let savingKey = $state("");
+
+  // Live download progress per model id, streamed from the backend (cache-dir size vs total).
+  let progress = $state<Record<string, { downloaded: number; total: number }>>({});
+  let unlisten: UnlistenFn | undefined;
+
+  function pct(id: string): number {
+    const p = progress[id];
+    return p && p.total > 0 ? Math.min(100, Math.round((p.downloaded / p.total) * 100)) : 0;
+  }
 
   const active = $derived(models.find((m) => m.active) ?? null);
   const chosenModel = $derived(models.find((m) => m.id === chosen) ?? null);
@@ -81,7 +91,16 @@
       error = String(e);
     }
   }
-  onMount(load);
+  onMount(async () => {
+    await load();
+    unlisten = await listen<{ id: string; downloaded: number; total: number }>(
+      "embed-download://progress",
+      (e) => {
+        progress[e.payload.id] = { downloaded: e.payload.downloaded, total: e.payload.total };
+      },
+    );
+  });
+  onDestroy(() => unlisten?.());
 
   function toggle() {
     open = !open;
@@ -243,7 +262,10 @@
 
   <div class="picker">
     <button class="trigger" class:open onclick={toggle}>
-      {#if busy}<span class="spin sm"></span>{/if}
+      {#if busy}
+        <span class="spin sm"></span>
+        {#if progress[busy]}<span class="trig-pct">{pct(busy)}%</span>{/if}
+      {/if}
       <span class="trigger-label">{active ? active.label : i18n.t.settings.embedOff}</span>
       <span class="caret"></span>
     </button>
@@ -319,13 +341,19 @@
 
         {#if chosenModel && chosenModel.kind === "local" && !chosenModel.installed}
           {@const cm = chosenModel}
-          <button class="dl-btn" disabled={!!busy} onclick={() => download(cm.id)}>
-            {#if busy === cm.id}
-              <span class="spin sm"></span>{i18n.t.settings.embedDownloading}
-            {:else}
+          {#if busy === cm.id}
+            <div class="dl-prog">
+              <div class="dl-bar"><div class="dl-fill" style="width:{pct(cm.id)}%"></div></div>
+              <div class="dl-meta">
+                <span>{i18n.t.settings.embedDownloading} {pct(cm.id)}%</span>
+                <span class="dl-bg">{i18n.t.settings.embedBgHint}</span>
+              </div>
+            </div>
+          {:else}
+            <button class="dl-btn" disabled={!!busy} onclick={() => download(cm.id)}>
               ↓ {i18n.t.settings.embedDownload} · {sizeLabel(cm.sizeMb)}
-            {/if}
-          </button>
+            </button>
+          {/if}
         {/if}
       </div>
     {/if}
@@ -622,8 +650,41 @@
     opacity: 0.6;
     cursor: default;
   }
-  .dl-btn .spin {
-    border-top-color: #fff;
+
+  .dl-prog {
+    margin-top: 8px;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+  }
+  .dl-bar {
+    height: 6px;
+    background: var(--surface-active);
+    border-radius: 999px;
+    overflow: hidden;
+  }
+  .dl-fill {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 999px;
+    transition: width 0.2s ease;
+  }
+  .dl-meta {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    font-size: 11.5px;
+    color: var(--muted);
+  }
+  .dl-bg {
+    color: var(--live);
+  }
+  .trig-pct {
+    flex: none;
+    font-family: var(--font-mono);
+    font-size: 11.5px;
+    color: var(--muted);
   }
   .opt.off {
     flex-direction: column;

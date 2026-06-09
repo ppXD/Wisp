@@ -285,6 +285,7 @@ export const en = {
     embedInstalled: "installed",
     embedDownload: "Download",
     embedDownloading: "downloading…",
+    embedBgHint: "Runs in the background — you can keep working.",
     embedWorking: "Working…",
     embedApi: "API",
     embedNeedsKey: "needs API key",
