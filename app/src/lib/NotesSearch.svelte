@@ -29,6 +29,7 @@
   let mode = $state("fulltext");
   let models = $state<EmbModel[]>([]);
   let open = $state(false);
+  let pickerEl: HTMLElement | undefined; // for click-outside-to-close
   let tab = $state<"device" | "cloud">("device");
   let sel = $state(""); // selected provider/group, or IMPORT
   let chosen = $state<string | null>(null); // a not-yet-downloaded model the user picked (awaits Download)
@@ -98,6 +99,12 @@
       tab = active?.kind === "cloud" ? "cloud" : "device";
       sel = active?.group ?? "";
     }
+  }
+
+  // Close the dropdown when a click lands outside the picker. The trigger lives inside `pickerEl`, so
+  // opening (its click) never immediately closes it.
+  function onWindowClick(e: MouseEvent) {
+    if (open && pickerEl && !pickerEl.contains(e.target as Node)) open = false;
   }
 
   async function setMode(m: string) {
@@ -184,6 +191,7 @@
   onkeydown={(e) => {
     if (e.key === "Escape") open = false;
   }}
+  onclick={onWindowClick}
 />
 
 {#snippet modelOpt(m: EmbModel)}
@@ -242,7 +250,7 @@
 <div class="field col">
   <span class="field-label">{i18n.t.settings.embedModel}</span>
 
-  <div class="picker">
+  <div class="picker" bind:this={pickerEl}>
     <button class="trigger" class:open onclick={toggle}>
       {#if dl.id}
         <span class="spin sm"></span><span class="trig-pct">{dlPct()}%</span>
@@ -651,10 +659,23 @@
     background: var(--surface-active);
     box-shadow: inset 0 0 0 1px var(--accent);
   }
+  /* The Off row reads as a tappable card (warm bg + border) so it's clearly clickable, unlike the
+     borderless model rows below it. */
   .opt.off {
     flex-direction: column;
     align-items: flex-start;
     gap: 2px;
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 9px;
+    margin-bottom: 6px;
+  }
+  .opt.off:hover:not(:disabled) {
+    border-color: var(--border-strong);
+  }
+  .opt.off.sel {
+    background: var(--surface-active);
+    border-color: var(--accent);
   }
   .opt-name {
     flex: 1;
