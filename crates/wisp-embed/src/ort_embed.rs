@@ -150,7 +150,7 @@ impl OrtEmbedder {
             .try_extract_tensor::<f32>()
             .map_err(ort_err)?;
 
-        let pooled = self.pool(&tensor, &mask_arr)?;
+        let pooled = pool_tokens(&tensor, &mask_arr, self.pooling)?;
         Ok(pooled
             .outer_iter()
             .map(|row| {
@@ -162,58 +162,63 @@ impl OrtEmbedder {
             })
             .collect())
     }
+}
 
-    /// Collapses `[batch, seq, hidden]` token embeddings to `[batch, hidden]` per the pooling mode.
-    /// A model that already emits a pooled `[batch, hidden]` tensor is passed through unchanged.
-    fn pool(&self, tensor: &ArrayViewD<f32>, mask: &Array2<i64>) -> Result<Array2<f32>> {
-        if tensor.ndim() == 2 {
-            return tensor
-                .to_owned()
-                .into_dimensionality()
-                .map_err(|e| LibraryError::Embed(format!("output reshape: {e}")));
-        }
-        if tensor.ndim() != 3 {
-            return Err(LibraryError::Embed(format!(
-                "unexpected model output rank {}",
-                tensor.ndim()
-            )));
-        }
+/// Collapses `[batch, seq, hidden]` token embeddings to `[batch, hidden]` per `pooling`. A model that
+/// already emits a pooled `[batch, hidden]` tensor is passed through unchanged. Pure (no model), so it
+/// is unit-tested directly with synthetic tensors.
+fn pool_tokens(
+    tensor: &ArrayViewD<f32>,
+    mask: &Array2<i64>,
+    pooling: Pooling,
+) -> Result<Array2<f32>> {
+    if tensor.ndim() == 2 {
+        return tensor
+            .to_owned()
+            .into_dimensionality()
+            .map_err(|e| LibraryError::Embed(format!("output reshape: {e}")));
+    }
+    if tensor.ndim() != 3 {
+        return Err(LibraryError::Embed(format!(
+            "unexpected model output rank {}",
+            tensor.ndim()
+        )));
+    }
 
-        let (batch, seq, hidden) = (tensor.shape()[0], tensor.shape()[1], tensor.shape()[2]);
-        let mut out = Array2::<f32>::zeros((batch, hidden));
-        for b in 0..batch {
-            match self.pooling {
-                Pooling::Cls => {
-                    for h in 0..hidden {
-                        out[[b, h]] = tensor[[b, 0, h]];
-                    }
+    let (batch, seq, hidden) = (tensor.shape()[0], tensor.shape()[1], tensor.shape()[2]);
+    let mut out = Array2::<f32>::zeros((batch, hidden));
+    for b in 0..batch {
+        match pooling {
+            Pooling::Cls => {
+                for h in 0..hidden {
+                    out[[b, h]] = tensor[[b, 0, h]];
                 }
-                Pooling::Mean => {
-                    let mut count = 0f32;
-                    for t in 0..seq {
-                        if mask[[b, t]] != 0 {
-                            count += 1.0;
-                            for h in 0..hidden {
-                                out[[b, h]] += tensor[[b, t, h]];
-                            }
-                        }
-                    }
-                    if count > 0.0 {
+            }
+            Pooling::Mean => {
+                let mut count = 0f32;
+                for t in 0..seq {
+                    if mask[[b, t]] != 0 {
+                        count += 1.0;
                         for h in 0..hidden {
-                            out[[b, h]] /= count;
+                            out[[b, h]] += tensor[[b, t, h]];
                         }
                     }
                 }
-                Pooling::LastToken => {
-                    let last = (0..seq).rev().find(|&t| mask[[b, t]] != 0).unwrap_or(0);
+                if count > 0.0 {
                     for h in 0..hidden {
-                        out[[b, h]] = tensor[[b, last, h]];
+                        out[[b, h]] /= count;
                     }
                 }
             }
+            Pooling::LastToken => {
+                let last = (0..seq).rev().find(|&t| mask[[b, t]] != 0).unwrap_or(0);
+                for h in 0..hidden {
+                    out[[b, h]] = tensor[[b, last, h]];
+                }
+            }
         }
-        Ok(out)
     }
+    Ok(out)
 }
 
 impl Embedder for OrtEmbedder {
@@ -307,6 +312,105 @@ mod tests {
         let n = (v[0] * v[0] + v[1] * v[1]).sqrt();
         assert!((n - 1.0).abs() < 1e-6);
         assert!((v[0] - 0.6).abs() < 1e-6);
+    }
+
+    fn dyn3(shape: [usize; 3], data: Vec<f32>) -> ndarray::ArrayD<f32> {
+        ndarray::Array::from_shape_vec(ndarray::IxDyn(&shape), data).unwrap()
+    }
+    fn mask(shape: (usize, usize), data: Vec<i64>) -> Array2<i64> {
+        Array2::from_shape_vec(shape, data).unwrap()
+    }
+
+    #[test]
+    fn pool_cls_takes_the_first_token() {
+        // tokens: [1,2], [3,4], [5,6]
+        let t = dyn3([1, 3, 2], vec![1., 2., 3., 4., 5., 6.]);
+        let m = mask((1, 3), vec![1, 1, 1]);
+        let out = pool_tokens(&t.view(), &m, Pooling::Cls).unwrap();
+        assert_eq!(out.shape(), &[1, 2]);
+        assert_eq!(out[[0, 0]], 1.0);
+        assert_eq!(out[[0, 1]], 2.0);
+    }
+
+    #[test]
+    fn pool_mean_averages_only_unmasked_tokens() {
+        // the third token is padding and must be ignored, despite its huge values.
+        let t = dyn3([1, 3, 2], vec![1., 2., 3., 4., 100., 100.]);
+        let m = mask((1, 3), vec![1, 1, 0]);
+        let out = pool_tokens(&t.view(), &m, Pooling::Mean).unwrap();
+        assert_eq!(out[[0, 0]], 2.0); // (1+3)/2
+        assert_eq!(out[[0, 1]], 3.0); // (2+4)/2
+    }
+
+    #[test]
+    fn pool_mean_with_all_padding_is_zero_not_nan() {
+        let t = dyn3([1, 2, 2], vec![1., 2., 3., 4.]);
+        let m = mask((1, 2), vec![0, 0]);
+        let out = pool_tokens(&t.view(), &m, Pooling::Mean).unwrap();
+        assert_eq!(out[[0, 0]], 0.0);
+        assert!(out[[0, 1]].is_finite());
+    }
+
+    #[test]
+    fn pool_last_token_takes_the_last_unmasked_token() {
+        // tokens 0..3, padding at the end — the last real token is index 2.
+        let t = dyn3([1, 4, 2], vec![1., 1., 2., 2., 3., 3., 9., 9.]);
+        let m = mask((1, 4), vec![1, 1, 1, 0]);
+        let out = pool_tokens(&t.view(), &m, Pooling::LastToken).unwrap();
+        assert_eq!(out[[0, 0]], 3.0);
+        assert_eq!(out[[0, 1]], 3.0);
+    }
+
+    #[test]
+    fn pool_handles_a_multi_row_batch_with_distinct_masks() {
+        // row0 uses both tokens, row1 only the first.
+        let t = dyn3([2, 2, 1], vec![1., 3., 10., 20.]);
+        let m = mask((2, 2), vec![1, 1, 1, 0]);
+        let out = pool_tokens(&t.view(), &m, Pooling::Mean).unwrap();
+        assert_eq!(out[[0, 0]], 2.0); // (1+3)/2
+        assert_eq!(out[[1, 0]], 10.0); // only the first token counts
+    }
+
+    #[test]
+    fn pool_passes_through_a_prepooled_2d_output() {
+        let t =
+            ndarray::Array::from_shape_vec(ndarray::IxDyn(&[2, 3]), vec![1., 2., 3., 4., 5., 6.])
+                .unwrap();
+        let m = mask((2, 1), vec![1, 1]);
+        let out = pool_tokens(&t.view(), &m, Pooling::Mean).unwrap();
+        assert_eq!(out.shape(), &[2, 3]);
+        assert_eq!(out[[1, 2]], 6.0);
+    }
+
+    #[test]
+    fn pool_rejects_an_unexpected_output_rank() {
+        let t = ndarray::Array::from_shape_vec(ndarray::IxDyn(&[4]), vec![1., 2., 3., 4.]).unwrap();
+        let m = mask((1, 4), vec![1, 1, 1, 1]);
+        assert!(pool_tokens(&t.view(), &m, Pooling::Mean).is_err());
+    }
+
+    #[test]
+    fn max_length_reads_value_and_rejects_sentinels() {
+        let dir = std::env::temp_dir().join(format!("wisp-ort-maxlen-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            br#"{"model_max_length": 512}"#,
+        )
+        .unwrap();
+        assert_eq!(read_max_length(&dir), Some(512));
+
+        // The 1e30 sentinel some configs use must not be taken literally.
+        std::fs::write(
+            dir.join("tokenizer_config.json"),
+            br#"{"model_max_length": 1e30}"#,
+        )
+        .unwrap();
+        assert_eq!(read_max_length(&dir), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(read_max_length(&dir), None); // missing file
     }
 
     fn download_file(repo: &str, file: &str, dest: &std::path::Path) {

@@ -53,6 +53,21 @@ jobs:
       - name: test
         run: cargo test --all --all-features
 
+  # wisp-embed is its own workspace (heavy onnxruntime / ort / tokenizers deps), so the root
+  # `cargo test --all` skips it. Run its unit tests here so the embedding, pooling, and cloud-response
+  # logic is gated by CI too. The real-model smoke tests stay `#[ignore]` (they download hundreds of MB).
+  embed-tests:
+    name: embed tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: crates/wisp-embed
+      - name: test wisp-embed
+        run: cargo test --manifest-path crates/wisp-embed/Cargo.toml --lib
+
   # Proves the Tauri shell + its cross-platform deps (sherpa-onnx, cpal) build on Windows, where the
   # macOS-only bits (ScreenCaptureKit, WebRTC AEC, Metal whisper.cpp) are absent and degrade.
   #
