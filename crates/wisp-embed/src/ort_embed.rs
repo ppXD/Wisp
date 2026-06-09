@@ -9,7 +9,7 @@
 
 use std::path::Path;
 
-use ndarray::{Array2, ArrayViewD};
+use ndarray::{Array2, Array4, ArrayViewD};
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::Value;
 use tokenizers::{PaddingParams, PaddingStrategy, Tokenizer, TruncationParams};
@@ -41,6 +41,15 @@ pub struct Recipe {
     pub max_length: usize,
 }
 
+/// For decoder models exported with a KV cache (Qwen3-Embedding et al.): the `past_key_values.*` input
+/// names plus the per-head dims needed to feed an EMPTY cache (`past_sequence_length = 0`) on the
+/// single forward pass we run for embeddings. Encoder models have none of these and skip it entirely.
+struct KvCache {
+    names: Vec<String>,
+    num_heads: usize,
+    head_dim: usize,
+}
+
 /// A loaded ONNX embedding model.
 pub struct OrtEmbedder {
     session: Session,
@@ -51,6 +60,8 @@ pub struct OrtEmbedder {
     normalize: bool,
     dim: usize,
     needs_token_type_ids: bool,
+    needs_position_ids: bool,
+    kv_cache: Option<KvCache>,
 }
 
 impl OrtEmbedder {
@@ -87,6 +98,8 @@ impl OrtEmbedder {
             .map_err(ort_err)?;
 
         let needs_token_type_ids = session.inputs.iter().any(|i| i.name == "token_type_ids");
+        let needs_position_ids = session.inputs.iter().any(|i| i.name == "position_ids");
+        let kv_cache = detect_kv_cache(&session, model_dir)?;
 
         Ok(Self {
             session,
@@ -97,6 +110,8 @@ impl OrtEmbedder {
             normalize: recipe.normalize,
             dim: recipe.dim,
             needs_token_type_ids,
+            needs_position_ids,
+            kv_cache,
         })
     }
 
@@ -140,6 +155,24 @@ impl OrtEmbedder {
                 "token_type_ids".into(),
                 Value::from_array(type_arr).map_err(ort_err)?.into(),
             ));
+        }
+        if self.needs_position_ids {
+            inputs.push((
+                "position_ids".into(),
+                Value::from_array(position_ids_from_mask(&mask_arr))
+                    .map_err(ort_err)?
+                    .into(),
+            ));
+        }
+        if let Some(kv) = &self.kv_cache {
+            // Prefill forward: feed an empty `[batch, heads, 0, head_dim]` cache for every layer.
+            let empty = Array4::<f32>::zeros((batch, kv.num_heads, 0, kv.head_dim));
+            for name in &kv.names {
+                inputs.push((
+                    name.as_str().into(),
+                    Value::from_array(empty.view()).map_err(ort_err)?.into(),
+                ));
+            }
         }
 
         let outputs = self.session.run(inputs).map_err(ort_err)?;
@@ -221,6 +254,25 @@ fn pool_tokens(
     Ok(out)
 }
 
+/// Builds `position_ids` from the attention mask for decoder models (Qwen3 et al.) that take it as an
+/// explicit input: each real token gets its 0-based index among the unmasked tokens; padding holds the
+/// running index. Equals a plain `arange` for right-padded batches and stays correct under
+/// left-padding. Pure (no model), so it is unit-tested directly.
+fn position_ids_from_mask(mask: &Array2<i64>) -> Array2<i64> {
+    let (batch, seq) = (mask.shape()[0], mask.shape()[1]);
+    let mut pos = Array2::<i64>::zeros((batch, seq));
+    for b in 0..batch {
+        let mut next = 0i64;
+        for t in 0..seq {
+            pos[[b, t]] = next;
+            if mask[[b, t]] != 0 {
+                next += 1;
+            }
+        }
+    }
+    pos
+}
+
 impl Embedder for OrtEmbedder {
     fn dim(&self) -> usize {
         self.dim
@@ -277,6 +329,55 @@ fn read_max_length(dir: &Path) -> Option<usize> {
     } else {
         None
     }
+}
+
+/// Detects whether `session` is a decoder exported with a KV cache (has `past_key_values.*` inputs)
+/// and, if so, the dims of the empty cache to feed. Returns `None` for encoder models (which have no
+/// such inputs and run unchanged).
+fn detect_kv_cache(session: &Session, model_dir: &Path) -> Result<Option<KvCache>> {
+    let names: Vec<String> = session
+        .inputs
+        .iter()
+        .map(|i| i.name.clone())
+        .filter(|n| n.starts_with("past_key_values"))
+        .collect();
+    if names.is_empty() {
+        return Ok(None);
+    }
+
+    let (num_heads, head_dim) = read_kv_dims(model_dir).ok_or_else(|| {
+        LibraryError::Embed(
+            "decoder model has a KV cache but config.json lacks num_key_value_heads / head_dim"
+                .to_owned(),
+        )
+    })?;
+
+    Ok(Some(KvCache {
+        names,
+        num_heads,
+        head_dim,
+    }))
+}
+
+/// Reads `(num_key_value_heads, head_dim)` from `config.json` — the per-head dims of the empty KV
+/// cache a decoder model wants. Falls back to `num_attention_heads` and `hidden_size /
+/// num_attention_heads` when the explicit fields are absent. Pure, so it is unit-tested directly.
+fn read_kv_dims(dir: &Path) -> Option<(usize, usize)> {
+    let bytes = std::fs::read(dir.join("config.json")).ok()?;
+    let cfg: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+
+    let attn_heads = cfg.get("num_attention_heads").and_then(|v| v.as_u64());
+    let kv_heads = cfg
+        .get("num_key_value_heads")
+        .and_then(|v| v.as_u64())
+        .or(attn_heads)? as usize;
+
+    let head_dim = match cfg.get("head_dim").and_then(|v| v.as_u64()) {
+        Some(h) => h as usize,
+        None => (cfg.get("hidden_size")?.as_u64()? / attn_heads?) as usize,
+    };
+
+    (kv_heads > 0 && head_dim > 0).then_some((kv_heads, head_dim))
 }
 
 fn ort_err(e: ort::Error) -> LibraryError {
@@ -387,6 +488,43 @@ mod tests {
         let t = ndarray::Array::from_shape_vec(ndarray::IxDyn(&[4]), vec![1., 2., 3., 4.]).unwrap();
         let m = mask((1, 4), vec![1, 1, 1, 1]);
         assert!(pool_tokens(&t.view(), &m, Pooling::Mean).is_err());
+    }
+
+    #[test]
+    fn position_ids_index_real_tokens_per_row() {
+        // row0 right-padded (real tokens 0,1,2 then pad); row1 left-padded (pad, pad, then real).
+        let m = mask((2, 4), vec![1, 1, 1, 0, 0, 0, 1, 1]);
+        let p = position_ids_from_mask(&m);
+        assert_eq!(p.shape(), &[2, 4]);
+        // right-padding: real tokens count up from 0.
+        assert_eq!([p[[0, 0]], p[[0, 1]], p[[0, 2]]], [0, 1, 2]);
+        // left-padding: the first real token still starts at 0, not at its absolute index.
+        assert_eq!([p[[1, 2]], p[[1, 3]]], [0, 1]);
+    }
+
+    #[test]
+    fn kv_dims_read_explicit_and_derive_head_dim() {
+        let dir = std::env::temp_dir().join(format!("wisp-ort-kvdims-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Explicit head_dim + grouped-query KV heads (Qwen3-0.6B shape).
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"num_attention_heads": 16, "num_key_value_heads": 8, "head_dim": 128}"#,
+        )
+        .unwrap();
+        assert_eq!(read_kv_dims(&dir), Some((8, 128)));
+
+        // No head_dim and no GQA: fall back to hidden_size / num_attention_heads and full KV heads.
+        std::fs::write(
+            dir.join("config.json"),
+            br#"{"num_attention_heads": 12, "hidden_size": 768}"#,
+        )
+        .unwrap();
+        assert_eq!(read_kv_dims(&dir), Some((12, 64)));
+
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(read_kv_dims(&dir), None); // missing file
     }
 
     #[test]
@@ -514,6 +652,55 @@ mod tests {
         assert!(
             dot(&q, &passages[0]) > dot(&q, &passages[1]),
             "the budget query should match the budget passage more than the cat one"
+        );
+    }
+
+    // Proves the DECODER path end-to-end: last-token pooling + the auto-detected `position_ids` input
+    // + Qwen3's instruct query prompt, on the real Qwen3-Embedding-0.6B (int8 ONNX, ~600 MB, to keep
+    // the download manageable). This is what fastembed cannot do. `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn qwen3_embedding_decoder_last_token() {
+        let dir = std::env::temp_dir().join("wisp-ort-qwen3-0_6b");
+        let repo = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+        for f in [
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ] {
+            download_file(repo, f, &dir.join(f));
+        }
+
+        let recipe = Recipe {
+            onnx_file: "onnx/model_quantized.onnx",
+            pooling: Pooling::LastToken,
+            passage_prefix: "",
+            query_prefix:
+                "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        };
+        let emb = OrtEmbedder::load(&dir, &recipe).unwrap();
+        assert_eq!(emb.dim(), 1024);
+
+        let passages = emb
+            .embed_passages(&["the annual budget was approved", "the cat slept on the mat"])
+            .unwrap();
+        assert_eq!(passages[0].len(), 1024);
+        let norm: f32 = passages[0].iter().map(|x| x * x).sum::<f32>().sqrt();
+        assert!(
+            (norm - 1.0).abs() < 1e-3,
+            "passage not L2-normalized: {norm}"
+        );
+
+        let q = emb.embed_query("budget").unwrap();
+        let dot = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        assert!(
+            dot(&q, &passages[0]) > dot(&q, &passages[1]),
+            "the budget query should rank the budget passage above the cat one"
         );
     }
 }
