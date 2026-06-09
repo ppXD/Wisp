@@ -4151,6 +4151,29 @@ fn delete_library_note(state: State<'_, AppState>, id: String) -> Result<bool, S
         .map_err(|e| e.to_string())
 }
 
+/// One downloadable local embedding model the Settings picker can offer.
+#[derive(Serialize)]
+struct EmbeddingModelInfo {
+    id: String,
+    label: String,
+    dim: usize,
+    size_mb: u32,
+}
+
+/// The catalog of vetted local embedding models for semantic / hybrid note search.
+#[tauri::command]
+fn list_embedding_models() -> Vec<EmbeddingModelInfo> {
+    wisp_embed::CATALOG
+        .iter()
+        .map(|m| EmbeddingModelInfo {
+            id: m.id.to_owned(),
+            label: m.label.to_owned(),
+            dim: m.dim,
+            size_mb: m.size_mb,
+        })
+        .collect()
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -4288,7 +4311,8 @@ pub fn run() {
             list_library_notes,
             get_library_note,
             search_library,
-            delete_library_note
+            delete_library_note,
+            list_embedding_models
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
