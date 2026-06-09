@@ -157,6 +157,77 @@ pub const CATALOG: &[CatalogModel] = &[
             max_length: 512,
         },
     },
+    CatalogModel {
+        id: "bge-m3",
+        label: "BGE-M3 · multilingual",
+        group: "BGE · Multilingual",
+        size_mb: 570,
+        repo: "Xenova/bge-m3",
+        files: &[
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model_quantized.onnx",
+            pooling: Pooling::Cls,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        },
+    },
+    CatalogModel {
+        id: "gte-multilingual-base",
+        label: "GTE multilingual base",
+        group: "GTE",
+        size_mb: 1220,
+        repo: "onnx-community/gte-multilingual-base",
+        files: &[
+            "onnx/model.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model.onnx",
+            pooling: Pooling::Cls,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 768,
+            max_length: 512,
+        },
+    },
+    CatalogModel {
+        id: "qwen3-0.6b",
+        label: "Qwen3 Embedding 0.6B",
+        group: "Qwen3",
+        size_mb: 600,
+        repo: "onnx-community/Qwen3-Embedding-0.6B-ONNX",
+        files: &[
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ],
+        recipe: Recipe {
+            onnx_file: "onnx/model_quantized.onnx",
+            // Decoder embedder: last-token pooling, and the query carries Qwen3's instruct prompt
+            // while stored passages do not (asymmetric).
+            pooling: Pooling::LastToken,
+            passage_prefix: "",
+            query_prefix: "Instruct: Given a web search query, retrieve relevant passages that answer the query\nQuery: ",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        },
+    },
 ];
 
 /// Looks up a catalog model by its stable id.
