@@ -267,9 +267,24 @@ fn fetch_atomic(url: &str, dest: &Path) -> Result<()> {
         let resp = ureq::get(url)
             .call()
             .map_err(|e| LibraryError::Embed(format!("download {url}: {e}")))?;
+
+        // Hold the transfer to the declared length. Without this, a connection dropped mid-body on a
+        // length-less (close-delimited) response reads as a clean EOF, and the truncated file gets
+        // renamed into place as "complete" — then it fails to load forever, since the present (short)
+        // file makes the download skip it on every retry.
+        let expected: Option<u64> = resp.header("Content-Length").and_then(|h| h.parse().ok());
+
         let mut reader = resp.into_reader();
         let mut out = std::fs::File::create(&part).map_err(io_err)?;
-        std::io::copy(&mut reader, &mut out).map_err(io_err)?;
+        let written = std::io::copy(&mut reader, &mut out).map_err(io_err)?;
+
+        if let Some(total) = expected {
+            if written != total {
+                return Err(LibraryError::Embed(format!(
+                    "download {url}: truncated ({written} of {total} bytes)"
+                )));
+            }
+        }
         Ok(())
     })();
 

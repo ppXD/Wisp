@@ -113,6 +113,26 @@ impl Library {
         self.embedder = embedder;
     }
 
+    /// Atomically switches the active embedder and re-embeds the whole corpus with it. On any failure
+    /// the library is left exactly as it was — previous embedder, previous chunks — so a model switch
+    /// never wipes the index or leaves a new embedder pointed at stale-dimension vectors. Use this
+    /// (not [`set_embedder`] + [`reindex_all`]) whenever the model changes.
+    pub fn set_embedder_and_reindex(
+        &mut self,
+        embedder: Option<Box<dyn Embedder>>,
+    ) -> Result<usize> {
+        let previous = self.embedder.take();
+        self.embedder = embedder;
+
+        match self.reindex_all() {
+            Ok(n) => Ok(n),
+            Err(e) => {
+                self.embedder = previous;
+                Err(e)
+            }
+        }
+    }
+
     fn init(conn: Connection) -> Result<Self> {
         conn.execute_batch("PRAGMA foreign_keys = ON;")?;
         let mut lib = Self {
@@ -199,14 +219,13 @@ impl Library {
     /// Returns how many notes produced chunks; clears all chunks and returns 0 with no embedder set.
     /// A personal library is small, so it re-embeds the whole corpus in a single pass.
     pub fn reindex_all(&mut self) -> Result<usize> {
-        self.conn.execute("DELETE FROM chunk", [])?;
-
         if self.embedder.is_none() {
+            self.conn.execute("DELETE FROM chunk", [])?;
             return Ok(0);
         }
 
         // Embed every note before opening the write transaction — inference touches no DB and may be
-        // slow.
+        // slow. A note that fails to embed returns here with the existing index still intact.
         let mut indexed: Vec<(String, Vec<EmbeddedChunk>)> = Vec::new();
         for id in self.note_ids()? {
             let texts = self.segment_texts(&id)?;
@@ -219,7 +238,11 @@ impl Library {
             }
         }
 
+        // Clear the old chunks and insert the new ones in one transaction, so a failure (or a crash)
+        // never leaves the corpus de-indexed. The DELETE used to run + commit before embedding, so a
+        // mid-embed error wiped the whole index for good.
         let tx = self.conn.transaction()?;
+        tx.execute("DELETE FROM chunk", [])?;
         for (id, chunks) in &indexed {
             insert_chunks(&tx, id, chunks)?;
         }
@@ -707,6 +730,28 @@ mod tests {
         }
     }
 
+    /// A test embedder whose passage embedding always fails — used to drive a reindex error and prove
+    /// the corpus + previous embedder survive it.
+    struct FailingEmbedder;
+
+    impl Embedder for FailingEmbedder {
+        fn dim(&self) -> usize {
+            64
+        }
+
+        fn embed_passages(&self, _texts: &[&str]) -> Result<Vec<Vec<f32>>> {
+            Err(crate::LibraryError::Embed(
+                "simulated inference failure".to_owned(),
+            ))
+        }
+
+        fn embed_query(&self, _text: &str) -> Result<Vec<f32>> {
+            Err(crate::LibraryError::Embed(
+                "simulated inference failure".to_owned(),
+            ))
+        }
+    }
+
     /// An in-memory library with the deterministic test embedder configured.
     fn lib_with_embedder() -> Library {
         let mut lib = Library::open_in_memory().unwrap();
@@ -1173,6 +1218,45 @@ mod tests {
 
         // Reindex embeds the existing note, so semantic search now reaches it.
         assert_eq!(lib.reindex_all().unwrap(), 1);
+        assert_eq!(
+            lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
+            "m1"
+        );
+    }
+
+    #[test]
+    fn a_failed_model_switch_keeps_the_old_index_and_embedder() {
+        let mut lib = lib_with_embedder();
+        lib.save_note(
+            "m1",
+            &meta("M"),
+            0,
+            &[seg(1, 0, 100, "budget review", AudioSourceKind::Microphone)],
+        )
+        .unwrap();
+        assert_eq!(lib.reindex_all().unwrap(), 1);
+        assert_eq!(
+            lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
+            "m1"
+        );
+
+        // Switching to a model that fails to embed must NOT wipe the index or leave the failing model
+        // active: the call errors, and the previous (working) embedder + chunks are restored intact.
+        assert!(lib
+            .set_embedder_and_reindex(Some(Box::new(FailingEmbedder)))
+            .is_err());
+        assert_eq!(
+            lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
+            "m1",
+            "a failed model switch must leave the old index + embedder intact"
+        );
+
+        // A switch to a working model still succeeds and rebuilds the index.
+        assert_eq!(
+            lib.set_embedder_and_reindex(Some(Box::new(HashingEmbedder { dim: 128 })))
+                .unwrap(),
+            1
+        );
         assert_eq!(
             lib.search_semantic("budget", 10).unwrap()[0].meeting_id,
             "m1"

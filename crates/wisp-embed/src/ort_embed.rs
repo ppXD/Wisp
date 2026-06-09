@@ -130,6 +130,14 @@ impl OrtEmbedder {
         let seq = encodings[0].len();
         let batch = encodings.len();
 
+        // A zero-length encoding (a pathological input/tokenizer) would otherwise yield a 0-width
+        // tensor and an all-zero "embedding"; fail loudly instead.
+        if seq == 0 {
+            return Err(LibraryError::Embed(
+                "tokenizer produced an empty encoding".to_owned(),
+            ));
+        }
+
         let mut ids = Vec::with_capacity(batch * seq);
         let mut mask = Vec::with_capacity(batch * seq);
         let mut types = Vec::with_capacity(batch * seq);
@@ -279,11 +287,18 @@ impl Embedder for OrtEmbedder {
     }
 
     fn embed_passages(&self, texts: &[&str]) -> Result<Vec<Vec<f32>>> {
-        let prefixed: Vec<String> = texts
+        // Embed one text at a time (batch size 1). Batching pads the shorter rows, and a quantized
+        // model's per-batch scales make a padded row drift from the same text embedded alone — so a
+        // stored passage would not match a (single-text) query embedding, and two notes would index
+        // the same sentence differently depending on their neighbours. One at a time keeps every
+        // vector identical regardless of the batch it was embedded in.
+        texts
             .iter()
-            .map(|t| format!("{}{t}", self.passage_prefix))
-            .collect();
-        self.run(&prefixed)
+            .map(|t| {
+                let prefixed = format!("{}{t}", self.passage_prefix);
+                Ok(self.run(&[prefixed])?.pop().unwrap_or_default())
+            })
+            .collect()
     }
 
     fn embed_query(&self, text: &str) -> Result<Vec<f32>> {
@@ -744,6 +759,52 @@ mod tests {
         assert!(
             dot(&q, &passages[0]) > dot(&q, &passages[1]),
             "the budget query should rank the budget passage above the cat one"
+        );
+    }
+
+    // A passage must embed identically whether alone or alongside others. `embed_passages` embeds one
+    // text at a time precisely so a quantized model's per-batch scales can't make a stored vector
+    // depend on its neighbours (which would also stop it matching a single-text query). Uses the
+    // cached Qwen3 model. `cargo test -- --ignored`.
+    #[test]
+    #[ignore]
+    fn qwen3_passage_embedding_is_independent_of_neighbours() {
+        let dir = std::env::temp_dir().join("wisp-ort-qwen3-0_6b");
+        let repo = "onnx-community/Qwen3-Embedding-0.6B-ONNX";
+        for f in [
+            "onnx/model_quantized.onnx",
+            "tokenizer.json",
+            "tokenizer_config.json",
+            "config.json",
+            "special_tokens_map.json",
+        ] {
+            download_file(repo, f, &dir.join(f));
+        }
+
+        let recipe = Recipe {
+            onnx_file: "onnx/model_quantized.onnx",
+            pooling: Pooling::LastToken,
+            passage_prefix: "",
+            query_prefix: "",
+            normalize: true,
+            dim: 1024,
+            max_length: 512,
+        };
+        let emb = OrtEmbedder::load(&dir, &recipe).unwrap();
+
+        let short = "budget";
+        let long = "the annual operating budget was approved by the board after a long and detailed \
+                    discussion covering every department and each contingency line item in the plan";
+
+        let alone = emb.embed_passages(&[short]).unwrap().pop().unwrap();
+        // Batching the short row with a much longer one forces heavy right-padding on the short row.
+        let batched = emb.embed_passages(&[short, long]).unwrap();
+
+        let cos = |a: &[f32], b: &[f32]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f32>();
+        let sim = cos(&alone, &batched[0]);
+        assert!(
+            sim > 0.999,
+            "a passage embedded differently next to a neighbour (cos {sim}); embed_passages must embed one at a time"
         );
     }
 

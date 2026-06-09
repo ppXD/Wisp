@@ -4424,20 +4424,20 @@ fn apply_embedding_model(app: &AppHandle, id: Option<String>) -> Result<(), Stri
                 return Err(format!("embedding model not downloaded: {model_id}"));
             }
 
-            load_embedder(app, model_id)?;
-            let _ = fs::write(&state.embed_model_path, model_id);
-
-            // Re-embed existing notes with the new model so semantic search covers them too (and so a
-            // model switch never mixes vectors of different dimensions). Best-effort: the model is
-            // already active for new saves even if this pass fails.
-            if let Err(e) = state
+            // Switch the embedder and re-embed existing notes in one locked, atomic step: either the
+            // new model becomes active with a freshly-rebuilt index, or — on any failure — the
+            // previous model and its index are left untouched and the error surfaces to the UI. This
+            // avoids both a half-applied switch (new embedder vs old-dimension vectors) and a
+            // silently-wiped index.
+            let embedder = resolve_embedder(&state, model_id)?;
+            state
                 .library
                 .lock()
                 .map_err(|_| "library lock poisoned".to_owned())?
-                .reindex_all()
-            {
-                eprintln!("reindex after embedding-model change failed: {e}");
-            }
+                .set_embedder_and_reindex(Some(embedder))
+                .map_err(|e| format!("indexing notes with {model_id} failed: {e}"))?;
+
+            let _ = fs::write(&state.embed_model_path, model_id);
         }
         None => {
             state
