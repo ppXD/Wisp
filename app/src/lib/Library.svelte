@@ -51,10 +51,13 @@
   let pendingDelete = $state<string | null>(null);
   let confirmOpen = $state(false);
   let searchTimer: ReturnType<typeof setTimeout> | undefined;
+  let searching = $state(false); // a search invoke is in flight
+  let searchMode = $state("fulltext"); // the active search logic (mirrors Settings → Notes search)
 
   async function loadList() {
     try {
       notes = await invoke<NoteSummary[]>("list_library_notes");
+      searchMode = await invoke<string>("search_mode");
       error = "";
     } catch (e) {
       error = String(e);
@@ -69,15 +72,20 @@
     const q = query.trim();
     if (!q) {
       hits = null;
+      searching = false;
       return;
     }
+    searching = true;
     searchTimer = setTimeout(async () => {
       try {
+        // Re-read the mode so the result badges match the logic the backend actually used.
+        searchMode = await invoke<string>("search_mode");
         hits = await invoke<SearchHit[]>("search_library", { query: q, limit: 50 });
         error = "";
       } catch (e) {
         error = String(e);
       }
+      searching = false;
     }, 200);
   }
 
@@ -127,6 +135,21 @@
     return `${m}:${s.toString().padStart(2, "0")}`;
   }
 
+  // Wall-clock time of a segment (note start + offset), shown on hover of its timecode.
+  function fmtClock(ms: number): string {
+    return new Date(ms).toLocaleTimeString(undefined, {
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+    });
+  }
+
+  function modeLabel(m: string): string {
+    if (m === "semantic") return i18n.t.settings.modeSemantic;
+    if (m === "hybrid") return i18n.t.settings.modeHybrid;
+    return i18n.t.settings.modeFulltext;
+  }
+
   function speakerLabel(source: string): string {
     if (source === "mic") return i18n.t.library.you;
     if (source === "system") return i18n.t.library.them;
@@ -170,10 +193,12 @@
     <div class="transcript">
       {#each detail.segments as seg (seg.idx)}
         <p class="seg">
-          {#if speakerLabel(seg.source)}
-            <span class="spk" class:them={seg.source === "system"}>{speakerLabel(seg.source)}</span>
-          {/if}
-          <span class="txt">{seg.text}</span>
+          <span class="ts" title={fmtClock(detail!.meeting.started_at_ms + seg.start_ms)}>{fmtDuration(seg.start_ms)}</span>
+          <span class="seg-body">
+            {#if speakerLabel(seg.source)}<span class="spk" class:them={seg.source === "system"}
+                >{speakerLabel(seg.source)}</span
+              >{/if}<span class="txt">{seg.text}</span>
+          </span>
         </p>
       {/each}
     </div>
@@ -193,11 +218,22 @@
       <div class="err">{error}</div>
     {/if}
 
+    {#if hits !== null || searching}
+      <div class="search-bar">
+        <span class="searchby">{i18n.t.library.searchBy}</span>
+        <span class="mode-chip {searchMode}">{modeLabel(searchMode)}</span>
+        <span class="mode-hint">· {i18n.t.library.searchModeHint}</span>
+        {#if searching}
+          <span class="searching"><span class="spin"></span>{i18n.t.library.searching}</span>
+        {/if}
+      </div>
+    {/if}
+
     {#if hits !== null}
       {#if hits.length === 0}
-        <div class="empty">{i18n.t.library.noResults}</div>
+        <div class="empty">{searching ? i18n.t.library.searching : i18n.t.library.noResults}</div>
       {:else}
-        <ul class="cards">
+        <ul class="cards" class:loading={searching}>
           {#each hits as hit (hit.meeting_id)}
             <li>
               <button class="card hit-card" onclick={() => openNote(hit.meeting_id)}>
@@ -207,11 +243,22 @@
                 </div>
                 <!-- eslint-disable-next-line svelte/no-at-html-tags -->
                 <div class="snippet">{@html renderSnippet(hit.snippet)}</div>
+                <div class="match">
+                  {#if searchMode === "semantic"}
+                    <span class="match-badge sem">{Math.min(100, Math.round(hit.score * 100))}% · {i18n.t.library.matchSemantic}</span>
+                  {:else if searchMode === "hybrid"}
+                    <span class="match-badge hyb">{i18n.t.library.matchHybrid}</span>
+                  {:else}
+                    <span class="match-badge kw">{i18n.t.library.matchKeyword}</span>
+                  {/if}
+                </div>
               </button>
             </li>
           {/each}
         </ul>
       {/if}
+    {:else if searching}
+      <div class="empty">{i18n.t.library.searching}</div>
     {:else if notes.length === 0}
       <div class="empty">{i18n.t.library.empty}</div>
     {:else}
@@ -509,9 +556,23 @@
   }
   .seg {
     margin: 0;
+    display: flex;
+    gap: 12px;
     font-size: 14px;
     line-height: 1.6;
     color: var(--text);
+  }
+  .ts {
+    flex: none;
+    margin-top: 1px;
+    font-family: var(--font-mono);
+    font-size: 12px;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    cursor: default;
+  }
+  .seg-body {
+    min-width: 0;
   }
   .spk {
     display: inline-block;
@@ -555,5 +616,80 @@
   }
   .btn.danger:hover {
     filter: brightness(1.05);
+  }
+
+  /* ── Search logic transparency ── */
+  .search-bar {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .searchby {
+    color: var(--muted);
+  }
+  .mode-chip {
+    font-weight: 600;
+    color: var(--accent);
+    background: color-mix(in srgb, var(--accent) 12%, transparent);
+    border-radius: 999px;
+    padding: 2px 9px;
+  }
+  .mode-chip.fulltext {
+    color: var(--live);
+    background: color-mix(in srgb, var(--live) 14%, transparent);
+  }
+  .mode-hint {
+    color: var(--muted);
+  }
+  .searching {
+    margin-left: auto;
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--muted);
+  }
+  .spin {
+    display: inline-block;
+    width: 12px;
+    height: 12px;
+    border: 2px solid var(--border-strong);
+    border-top-color: var(--accent);
+    border-radius: 50%;
+    animation: lib-spin 0.7s linear infinite;
+  }
+  @keyframes lib-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  .cards.loading {
+    opacity: 0.55;
+    transition: opacity 0.15s;
+  }
+
+  /* Per-result "how it matched" badge. */
+  .match {
+    margin-top: 2px;
+  }
+  .match-badge {
+    font-family: var(--font-mono);
+    font-size: 10.5px;
+    letter-spacing: 0.02em;
+    padding: 1px 7px;
+    border-radius: 999px;
+    color: var(--muted);
+    background: var(--bg);
+    border: 1px solid var(--border);
+  }
+  .match-badge.sem {
+    color: var(--accent);
+    border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+  }
+  .match-badge.kw {
+    color: var(--live);
+    border-color: color-mix(in srgb, var(--live) 45%, transparent);
   }
 </style>
