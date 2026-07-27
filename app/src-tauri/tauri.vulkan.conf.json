@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "windows-runtime/vulkan-1.dll": "vulkan-1.dll",
+      "windows-runtime/VulkanRT-License.txt": "VulkanRT-License.txt"
+    }
+  }
+}
