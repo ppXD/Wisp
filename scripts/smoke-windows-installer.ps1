@@ -21,7 +21,7 @@ try {
 
     $executable = Join-Path $extractDirectory "Wisp.exe"
     $process = Start-Process -FilePath $executable -WorkingDirectory $extractDirectory -PassThru
-    if ($process.WaitForExit(15_000)) {
+    if ($process.WaitForExit(15000)) {
         throw "Packaged Wisp.exe exited during startup with code $($process.ExitCode)"
     }
 
