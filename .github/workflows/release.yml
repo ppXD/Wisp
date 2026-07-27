@@ -56,7 +56,7 @@ jobs:
           # with whisper.cpp's automatic CPU fallback when there's no Vulkan device. sherpa stays CPU.
           - os: windows-latest
             label: Windows x64
-            args: "--features whisper-vulkan"
+            args: "--features whisper-vulkan --config src-tauri/tauri.vulkan.conf.json"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -104,6 +104,13 @@ jobs:
         with:
           version: 1.4.309.0
           cache: true
+      # The SDK supplies headers + the import library, but not the redistributable loader DLL. Stage
+      # LunarG's official, checksum-pinned x64 runtime so Wisp can launch and use the CPU fallback even
+      # on machines whose GPU driver did not install vulkan-1.dll.
+      - name: Stage the official Vulkan loader
+        if: runner.os == 'Windows'
+        shell: bash
+        run: ./scripts/stage-vulkan-loader.sh app/src-tauri/windows-runtime
 
       - name: Install frontend deps
         working-directory: app
@@ -155,3 +162,15 @@ jobs:
       - name: Verify bundled macOS entitlements
         if: runner.os == 'macOS'
         run: ./scripts/verify-macos-entitlements.sh app/src-tauri/target/release/bundle/dmg/Wisp_*.dmg
+
+      - name: Verify bundled Windows runtime
+        if: runner.os == 'Windows'
+        shell: bash
+        run: ./scripts/verify-windows-runtime.sh D:/b/release/bundle/nsis/Wisp_*-setup.exe --require-vulkan
+
+      - name: Smoke-test the packaged Windows app
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'D:\b\release\bundle\nsis\Wisp_*-setup.exe' | Select-Object -First 1
+          ./scripts/smoke-windows-installer.ps1 -Installer $installer.FullName

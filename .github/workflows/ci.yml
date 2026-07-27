@@ -97,6 +97,9 @@ jobs:
         run: cargo build --manifest-path app/src-tauri/Cargo.toml -p wisp-engine-sherpa
       - name: Build the app
         run: cargo build --manifest-path app/src-tauri/Cargo.toml
+      - name: Verify staged Windows runtime
+        shell: bash
+        run: ./scripts/verify-windows-runtime.sh app/src-tauri/windows-runtime
 
   # Proves the macOS app builds — including the macOS-ONLY code no other CI job ever compiles:
   # ScreenCaptureKit system audio, the WebRTC AEC3 echo canceller, Metal whisper.cpp, and Apple

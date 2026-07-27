@@ -8,10 +8,17 @@ name: Windows Vulkan whisper smoke
 
 on:
   workflow_dispatch: {}
-  # Validate on pushes to the feature branch (a brand-new workflow can't be dispatched from a
-  # non-default branch). Drop this trigger once the path is proven and the workflow lands on main.
-  push:
-    branches: [feat/windows-vulkan-whisper]
+  pull_request:
+    branches: [main]
+    paths:
+      - ".github/workflows/windows-vulkan.yml"
+      - "app/src-tauri/build.rs"
+      - "app/src-tauri/Cargo.toml"
+      - "app/src-tauri/tauri*.json"
+      - "crates/wisp-engine-whisper-cpp/**"
+      - "scripts/smoke-windows-installer.ps1"
+      - "scripts/stage-vulkan-loader.sh"
+      - "scripts/verify-windows-runtime.sh"
 
 env:
   CARGO_TERM_COLOR: always
@@ -44,6 +51,9 @@ jobs:
         with:
           version: 1.4.309.0
           cache: true
+      - name: Stage the official Vulkan loader
+        shell: bash
+        run: ./scripts/stage-vulkan-loader.sh app/src-tauri/windows-runtime
       - name: Install the frontend deps
         working-directory: app
         run: npm ci
@@ -56,7 +66,7 @@ jobs:
         shell: pwsh
         run: |
           Write-Host "VULKAN_SDK = $env:VULKAN_SDK"
-          npm run tauri build -- --features whisper-vulkan
+          npm run tauri build -- --features whisper-vulkan --config src-tauri/tauri.vulkan.conf.json
       # Show where the NSIS bundler dropped the installer so the release.yml recipe can target the same
       # path (confirms CARGO_TARGET_DIR is honoured by the bundler, not just the compiler).
       - name: Locate the installer (diagnostic)
@@ -65,6 +75,14 @@ jobs:
         run: |
           Get-ChildItem -Recurse "D:\b","app\src-tauri\target" -Include *-setup.exe -ErrorAction SilentlyContinue |
             Select-Object FullName, Length | Format-Table -Auto
+      - name: Verify the installer runtime
+        shell: bash
+        run: ./scripts/verify-windows-runtime.sh D:/b/release/bundle/nsis/Wisp_*-setup.exe --require-vulkan
+      - name: Smoke-test the packaged app
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem 'D:\b\release\bundle\nsis\Wisp_*-setup.exe' | Select-Object -First 1
+          ./scripts/smoke-windows-installer.ps1 -Installer $installer.FullName
       # Upload the installer so it can be downloaded and tested on real Windows hardware (GPU + non-GPU).
       - name: Upload the Windows GPU installer
         if: always()
