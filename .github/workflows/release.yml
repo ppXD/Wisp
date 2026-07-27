@@ -109,6 +109,12 @@ jobs:
         working-directory: app
         run: npm ci
 
+      - name: Verify macOS entitlement config
+        if: runner.os == 'macOS'
+        run: |
+          test "$(plutil -extract 'com\.apple\.security\.device\.audio-input' raw app/src-tauri/Entitlements.plist)" = "true"
+          test "$(plutil -extract 'com\.apple\.security\.cs\.disable-library-validation' raw app/src-tauri/Entitlements.plist)" = "true"
+
       # Stamp the version from the tag into the manifests so installer FILENAMES and the embedded
       # version (macOS About box, Windows MSI ProductVersion) match the release. The repo's checked-in
       # 0.1.0 stays as the working version; the tag is the source of truth at release time.
@@ -145,3 +151,7 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+      - name: Verify bundled macOS entitlements
+        if: runner.os == 'macOS'
+        run: ./scripts/verify-macos-entitlements.sh app/src-tauri/target/release/bundle/dmg/Wisp_*.dmg

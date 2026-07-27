@@ -125,6 +125,10 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: Verify macOS entitlement config
+        run: |
+          test "$(plutil -extract 'com\.apple\.security\.device\.audio-input' raw app/src-tauri/Entitlements.plist)" = "true"
+          test "$(plutil -extract 'com\.apple\.security\.cs\.disable-library-validation' raw app/src-tauri/Entitlements.plist)" = "true"
       # Build sherpa in RELEASE so its prebuilt dylibs land in target/release — the exact path
       # tauri.conf.json's `bundle.macOS.frameworks` points at, which tauri_build validates at compile
       # time. The app itself still builds in debug (fast); only the dylib *location* needs release.
