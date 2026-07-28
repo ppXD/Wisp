@@ -3,7 +3,10 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const manifestPath = resolve(root, "app/src-tauri/msvc-runtime-dlls.txt");
+const manifestPath = resolve(
+  root,
+  "app/src-tauri/msvc-runtime-required.txt",
+);
 const configPath = resolve(root, "app/src-tauri/tauri.windows.conf.json");
 
 const runtimeNames = readFileSync(manifestPath, "utf8")
@@ -20,7 +23,7 @@ if (duplicate) {
 
 const config = JSON.parse(readFileSync(configPath, "utf8"));
 const resources = config.bundle?.resources ?? {};
-const configuredRuntimeNames = Object.entries(resources)
+const explicitRuntimeNames = Object.entries(resources)
   .filter(
     ([source, target]) =>
       source.startsWith("windows-runtime/") &&
@@ -29,18 +32,17 @@ const configuredRuntimeNames = Object.entries(resources)
   .map(([, target]) => target)
   .sort();
 
-for (const name of runtimeNames) {
-  const source = `windows-runtime/${name}`;
-  if (resources[source] !== name) {
-    throw new Error(`missing Windows bundle mapping: "${source}": "${name}"`);
-  }
+const runtimeGlob = "windows-runtime/msvc/*.dll";
+if (resources[runtimeGlob] !== "") {
+  throw new Error(`missing Windows bundle glob mapping: "${runtimeGlob}": ""`);
 }
 
-const expected = [...runtimeNames].sort();
-if (JSON.stringify(configuredRuntimeNames) !== JSON.stringify(expected)) {
+if (explicitRuntimeNames.length > 0) {
   throw new Error(
-    `MSVC runtime config drift: expected ${expected.join(", ")}, got ${configuredRuntimeNames.join(", ")}`,
+    `MSVC runtime config must use the toolset-neutral glob, not explicit files: ${explicitRuntimeNames.join(", ")}`,
   );
 }
 
-console.log(`Verified ${runtimeNames.length} MSVC runtime bundle mappings`);
+console.log(
+  `Verified wildcard MSVC runtime bundling and ${runtimeNames.length} required ABI files`,
+);

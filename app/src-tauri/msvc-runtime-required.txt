@@ -1,0 +1,6 @@
+# Minimum app-local MSVC ABI required at startup, with the smallest plausible release size in bytes.
+# build.rs discovers and stages every DLL that the current Microsoft.VC*.CRT toolset actually ships.
+msvcp140.dll:100000
+msvcp140_1.dll:10000
+vcruntime140.dll:50000
+vcruntime140_1.dll:10000

@@ -48,8 +48,11 @@ files=(
 # load-bearing: relying on an older machine-wide VC++ runtime can crash in C++ static
 # initialization before Tauri/WebView2 starts. The same manifest drives build.rs.
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-msvc_manifest="$script_dir/../app/src-tauri/msvc-runtime-dlls.txt"
+msvc_manifest="$script_dir/../app/src-tauri/msvc-runtime-required.txt"
 while IFS= read -r expected; do
+  # Git may materialize this manifest with CRLF on Windows. Strip the carriage return before using
+  # the minimum size in Bash arithmetic.
+  expected=${expected%$'\r'}
   [[ -z "$expected" || "$expected" == \#* ]] && continue
   files+=("$expected")
 done < "$msvc_manifest"
@@ -72,6 +75,12 @@ for expected in "${files[@]}"; do
   name=${expected%%:*}
   minimum=${expected##*:}
   file="$runtime_dir/$name"
+  # build.rs keeps the discovered MSVC files in a subdirectory so its stale-file cleanup cannot
+  # remove sherpa DLLs. Tauri flattens that resource directory into the installer root, so accept
+  # both the pre-package staging layout and the extracted/installed package layout.
+  if [[ ! -f "$file" && -f "$runtime_dir/msvc/$name" ]]; then
+    file="$runtime_dir/msvc/$name"
+  fi
   if [[ ! -f "$file" ]]; then
     echo "Missing Windows package file: $name" >&2
     exit 1

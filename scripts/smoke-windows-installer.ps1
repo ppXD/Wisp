@@ -17,9 +17,11 @@ $previousSmokeTest = $env:WISP_SMOKE_TEST
 try {
     # Exercise the actual NSIS install path. Extracting the archive directly can miss install-time
     # placement/renaming mistakes and does not reproduce the way users launch Wisp.
+    # NSIS requires /D=<path> to be the final argument and does not accept quotes around it. The
+    # generated smoke path contains no spaces, so pass the switch verbatim.
     $installerProcess = Start-Process `
         -FilePath $Installer `
-        -ArgumentList @("/S", "/D=`"$installDirectory`"") `
+        -ArgumentList @("/S", "/D=$installDirectory") `
         -PassThru `
         -Wait `
         -WindowStyle Hidden
@@ -51,20 +53,32 @@ try {
         throw "Packaged Wisp.exe did not render its frontend within 30 seconds"
     }
 
-    # Do not let a current GitHub runner hide a missing redistributable. The process must use the
-    # app-local MSVC runtime that was built alongside whisper.cpp, not System32's possibly older copy.
-    $msvcp = $process.Modules |
-        Where-Object { $_.ModuleName -ieq "msvcp140.dll" } |
-        Select-Object -First 1
-    $expectedMsvcp = Join-Path $installDirectory "msvcp140.dll"
-    if ($null -eq $msvcp) {
+    # Do not let a current GitHub runner hide a missing redistributable. Every VC++ runtime module
+    # that is bundled for the current toolset and loaded at startup must come from the app
+    # directory. Match against the discovered package set instead of a broad prefix: Windows itself
+    # supplies msvcp_win.dll as part of the UCRT, and it must remain machine-wide.
+    $bundledRuntimeNames = @{}
+    Get-ChildItem -LiteralPath $installDirectory -File -Filter "*.dll" |
+        Where-Object {
+            $_.Name -match "^(concrt|msvcp|vcamp|vccorlib|vcomp|vcruntime).*\.dll$"
+        } |
+        ForEach-Object {
+            $bundledRuntimeNames[$_.Name] = $true
+        }
+    $runtimeModules = @($process.Modules | Where-Object {
+        $bundledRuntimeNames.ContainsKey($_.ModuleName)
+    })
+    if (-not ($runtimeModules | Where-Object { $_.ModuleName -ieq "msvcp140.dll" })) {
         throw "Packaged Wisp.exe did not load msvcp140.dll"
     }
-    if (-not [System.IO.Path]::GetFullPath($msvcp.FileName).Equals(
-        [System.IO.Path]::GetFullPath($expectedMsvcp),
-        [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw "Packaged Wisp.exe loaded the machine-wide VC++ runtime: $($msvcp.FileName)"
+    foreach ($module in $runtimeModules) {
+        $expected = Join-Path $installDirectory $module.ModuleName
+        if (-not [System.IO.Path]::GetFullPath($module.FileName).Equals(
+            [System.IO.Path]::GetFullPath($expected),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Packaged Wisp.exe loaded a machine-wide VC++ runtime: $($module.FileName)"
+        }
     }
 
     if (-not $process.CloseMainWindow()) {
