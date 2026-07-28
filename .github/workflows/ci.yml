@@ -33,6 +33,11 @@ jobs:
       # source (no native deps), so it runs cleanly on Linux even though the app targets macOS/Windows.
       - name: rustfmt (app crate)
         run: cargo fmt --manifest-path app/src-tauri/Cargo.toml -- --check
+      # Exercise the exact dependency-free module used by build.rs with VC143/VC145-shaped fixtures.
+      - name: Test Windows runtime staging
+        run: |
+          rustc --test app/src-tauri/build_support/windows_runtime.rs -o /tmp/windows-runtime-tests
+          /tmp/windows-runtime-tests
       - name: clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 

@@ -48,7 +48,7 @@ files=(
 # load-bearing: relying on an older machine-wide VC++ runtime can crash in C++ static
 # initialization before Tauri/WebView2 starts. The same manifest drives build.rs.
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-msvc_manifest="$script_dir/../app/src-tauri/msvc-runtime-dlls.txt"
+msvc_manifest="$script_dir/../app/src-tauri/msvc-runtime-required.txt"
 while IFS= read -r expected; do
   [[ -z "$expected" || "$expected" == \#* ]] && continue
   files+=("$expected")

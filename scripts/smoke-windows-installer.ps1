@@ -51,20 +51,23 @@ try {
         throw "Packaged Wisp.exe did not render its frontend within 30 seconds"
     }
 
-    # Do not let a current GitHub runner hide a missing redistributable. The process must use the
-    # app-local MSVC runtime that was built alongside whisper.cpp, not System32's possibly older copy.
-    $msvcp = $process.Modules |
-        Where-Object { $_.ModuleName -ieq "msvcp140.dll" } |
-        Select-Object -First 1
-    $expectedMsvcp = Join-Path $installDirectory "msvcp140.dll"
-    if ($null -eq $msvcp) {
+    # Do not let a current GitHub runner hide a missing redistributable. Every VC++ runtime module
+    # loaded at startup must come from the app directory, regardless of the current MSVC toolset's
+    # exact DLL set.
+    $runtimeModules = @($process.Modules | Where-Object {
+        $_.ModuleName -match "^(concrt|msvcp|vcamp|vccorlib|vcomp|vcruntime).*\.dll$"
+    })
+    if (-not ($runtimeModules | Where-Object { $_.ModuleName -ieq "msvcp140.dll" })) {
         throw "Packaged Wisp.exe did not load msvcp140.dll"
     }
-    if (-not [System.IO.Path]::GetFullPath($msvcp.FileName).Equals(
-        [System.IO.Path]::GetFullPath($expectedMsvcp),
-        [System.StringComparison]::OrdinalIgnoreCase
-    )) {
-        throw "Packaged Wisp.exe loaded the machine-wide VC++ runtime: $($msvcp.FileName)"
+    foreach ($module in $runtimeModules) {
+        $expected = Join-Path $installDirectory $module.ModuleName
+        if (-not [System.IO.Path]::GetFullPath($module.FileName).Equals(
+            [System.IO.Path]::GetFullPath($expected),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw "Packaged Wisp.exe loaded a machine-wide VC++ runtime: $($module.FileName)"
+        }
     }
 
     if (-not $process.CloseMainWindow()) {

@@ -1,3 +1,7 @@
+#[cfg(target_os = "windows")]
+#[path = "build_support/windows_runtime.rs"]
+mod windows_runtime;
+
 fn main() {
     #[cfg(target_os = "macos")]
     {
@@ -46,7 +50,8 @@ fn stage_windows_runtime_libs() {
     for dll in SHERPA_DLLS {
         let src = target_dir.join(dll);
         let dst = staged.join(dll);
-        copy_if_changed(&src, &dst);
+        windows_runtime::copy_if_changed(&src, &dst)
+            .unwrap_or_else(|e| panic!("stage {}: {e}", src.display()));
     }
 
     stage_msvc_runtime(&staged);
@@ -59,7 +64,7 @@ fn stage_windows_runtime_libs() {
 #[cfg(target_os = "windows")]
 fn stage_msvc_runtime(staged: &std::path::Path) {
     println!("cargo:rerun-if-env-changed=VCToolsRedistDir");
-    println!("cargo:rerun-if-changed=msvc-runtime-dlls.txt");
+    println!("cargo:rerun-if-changed=msvc-runtime-required.txt");
     let source = msvc_runtime_dir().unwrap_or_else(|| {
         panic!(
             "could not find the x64 MSVC redistributable directory; run Cargo from an MSVC \
@@ -67,18 +72,17 @@ fn stage_msvc_runtime(staged: &std::path::Path) {
         )
     });
 
-    for entry in include_str!("msvc-runtime-dlls.txt").lines() {
-        let entry = entry.trim();
-        if entry.is_empty() || entry.starts_with('#') {
-            continue;
-        }
-        let dll = entry
-            .split_once(':')
-            .map(|(name, _)| name)
-            .unwrap_or(entry);
-        let src = source.join(dll);
-        println!("cargo:rerun-if-changed={}", src.display());
-        copy_if_changed(&src, &staged.join(dll));
+    let required: Vec<_> = include_str!("msvc-runtime-required.txt")
+        .lines()
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty() && !entry.starts_with('#'))
+        .map(|entry| entry.split_once(':').map(|(name, _)| name).unwrap_or(entry))
+        .collect();
+    let staged = staged.join("msvc");
+    let runtime_dlls = windows_runtime::sync_runtime_dlls(&source, &staged, &required)
+        .unwrap_or_else(|e| panic!("stage MSVC runtime from {}: {e}", source.display()));
+    for dll in runtime_dlls {
+        println!("cargo:rerun-if-changed={}", dll.display());
     }
 }
 
@@ -88,7 +92,7 @@ fn stage_msvc_runtime(staged: &std::path::Path) {
 fn msvc_runtime_dir() -> Option<std::path::PathBuf> {
     std::env::var_os("VCToolsRedistDir")
         .map(std::path::PathBuf::from)
-        .and_then(|root| find_crt_dir(&root))
+        .and_then(|root| windows_runtime::find_crt_dir(&root))
         .or_else(msvc_runtime_dir_from_vswhere)
 }
 
@@ -122,43 +126,7 @@ fn msvc_runtime_dir_from_vswhere() -> Option<std::path::PathBuf> {
         .join("VC")
         .join("Redist")
         .join("MSVC");
-    newest_crt_dir(&redist_root)
-}
-
-#[cfg(target_os = "windows")]
-fn newest_crt_dir(redist_root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let mut versions: Vec<_> = std::fs::read_dir(redist_root)
-        .ok()?
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
-        .map(|entry| entry.path())
-        .collect();
-    versions.sort_by(|a, b| b.file_name().cmp(&a.file_name()));
-    versions.into_iter().find_map(|root| find_crt_dir(&root))
-}
-
-#[cfg(target_os = "windows")]
-fn find_crt_dir(redist_root: &std::path::Path) -> Option<std::path::PathBuf> {
-    let x64 = redist_root.join("x64");
-    std::fs::read_dir(x64)
-        .ok()?
-        .filter_map(Result::ok)
-        .find(|entry| {
-            entry.file_type().is_ok_and(|kind| kind.is_dir())
-                && entry.file_name().to_string_lossy().starts_with("Microsoft.VC")
-                && entry.file_name().to_string_lossy().ends_with(".CRT")
-                && entry.path().join("msvcp140.dll").is_file()
-        })
-        .map(|entry| entry.path())
-}
-
-#[cfg(target_os = "windows")]
-fn copy_if_changed(src: &std::path::Path, dst: &std::path::Path) {
-    let source = std::fs::read(src).unwrap_or_else(|e| panic!("read {}: {e}", src.display()));
-    let current = std::fs::read(dst).ok();
-    if current.as_deref() != Some(source.as_slice()) {
-        std::fs::write(dst, source).unwrap_or_else(|e| panic!("stage {}: {e}", src.display()));
-    }
+    windows_runtime::newest_crt_dir(&redist_root)
 }
 
 /// The cargo `target/<profile>` dir, found by walking up from `OUT_DIR` — the same place
