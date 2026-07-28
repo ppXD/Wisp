@@ -14,11 +14,13 @@ on:
       - ".github/workflows/windows-vulkan.yml"
       - "app/src-tauri/build.rs"
       - "app/src-tauri/Cargo.toml"
+      - "app/src-tauri/msvc-runtime-dlls.txt"
       - "app/src-tauri/tauri*.json"
       - "crates/wisp-engine-whisper-cpp/**"
       - "scripts/smoke-windows-installer.ps1"
       - "scripts/stage-vulkan-loader.sh"
       - "scripts/verify-windows-runtime.sh"
+      - "scripts/verify-windows-runtime-config.mjs"
 
 env:
   CARGO_TERM_COLOR: always
@@ -57,6 +59,8 @@ jobs:
       - name: Install the frontend deps
         working-directory: app
         run: npm ci
+      - name: Verify Windows runtime config
+        run: node scripts/verify-windows-runtime-config.mjs
       # `tauri build` runs the frontend build (beforeBuildCommand) + the cargo release build + the NSIS
       # bundler in one step, producing the real Windows GPU installer: default features (sherpa on CPU)
       # plus whisper-vulkan (whisper on the GPU, CPU fallback). This also proves the exact release

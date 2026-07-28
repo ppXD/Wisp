@@ -27,6 +27,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Set up the MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -37,8 +41,8 @@ jobs:
           npm run build
       # Build twice: the first pass compiles the engine + emits its DLLs (and may trip the same
       # build.rs DLL-staging race the prebuilt CPU job pre-stages around); the second pass, with the
-      # engine now cached, completes the app once the DLLs are present. CMake + MSVC are preinstalled
-      # on windows-latest, so no extra toolchain is needed.
+      # engine now cached, completes the app once the DLLs are present. The MSVC setup above also
+      # exposes VCToolsRedistDir so build.rs stages the matching app-local VC++ runtime.
       - name: Build the app with DirectML from source (~2h)
         shell: pwsh
         run: |

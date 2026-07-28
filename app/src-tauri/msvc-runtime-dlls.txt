@@ -1,0 +1,13 @@
+# App-local x64 Microsoft.VC143.CRT files, with the smallest plausible release size in bytes.
+concrt140.dll:100000
+msvcp140.dll:100000
+msvcp140_1.dll:10000
+msvcp140_2.dll:100000
+msvcp140_atomic_wait.dll:10000
+msvcp140_codecvt_ids.dll:10000
+vcamp140.dll:100000
+vccorlib140.dll:100000
+vcomp140.dll:100000
+vcruntime140.dll:50000
+vcruntime140_1.dll:10000
+vcruntime140_threads.dll:10000
