@@ -54,6 +54,10 @@ tauri-plugin-dialog = "2"
 tauri-plugin-global-shortcut = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Read and validate a user-selected ONNX graph plus its sherpa-onnx `model_type` metadata before
+# importing it. This exact version is already in the graph through wisp-embed, so it reuses the same
+# ONNX Runtime rather than adding a second native runtime.
+ort = { version = "=2.0.0-rc.9", features = ["download-binaries"] }
 
 wisp-core = { path = "../../crates/wisp-core" }
 # Insert dictated text into the frontmost app (clipboard + synthesized ⌘V). Stub off macOS.

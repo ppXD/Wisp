@@ -391,8 +391,8 @@
     await pickModel(id);
   }
 
-  // Import a user-supplied model file: the backend validates + copies it, then it appears in the
-  // picker and becomes the current mode's pick. Today it accepts a Whisper GGML/GGUF .bin/.gguf.
+  // Import a user-supplied model: the backend validates + copies it, auto-discovers tokens and
+  // companion graphs for sherpa ONNX bundles, then it appears in the picker as the current pick.
   async function importCustom() {
     pickerOpen = false;
     error = "";
@@ -400,7 +400,11 @@
       const path = await open({
         multiple: false,
         directory: false,
-        filters: [{ name: "Whisper model", extensions: ["bin", "gguf"] }],
+        filters: [
+          { name: "Speech model", extensions: ["onnx", "bin", "gguf"] },
+          { name: "ONNX speech model", extensions: ["onnx"] },
+          { name: "Whisper GGML/GGUF", extensions: ["bin", "gguf"] },
+        ],
       });
       if (typeof path !== "string") return;
       const info = await invoke<ModelInfo>("import_custom_model", { path });
@@ -1741,13 +1745,13 @@
               </div>
             </div>
             {#if pickerTab === "local"}
-              <!-- Import a user model file (Whisper GGML/GGUF) — pinned across the whole dropdown. -->
+              <!-- Import an ONNX model bundle or Whisper GGML/GGUF — pinned across the dropdown. -->
               <button class="picker-custom" onclick={importCustom}>
                 <span class="picker-custom-main">
                   <span class="picker-custom-icon" aria-hidden="true"></span>
                   <span class="picker-custom-label">{i18n.t.picker.importCustom}</span>
                 </span>
-                <span class="picker-custom-hint">.bin / .gguf · Whisper GGML/GGUF</span>
+                <span class="picker-custom-hint">.onnx / .bin / .gguf · local speech models</span>
               </button>
             {:else}
               <!-- Cloud analogue of Import — jump to the AI-models settings (keys, endpoints, models). -->
