@@ -18,9 +18,9 @@ pub mod store;
 pub use catalog::{builtin_catalog, denoise_models, diarization_models};
 pub use cloud::cloud_catalog;
 pub use coreml::{coreml_asset, CoremlAsset};
-pub use download::FileDownloader;
 #[cfg(feature = "http")]
 pub use download::HttpDownloader;
+pub use download::{DownloadConfig, DownloadSource, FileDownloader, ProxyMode, DEFAULT_HF_MIRROR};
 pub use machine::{
     family_runnable, model_fit, parse_meminfo_total_bytes, recommended_accurate_model,
     recommended_default_model, Accelerator, GpuTier, MachineProfile, ModelFit,

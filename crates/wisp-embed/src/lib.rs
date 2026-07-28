@@ -9,6 +9,7 @@
 use std::path::{Path, PathBuf};
 
 use wisp_library::{LibraryError, Result};
+use wisp_models::{FileDownloader, HttpDownloader};
 
 mod cloud;
 pub use cloud::{cloud_catalog_model, CloudCatalogModel, CloudEmbedder, CLOUD_CATALOG};
@@ -240,6 +241,16 @@ pub fn catalog_model(id: &str) -> Option<&'static CatalogModel> {
 /// interrupted download never leaves a half-written file behind; already-present files are skipped,
 /// making a re-run resume. Callers observe progress by watching `dir` grow.
 pub fn download_model(model: &CatalogModel, dir: &Path) -> Result<()> {
+    download_model_with(model, dir, &HttpDownloader::default())
+}
+
+/// Downloads with Wisp's shared regional downloader, so the app can apply its live mirror/proxy
+/// settings to embedding models as well as transcription models.
+pub fn download_model_with(
+    model: &CatalogModel,
+    dir: &Path,
+    downloader: &dyn FileDownloader,
+) -> Result<()> {
     for file in model.files {
         let dest = dir.join(file);
         if dest.exists() {
@@ -251,47 +262,22 @@ pub fn download_model(model: &CatalogModel, dir: &Path) -> Result<()> {
         }
 
         let url = format!("https://huggingface.co/{}/resolve/main/{file}", model.repo);
-        fetch_atomic(&url, &dest)?;
+        fetch_atomic(&url, &dest, downloader)?;
     }
     Ok(())
 }
 
 /// Streams `url` into `dest` via a sibling `*.part`, renamed into place only after the whole body is
-/// written; a failed transfer removes the `*.part` so it never lingers.
-fn fetch_atomic(url: &str, dest: &Path) -> Result<()> {
+/// written. A failed transfer retains only the non-final `*.part`, allowing the next attempt to
+/// continue with an HTTP Range request.
+fn fetch_atomic(url: &str, dest: &Path, downloader: &dyn FileDownloader) -> Result<()> {
     let mut part = dest.as_os_str().to_owned();
     part.push(".part");
     let part = PathBuf::from(part);
 
-    let streamed = (|| -> Result<()> {
-        let resp = ureq::get(url)
-            .call()
-            .map_err(|e| LibraryError::Embed(format!("download {url}: {e}")))?;
-
-        // Hold the transfer to the declared length. Without this, a connection dropped mid-body on a
-        // length-less (close-delimited) response reads as a clean EOF, and the truncated file gets
-        // renamed into place as "complete" — then it fails to load forever, since the present (short)
-        // file makes the download skip it on every retry.
-        let expected: Option<u64> = resp.header("Content-Length").and_then(|h| h.parse().ok());
-
-        let mut reader = resp.into_reader();
-        let mut out = std::fs::File::create(&part).map_err(io_err)?;
-        let written = std::io::copy(&mut reader, &mut out).map_err(io_err)?;
-
-        if let Some(total) = expected {
-            if written != total {
-                return Err(LibraryError::Embed(format!(
-                    "download {url}: truncated ({written} of {total} bytes)"
-                )));
-            }
-        }
-        Ok(())
-    })();
-
-    if let Err(e) = streamed {
-        let _ = std::fs::remove_file(&part);
-        return Err(e);
-    }
+    downloader
+        .download(url, &part)
+        .map_err(|error| LibraryError::Embed(error.to_string()))?;
 
     std::fs::rename(&part, dest).map_err(io_err)
 }
@@ -303,6 +289,19 @@ fn io_err(e: std::io::Error) -> LibraryError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use wisp_core::error::Result as ModelResult;
+    use wisp_models::FileDownloader;
+
+    struct RecordingDownloader(Arc<Mutex<Vec<String>>>);
+
+    impl FileDownloader for RecordingDownloader {
+        fn download(&self, url: &str, dest: &Path) -> ModelResult<()> {
+            self.0.lock().unwrap().push(url.to_owned());
+            std::fs::write(dest, url)?;
+            Ok(())
+        }
+    }
 
     #[test]
     fn catalog_ids_are_unique_and_findable() {
@@ -312,6 +311,20 @@ mod tests {
             assert_eq!(catalog_model(m.id).unwrap().id, m.id);
         }
         assert!(catalog_model("nope").is_none());
+    }
+
+    #[test]
+    fn catalog_download_can_use_the_shared_regional_downloader() {
+        let temp = tempfile::tempdir().unwrap();
+        let calls = Arc::new(Mutex::new(Vec::new()));
+        let downloader = RecordingDownloader(Arc::clone(&calls));
+
+        download_model_with(&CATALOG[0], temp.path(), &downloader).unwrap();
+
+        assert_eq!(calls.lock().unwrap().len(), CATALOG[0].files.len());
+        for file in CATALOG[0].files {
+            assert!(temp.path().join(file).is_file(), "{file}");
+        }
     }
 
     #[test]

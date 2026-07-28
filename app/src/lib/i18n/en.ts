@@ -275,6 +275,25 @@ export const en = {
   settings: {
     aiModels: "AI models",
     search: "Notes search",
+    downloads: "Model downloads",
+    downloadsIntro:
+      "Reliable downloads for every region. Automatic mode fails over between Hugging Face and your mirror; interrupted files resume instead of restarting.",
+    downloadSource: "Source",
+    downloadSourceAuto: "Automatic · fail over",
+    downloadSourceOfficial: "Hugging Face only",
+    downloadSourceMirror: "Mirror first",
+    downloadMirror: "Hugging Face mirror",
+    downloadMirrorHint:
+      "Used for Hugging Face files only. The default is a third-party public mirror for mainland China; use your organisation's HTTPS mirror when required.",
+    downloadProxy: "Proxy",
+    downloadProxySystem: "Environment variables",
+    downloadProxyDirect: "Direct connection",
+    downloadProxyCustom: "Custom proxy",
+    downloadProxyUrl: "Proxy URL",
+    downloadProxyHint: "Supports HTTP, SOCKS4, SOCKS4A, and SOCKS5, including authenticated URLs.",
+    downloadSettingsSave: "Save download settings",
+    downloadSettingsSaving: "Saving…",
+    downloadSettingsSaved: "Saved · applies to the next request",
     searchIntro:
       "How the Library searches your saved notes. Semantic and Hybrid understand meaning (not just exact words) — they need a local embedding model, downloaded once and run fully on-device.",
     searchMode: "Search mode",

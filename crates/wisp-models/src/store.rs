@@ -18,8 +18,8 @@ const COMPLETE_MARKER: &str = ".wisp-ok";
 /// file, at least its size).
 ///
 /// Downloads are atomic: each file lands in a `*.part` temporary, is verified, and only then
-/// renamed into place — and a failed transfer removes its `*.part`, so an interrupted run never
-/// leaves a partial or corrupt file that looks valid.
+/// renamed into place. Interrupted transfers keep that non-final `*.part` so the HTTP downloader
+/// can resume it on retry; a checksum/size failure still removes the corrupt partial.
 pub struct FsModelStore {
     root: PathBuf,
     catalog: Vec<ModelDescriptor>,
@@ -102,13 +102,8 @@ impl FsModelStore {
         }
 
         let part = dir.join(format!("{}.part", file.name));
-        if let Err(e) = self
-            .downloader
-            .download_with_progress(&file.url, &part, on_bytes)
-        {
-            let _ = fs::remove_file(&part); // don't leave a partial transfer behind
-            return Err(e);
-        }
+        self.downloader
+            .download_with_progress(&file.url, &part, on_bytes)?;
 
         if let Err(e) = self.verify(&part, file) {
             let _ = fs::remove_file(&part);
@@ -181,15 +176,10 @@ impl FsModelStore {
         }
 
         let zip_part = dir.join(format!("{}.zip.part", asset.dir_name));
-        if let Err(e) =
-            self.downloader
-                .download_with_progress(&asset.url, &zip_part, &mut |bytes| {
-                    on_progress(bytes.min(total), total);
-                })
-        {
-            let _ = fs::remove_file(&zip_part);
-            return Err(e);
-        }
+        self.downloader
+            .download_with_progress(&asset.url, &zip_part, &mut |bytes| {
+                on_progress(bytes.min(total), total);
+            })?;
 
         if let Err(e) = unzip_into(&zip_part, &dir) {
             let _ = fs::remove_file(&zip_part);
@@ -462,7 +452,7 @@ mod tests {
     }
 
     #[test]
-    fn download_error_removes_the_part_file() {
+    fn download_error_preserves_the_part_file_for_resume() {
         let desc = single_file_descriptor("e", "https://example/e.bin", "e.bin", b"whatever");
         let root = tempfile::tempdir().unwrap();
         let store = FsModelStore::new(root.path(), vec![desc], Box::new(PartialThenError));
@@ -471,10 +461,7 @@ mod tests {
         assert!(matches!(err, WispError::Model(_)));
 
         let dir = root.path().join("e");
-        assert!(
-            !dir.join("e.bin.part").exists(),
-            "a failed download must not leave its .part behind"
-        );
+        assert_eq!(fs::read(dir.join("e.bin.part")).unwrap(), b"partial");
         assert!(!dir.join(COMPLETE_MARKER).exists());
     }
 

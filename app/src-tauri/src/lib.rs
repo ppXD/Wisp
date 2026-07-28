@@ -50,7 +50,8 @@ use wisp_loopback::WasapiLoopbackSource;
 use wisp_models::{
     builtin_catalog, cloud_catalog, coreml_asset, denoise_models, diarization_models,
     family_runnable, model_fit, recommended_accurate_model, recommended_default_model, Accelerator,
-    FsModelStore, GpuTier, HttpDownloader, MachineProfile, ModelFit,
+    DownloadConfig, DownloadSource, FsModelStore, GpuTier, HttpDownloader, MachineProfile,
+    ModelFit, ProxyMode,
 };
 use wisp_pipeline::{
     remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, LiveStream,
@@ -113,6 +114,10 @@ const MIC_VAD_THRESHOLD: f32 = 0.012;
 /// Shared application state.
 struct AppState {
     store: Arc<FsModelStore>,
+    /// Shared by every local-model path (ASR/support/Core ML/embeddings), and live-updated from
+    /// Settings without rebuilding the model store.
+    downloader: HttpDownloader,
+    download_settings_path: PathBuf,
     sessions: Mutex<Vec<Session>>,
     /// The push-to-talk dictation session, while the hotkey is held; `None` otherwise.
     dictation: Mutex<Option<dictation::Dictation>>,
@@ -235,6 +240,104 @@ struct DownloadProgressDto {
     id: String,
     downloaded: u64,
     total: u64,
+}
+
+/// User-facing regional download settings persisted in app data. Runtime-only retry/timeouts stay
+/// in [`DownloadConfig`] so the public settings surface remains small and stable.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadSettingsDto {
+    source: String,
+    mirror_url: String,
+    proxy_mode: String,
+    proxy_url: String,
+}
+
+impl Default for DownloadSettingsDto {
+    fn default() -> Self {
+        Self::from_config(&DownloadConfig::default())
+    }
+}
+
+impl DownloadSettingsDto {
+    fn from_config(config: &DownloadConfig) -> Self {
+        Self {
+            source: match config.source {
+                DownloadSource::Auto => "auto",
+                DownloadSource::Official => "official",
+                DownloadSource::MirrorFirst => "mirror",
+            }
+            .to_owned(),
+            mirror_url: config.mirror_url.clone(),
+            proxy_mode: match config.proxy_mode {
+                ProxyMode::System => "system",
+                ProxyMode::Direct => "direct",
+                ProxyMode::Custom => "custom",
+            }
+            .to_owned(),
+            proxy_url: config.proxy_url.clone(),
+        }
+    }
+
+    fn to_config(&self) -> Result<DownloadConfig, String> {
+        let source = match self.source.as_str() {
+            "auto" => DownloadSource::Auto,
+            "official" => DownloadSource::Official,
+            "mirror" => DownloadSource::MirrorFirst,
+            other => return Err(format!("unknown download source: {other}")),
+        };
+        let proxy_mode = match self.proxy_mode.as_str() {
+            "system" => ProxyMode::System,
+            "direct" => ProxyMode::Direct,
+            "custom" => ProxyMode::Custom,
+            other => return Err(format!("unknown proxy mode: {other}")),
+        };
+        let config = DownloadConfig {
+            source,
+            mirror_url: self.mirror_url.trim().trim_end_matches('/').to_owned(),
+            proxy_mode,
+            proxy_url: self.proxy_url.trim().to_owned(),
+            ..DownloadConfig::default()
+        };
+        config.validate().map_err(|error| error.to_string())?;
+        Ok(config)
+    }
+}
+
+fn load_download_settings(path: &Path) -> DownloadSettingsDto {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|json| serde_json::from_str::<DownloadSettingsDto>(&json).ok())
+        .filter(|settings| settings.to_config().is_ok())
+        .unwrap_or_default()
+}
+
+fn save_download_settings(path: &Path, settings: &DownloadSettingsDto) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(settings).map_err(|error| error.to_string())?;
+    fs::write(path, json).map_err(|error| format!("save download settings: {error}"))
+}
+
+#[tauri::command]
+fn get_download_settings(state: State<'_, AppState>) -> Result<DownloadSettingsDto, String> {
+    let config = state
+        .downloader
+        .config()
+        .map_err(|error| error.to_string())?;
+    Ok(DownloadSettingsDto::from_config(&config))
+}
+
+#[tauri::command]
+fn set_download_settings(
+    state: State<'_, AppState>,
+    settings: DownloadSettingsDto,
+) -> Result<DownloadSettingsDto, String> {
+    let config = settings.to_config()?;
+    save_download_settings(&state.download_settings_path, &settings)?;
+    state
+        .downloader
+        .update_config(config)
+        .map_err(|error| error.to_string())?;
+    Ok(settings)
 }
 
 /// Metadata emitted at the start of a file transcription (for the progress bar).
@@ -4700,7 +4803,9 @@ fn spawn_embed_progress_poller(
 /// frontend activates via [`set_embedding_model`] afterward, mirroring the ASR picker.
 #[tauri::command]
 async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), String> {
-    let cache_root = app.state::<AppState>().embed_cache_dir.clone();
+    let state = app.state::<AppState>();
+    let cache_root = state.embed_cache_dir.clone();
+    let downloader = state.downloader.clone();
 
     tauri::async_runtime::spawn_blocking(move || {
         let model = wisp_embed::catalog_model(&id)
@@ -4719,7 +4824,7 @@ async fn download_embedding_model(app: AppHandle, id: String) -> Result<(), Stri
             Arc::clone(&stop),
         );
 
-        let downloaded = wisp_embed::download_model(model, &dir);
+        let downloaded = wisp_embed::download_model_with(model, &dir, &downloader);
         stop.store(true, Ordering::Relaxed);
         let _ = poller.join();
 
@@ -4874,6 +4979,12 @@ pub fn run() {
             let cloud_custom_models = load_cloud_custom_models(&cloud_custom_models_path);
             let cloud_custom_endpoints_path = data_dir.join("cloud-custom-endpoints.json");
             let cloud_custom_endpoints = load_cloud_endpoints(&cloud_custom_endpoints_path);
+            let download_settings_path = data_dir.join("download-settings.json");
+            let download_config = load_download_settings(&download_settings_path)
+                .to_config()
+                .unwrap_or_default();
+            let downloader = HttpDownloader::with_config(download_config)
+                .map_err(|error| std::io::Error::other(error.to_string()))?;
             let custom_models_dir = data_dir.join("custom-models");
             let _ = fs::create_dir_all(&custom_models_dir);
             let custom_models = load_custom_models(&custom_models_dir);
@@ -4883,7 +4994,7 @@ pub fn run() {
             let store = Arc::new(FsModelStore::new(
                 data_dir.join("models"),
                 [asr_catalog.clone(), diarization_models(), denoise_models()].concat(),
-                Box::new(HttpDownloader),
+                Box::new(downloader.clone()),
             ));
 
             // Prefer the last chosen model (if still installed), then the first installed, then the
@@ -4931,6 +5042,8 @@ pub fn run() {
 
             app.manage(AppState {
                 store,
+                downloader,
+                download_settings_path,
                 sessions: Mutex::new(Vec::new()),
                 dictation: Mutex::new(None),
                 dictation_hotkey: Mutex::new(dictation::DEFAULT_DICTATION_HOTKEY.to_owned()),
@@ -5003,6 +5116,8 @@ pub fn run() {
             assist_realtime_params,
             run_llm_task,
             run_assist_stream,
+            get_download_settings,
+            set_download_settings,
             download_model,
             import_custom_model,
             download_coreml,
@@ -5684,5 +5799,40 @@ mod tests {
         assert_eq!(load_custom_models(&dir), models);
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn download_settings_round_trip_and_map_to_runtime_policy() {
+        let path = temp_path("download-settings");
+        let settings = DownloadSettingsDto {
+            source: "mirror".to_owned(),
+            mirror_url: "https://models.example.cn/hf".to_owned(),
+            proxy_mode: "custom".to_owned(),
+            proxy_url: "socks5://127.0.0.1:1080".to_owned(),
+        };
+
+        save_download_settings(&path, &settings).unwrap();
+        assert_eq!(load_download_settings(&path), settings);
+        let config = settings.to_config().unwrap();
+        assert_eq!(config.source, DownloadSource::MirrorFirst);
+        assert_eq!(config.proxy_mode, ProxyMode::Custom);
+        assert_eq!(config.mirror_url, "https://models.example.cn/hf");
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn invalid_download_settings_are_rejected_without_persisting() {
+        let unknown_source = DownloadSettingsDto {
+            source: "nearest-magic".to_owned(),
+            ..DownloadSettingsDto::default()
+        };
+        assert!(unknown_source.to_config().is_err());
+
+        let insecure_mirror = DownloadSettingsDto {
+            mirror_url: "http://mirror.invalid".to_owned(),
+            ..DownloadSettingsDto::default()
+        };
+        assert!(insecure_mirror.to_config().is_err());
     }
 }
