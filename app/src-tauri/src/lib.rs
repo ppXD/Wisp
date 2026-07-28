@@ -309,6 +309,14 @@ struct FileTranscribeOptions {
     params: HashMap<String, serde_json::Value>,
 }
 
+fn model_file_ending(descriptor: &ModelDescriptor, dir: &Path, suffix: &str) -> Option<PathBuf> {
+    descriptor
+        .files
+        .iter()
+        .find(|file| file.name.ends_with(suffix))
+        .map(|file| dir.join(&file.name))
+}
+
 /// Builds the ASR engine for a downloaded model. `language` is a code (`zh`/`yue`/`en`/…) or empty
 /// for auto-detection.
 fn build_engine(
@@ -324,8 +332,10 @@ fn build_engine(
                 .find(|f| f.name.ends_with(".onnx"))
                 .map(|f| f.name.clone())
                 .ok_or_else(|| WispError::Model("model descriptor has no .onnx file".to_owned()))?;
-            let engine =
-                SenseVoiceEngine::new(&dir.join(model_name), &dir.join("tokens.txt"), language)?;
+            let tokens = model_file_ending(descriptor, dir, "tokens.txt").ok_or_else(|| {
+                WispError::Model("sense voice model has no tokens file".to_owned())
+            })?;
+            let engine = SenseVoiceEngine::new(&dir.join(model_name), &tokens, language)?;
             Ok(Box::new(engine))
         }
         ModelFamily::Whisper => {
@@ -363,7 +373,10 @@ fn build_engine(
                 .find(|f| f.name.ends_with(".onnx"))
                 .map(|f| f.name.clone())
                 .ok_or_else(|| WispError::Model("paraformer model has no .onnx file".to_owned()))?;
-            let engine = ParaformerEngine::new(&dir.join(model_name), &dir.join("tokens.txt"))?;
+            let tokens = model_file_ending(descriptor, dir, "tokens.txt").ok_or_else(|| {
+                WispError::Model("paraformer model has no tokens file".to_owned())
+            })?;
+            let engine = ParaformerEngine::new(&dir.join(model_name), &tokens)?;
             Ok(Box::new(engine))
         }
         ModelFamily::Parakeet => {
@@ -380,7 +393,9 @@ fn build_engine(
                 .ok_or_else(|| WispError::Model("parakeet model has no decoder".to_owned()))?;
             let joiner = onnx("joiner")
                 .ok_or_else(|| WispError::Model("parakeet model has no joiner".to_owned()))?;
-            let engine = ParakeetEngine::new(&encoder, &decoder, &joiner, &dir.join("tokens.txt"))?;
+            let tokens = model_file_ending(descriptor, dir, "tokens.txt")
+                .ok_or_else(|| WispError::Model("parakeet model has no tokens file".to_owned()))?;
+            let engine = ParakeetEngine::new(&encoder, &decoder, &joiner, &tokens)?;
             Ok(Box::new(engine))
         }
         other => Err(WispError::Engine(format!(
@@ -2246,13 +2261,16 @@ fn map_reduce_assist(
 }
 
 /// A user-imported model. Its files live under `custom_models_dir/<id>/`; `kind` selects the engine
-/// adapter — today only `"whisper-cpp"` (a GGML/GGUF `.bin`); ONNX kinds slot in here later.
+/// adapter. ONNX registry entries include the complete sherpa bundle, not just the graph the user
+/// clicked, so the recognizer always has its tokens and companion graphs.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct CustomModel {
     id: String,
     name: String,
     kind: String,
     files: Vec<String>,
+    #[serde(default)]
+    size_bytes: u64,
 }
 
 /// Loads the imported-model registry from `dir/registry.json`; an absent/garbage file yields none.
@@ -2279,8 +2297,25 @@ fn save_custom_models(dir: &Path, models: &[CustomModel]) {
 fn custom_family(kind: &str) -> Option<ModelFamily> {
     match kind {
         "whisper-cpp" => Some(ModelFamily::WhisperCpp),
+        "sense-voice-onnx" => Some(ModelFamily::SenseVoice),
+        "whisper-onnx" => Some(ModelFamily::Whisper),
+        "paraformer-onnx" => Some(ModelFamily::Paraformer),
+        "parakeet-onnx" => Some(ModelFamily::Parakeet),
         _ => None,
     }
+}
+
+fn custom_languages(kind: &str) -> Vec<String> {
+    let languages: &[&str] = match kind {
+        "sense-voice-onnx" => &["yue", "zh", "en", "ja", "ko"],
+        "paraformer-onnx" => &["zh", "en"],
+        "parakeet-onnx" => &["en"],
+        _ => &["yue", "zh", "en", "ja"],
+    };
+    languages
+        .iter()
+        .map(|language| (*language).to_owned())
+        .collect()
 }
 
 /// A `ModelDescriptor` for a custom model, so it flows through `build_engine` exactly like a catalog
@@ -2302,11 +2337,12 @@ fn custom_descriptor(cm: &CustomModel) -> Option<ModelDescriptor> {
                 size_bytes: 0,
             })
             .collect(),
-        languages: ["yue", "zh", "en", "ja"]
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-        description: "Imported custom model.".to_owned(),
+        languages: custom_languages(&cm.kind),
+        description: if cm.kind.ends_with("-onnx") {
+            "Imported custom ONNX speech model.".to_owned()
+        } else {
+            "Imported custom model.".to_owned()
+        },
     })
 }
 
@@ -2317,7 +2353,7 @@ fn custom_model_info(cm: &CustomModel, active: Option<&ModelId>) -> Option<Model
     Some(ModelInfoDto {
         id: descriptor.id.0,
         name: descriptor.display_name,
-        size_bytes: 0,
+        size_bytes: cm.size_bytes,
         languages: descriptor.languages,
         description: descriptor.description,
         installed: true,
@@ -2372,6 +2408,310 @@ fn is_ggml(bytes: &[u8]) -> bool {
     matches!(&bytes[..bytes.len().min(4)], b"GGUF" | b"ggml" | b"lmgg")
 }
 
+/// Maps the official sherpa-onnx `model_type` metadata to an engine Wisp already implements.
+/// Arbitrary ONNX graphs are deliberately rejected: a vision/LLM graph with an `.onnx` suffix is
+/// not an ASR model and cannot safely be guessed from its filename.
+fn onnx_custom_kind(model_type: &str) -> Option<&'static str> {
+    let model_type = model_type.trim().to_ascii_lowercase();
+    match model_type.as_str() {
+        "sense_voice" | "sense_voice_ctc" => Some("sense-voice-onnx"),
+        "paraformer" => Some("paraformer-onnx"),
+        "whisper" => Some("whisper-onnx"),
+        "nemo_transducer" => Some("parakeet-onnx"),
+        "encdecrnntbpemodel" => Some("parakeet-onnx"),
+        _ if model_type.starts_with("whisper-") => Some("whisper-onnx"),
+        _ => None,
+    }
+}
+
+/// Opens the graph with the same ONNX Runtime used by Wisp and reads sherpa-onnx's required model
+/// metadata. Creating the session also catches truncated, corrupt, or unsupported ONNX graphs before
+/// anything is registered.
+fn read_onnx_model_type(path: &Path) -> Result<Option<String>, String> {
+    let session = ort::session::Session::builder()
+        .and_then(|builder| builder.with_intra_threads(1))
+        .and_then(|builder| builder.commit_from_file(path))
+        .map_err(|error| format!("cannot load ONNX model: {error}"))?;
+    let metadata = session
+        .metadata()
+        .map_err(|error| format!("cannot read ONNX metadata: {error}"))?;
+    metadata
+        .custom("model_type")
+        .map_err(|error| format!("cannot read ONNX model_type: {error}"))
+}
+
+fn onnx_metadata_probe_paths(path: &Path) -> Vec<PathBuf> {
+    let mut paths = vec![path.to_owned()];
+    if onnx_role(path) != Some("encoder") {
+        let encoder = replace_onnx_role(path, "encoder")
+            .filter(|candidate| candidate.is_file())
+            .or_else(|| find_onnx_role(path, "encoder").ok());
+        if let Some(encoder) = encoder.filter(|encoder| encoder != path) {
+            paths.push(encoder);
+        }
+    }
+    paths
+}
+
+fn read_import_onnx_model_type(path: &Path) -> Result<Option<String>, String> {
+    for probe in onnx_metadata_probe_paths(path) {
+        if let Some(model_type) = read_onnx_model_type(&probe)? {
+            return Ok(Some(model_type));
+        }
+    }
+    Ok(None)
+}
+
+fn is_onnx_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("onnx"))
+}
+
+fn sibling_files(path: &Path) -> Result<Vec<PathBuf>, String> {
+    let dir = path.parent().ok_or("model file has no parent directory")?;
+    let mut files = fs::read_dir(dir)
+        .map_err(|error| format!("cannot inspect model directory: {error}"))?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            entry
+                .file_type()
+                .ok()
+                .filter(|file_type| file_type.is_file())
+                .map(|_| entry.path())
+        })
+        .collect::<Vec<_>>();
+    files.sort();
+    Ok(files)
+}
+
+fn onnx_role(path: &Path) -> Option<&'static str> {
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    ["encoder", "decoder", "joiner"]
+        .into_iter()
+        .find(|role| name.contains(role))
+}
+
+fn replace_onnx_role(path: &Path, role: &str) -> Option<PathBuf> {
+    let file_name = path.file_name()?.to_string_lossy();
+    let lower = file_name.to_ascii_lowercase();
+    let current = onnx_role(path)?;
+    let start = lower.find(current)?;
+    let mut replacement = file_name[..start].to_owned();
+    replacement.push_str(role);
+    replacement.push_str(&file_name[start + current.len()..]);
+    Some(path.with_file_name(replacement))
+}
+
+fn find_onnx_role(path: &Path, role: &str) -> Result<PathBuf, String> {
+    if onnx_role(path) == Some(role) {
+        return Ok(path.to_owned());
+    }
+    if let Some(exact) = replace_onnx_role(path, role).filter(|candidate| candidate.is_file()) {
+        return Ok(exact);
+    }
+
+    let candidates = sibling_files(path)?
+        .into_iter()
+        .filter(|candidate| {
+            is_onnx_file(candidate)
+                && candidate
+                    .file_name()
+                    .is_some_and(|name| name.to_string_lossy().to_ascii_lowercase().contains(role))
+        })
+        .collect::<Vec<_>>();
+    match candidates.as_slice() {
+        [only] => Ok(only.clone()),
+        [] => Err(format!("the ONNX model bundle is missing its {role} graph")),
+        _ => Err(format!(
+            "multiple ONNX {role} graphs were found; select the {role} file for the variant you want"
+        )),
+    }
+}
+
+fn common_prefix_len(left: &str, right: &str) -> usize {
+    left.bytes()
+        .zip(right.bytes())
+        .take_while(|(a, b)| a == b)
+        .count()
+}
+
+fn find_tokens_file(path: &Path) -> Result<PathBuf, String> {
+    let candidates = sibling_files(path)?
+        .into_iter()
+        .filter(|candidate| {
+            candidate.file_name().is_some_and(|name| {
+                let name = name.to_string_lossy().to_ascii_lowercase();
+                name.ends_with(".txt") && name.contains("token")
+            })
+        })
+        .collect::<Vec<_>>();
+    if let [only] = candidates.as_slice() {
+        return Ok(only.clone());
+    }
+    if candidates.is_empty() {
+        return Err(
+            "the ONNX speech model needs its tokens.txt (or *-tokens.txt) in the same folder"
+                .to_owned(),
+        );
+    }
+
+    let selected = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let mut ranked = candidates
+        .into_iter()
+        .map(|candidate| {
+            let name = candidate
+                .file_name()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            (common_prefix_len(&selected, &name), candidate)
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+    if ranked.len() == 1 || ranked[0].0 > ranked[1].0 {
+        Ok(ranked.remove(0).1)
+    } else {
+        Err(
+            "multiple token files were found; keep only the one for the selected ONNX model"
+                .to_owned(),
+        )
+    }
+}
+
+/// Resolves every file required by a supported sherpa-onnx recognizer. The user may click any graph
+/// in a multi-file bundle; matching role names keep int8/fp16/fp32 variants together.
+fn discover_onnx_bundle_files(path: &Path, kind: &str) -> Result<Vec<PathBuf>, String> {
+    if !path.is_file() || !is_onnx_file(path) {
+        return Err("select an existing .onnx model file".to_owned());
+    }
+
+    let mut files = match kind {
+        "sense-voice-onnx" | "paraformer-onnx" => vec![path.to_owned()],
+        "whisper-onnx" => vec![
+            find_onnx_role(path, "encoder")?,
+            find_onnx_role(path, "decoder")?,
+        ],
+        "parakeet-onnx" => vec![
+            find_onnx_role(path, "encoder")?,
+            find_onnx_role(path, "decoder")?,
+            find_onnx_role(path, "joiner")?,
+        ],
+        _ => return Err("unsupported custom ONNX speech model type".to_owned()),
+    };
+    let graphs = files.clone();
+    files.push(find_tokens_file(path)?);
+
+    // Large ONNX exports may keep tensor weights in adjacent .weights/.data files. Match them to the
+    // selected graph stems (including the common `.int8` suffix) so another variant in the same
+    // download directory is not copied accidentally.
+    for candidate in sibling_files(path)? {
+        let extension = candidate
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let candidate_name = candidate
+            .file_name()
+            .map(|name| name.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        let belongs_to_graph = graphs.iter().any(|graph| {
+            let stem = graph
+                .file_stem()
+                .map(|name| name.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            let base = stem
+                .strip_suffix(".int8")
+                .or_else(|| stem.strip_suffix(".fp16"))
+                .or_else(|| stem.strip_suffix(".fp32"))
+                .unwrap_or(&stem);
+            candidate_name.starts_with(&format!("{stem}."))
+                || candidate_name.starts_with(&format!("{base}."))
+        });
+        if matches!(extension.as_str(), "weights" | "data" | "onnx_data")
+            && belongs_to_graph
+            && !files.contains(&candidate)
+        {
+            files.push(candidate);
+        }
+    }
+    Ok(files)
+}
+
+fn custom_model_name(path: &Path, kind: &str) -> String {
+    let stem = path
+        .file_stem()
+        .and_then(|name| name.to_str())
+        .unwrap_or("Custom model");
+    if kind == "whisper-cpp"
+        || ![
+            "model",
+            "model.int8",
+            "encoder",
+            "encoder.int8",
+            "decoder",
+            "joiner",
+        ]
+        .contains(&stem.to_ascii_lowercase().as_str())
+    {
+        return stem.to_owned();
+    }
+    path.parent()
+        .and_then(|dir| dir.file_name())
+        .and_then(|name| name.to_str())
+        .unwrap_or(stem)
+        .to_owned()
+}
+
+fn import_file_set(
+    state: &AppState,
+    source_files: Vec<PathBuf>,
+    name: String,
+    kind: &str,
+) -> Result<ModelInfoDto, String> {
+    let mut models = state
+        .custom_models
+        .lock()
+        .map_err(|_| "state lock poisoned".to_owned())?;
+    let id = unique_custom_id(&name, &models);
+    let dest_dir = state.custom_models_dir.join(&id);
+    fs::create_dir_all(&dest_dir).map_err(|error| format!("cannot create model dir: {error}"))?;
+
+    let copied = source_files
+        .iter()
+        .map(|source| {
+            let file_name = source
+                .file_name()
+                .and_then(|name| name.to_str())
+                .ok_or_else(|| "model file has no valid name".to_owned())?
+                .to_owned();
+            let bytes = fs::copy(source, dest_dir.join(&file_name))
+                .map_err(|error| format!("cannot copy {file_name}: {error}"))?;
+            Ok((file_name, bytes))
+        })
+        .collect::<Result<Vec<_>, String>>();
+    let copied = match copied {
+        Ok(copied) => copied,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&dest_dir);
+            return Err(error);
+        }
+    };
+
+    let cm = CustomModel {
+        id,
+        name,
+        kind: kind.to_owned(),
+        files: copied.iter().map(|(name, _)| name.clone()).collect(),
+        size_bytes: copied.iter().map(|(_, bytes)| bytes).sum(),
+    };
+    models.push(cm.clone());
+    save_custom_models(&state.custom_models_dir, &models);
+    custom_model_info(&cm, None).ok_or_else(|| "could not register the model".to_owned())
+}
+
 /// A filesystem-safe `custom-<slug>` id, suffixed `-2`, `-3`, … on collision.
 fn unique_custom_id(name: &str, existing: &[CustomModel]) -> String {
     let slug: String = name
@@ -2394,62 +2734,60 @@ fn unique_custom_id(name: &str, existing: &[CustomModel]) -> String {
     id
 }
 
-/// Imports the model file the user picked: validates it, copies it into the app's custom-models
-/// directory, registers it, and returns its picker entry. Today it accepts a whisper.cpp GGML/GGUF
-/// `.bin`/`.gguf` (runs on the Metal GPU); ONNX models for the CPU are a later addition.
-#[tauri::command]
-fn import_custom_model(state: State<'_, AppState>, path: String) -> Result<ModelInfoDto, String> {
+/// Imports the model file the user picked: validates it, resolves any companion graphs/tokens, copies
+/// the complete model bundle into the app's custom-models directory, registers it, and returns its
+/// picker entry.
+fn import_custom_model_blocking(state: &AppState, path: String) -> Result<ModelInfoDto, String> {
     let src = PathBuf::from(&path);
     let ext = src
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
-    if ext != "bin" && ext != "gguf" {
-        return Err("Import a Whisper model file (.bin or .gguf, GGML/GGUF format).".to_owned());
+    if ext == "bin" || ext == "gguf" {
+        let mut head = [0u8; 4];
+        {
+            use std::io::Read;
+            let mut file =
+                fs::File::open(&src).map_err(|error| format!("cannot open file: {error}"))?;
+            let _ = file.read(&mut head);
+        }
+        if !is_ggml(&head) {
+            return Err("That file isn't a GGML/GGUF Whisper model.".to_owned());
+        }
+        let name = custom_model_name(&src, "whisper-cpp");
+        return import_file_set(state, vec![src], name, "whisper-cpp");
+    }
+    if ext != "onnx" {
+        return Err(
+            "Import a supported speech model (.onnx, or Whisper GGML/GGUF .bin/.gguf).".to_owned(),
+        );
     }
 
-    let mut head = [0u8; 4];
-    {
-        use std::io::Read;
-        let mut f = fs::File::open(&src).map_err(|e| format!("cannot open file: {e}"))?;
-        let _ = f.read(&mut head);
-    }
-    if !is_ggml(&head) {
-        return Err("That file isn't a GGML/GGUF Whisper model.".to_owned());
-    }
+    let model_type = read_import_onnx_model_type(&src)?.ok_or_else(|| {
+        "This is an ONNX graph, but it has no sherpa-onnx model_type metadata. Wisp supports \
+         SenseVoice, Paraformer, Whisper, and NeMo Parakeet ASR exports."
+            .to_owned()
+    })?;
+    let kind = onnx_custom_kind(&model_type).ok_or_else(|| {
+        format!(
+            "Unsupported ONNX model_type '{model_type}'. Wisp supports SenseVoice, Paraformer, \
+             Whisper, and NeMo Parakeet ASR exports."
+        )
+    })?;
+    let files = discover_onnx_bundle_files(&src, kind)?;
+    let name = custom_model_name(&src, kind);
+    import_file_set(state, files, name, kind)
+}
 
-    let file_name = src
-        .file_name()
-        .and_then(|n| n.to_str())
-        .ok_or("file has no name")?
-        .to_owned();
-    let name = src
-        .file_stem()
-        .and_then(|n| n.to_str())
-        .unwrap_or("Custom model")
-        .to_owned();
-
-    let mut models = state
-        .custom_models
-        .lock()
-        .map_err(|_| "state lock poisoned".to_owned())?;
-    let id = unique_custom_id(&name, &models);
-
-    let dest_dir = state.custom_models_dir.join(&id);
-    fs::create_dir_all(&dest_dir).map_err(|e| format!("cannot create model dir: {e}"))?;
-    fs::copy(&src, dest_dir.join(&file_name)).map_err(|e| format!("cannot copy model: {e}"))?;
-
-    let cm = CustomModel {
-        id,
-        name,
-        kind: "whisper-cpp".to_owned(),
-        files: vec![file_name],
-    };
-    models.push(cm.clone());
-    save_custom_models(&state.custom_models_dir, &models);
-
-    custom_model_info(&cm, None).ok_or_else(|| "could not register the model".to_owned())
+#[tauri::command]
+async fn import_custom_model(app: AppHandle, path: String) -> Result<ModelInfoDto, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let state = app.state::<AppState>();
+        import_custom_model_blocking(&state, path)
+    })
+    .await
+    .map_err(|error| format!("model import worker failed: {error}"))?
 }
 
 #[tauri::command]
@@ -5149,12 +5487,176 @@ mod tests {
     }
 
     #[test]
+    fn onnx_model_metadata_maps_only_supported_asr_families() {
+        assert_eq!(
+            onnx_custom_kind("sense_voice_ctc"),
+            Some("sense-voice-onnx")
+        );
+        assert_eq!(onnx_custom_kind("paraformer"), Some("paraformer-onnx"));
+        assert_eq!(onnx_custom_kind("whisper"), Some("whisper-onnx"));
+        assert_eq!(onnx_custom_kind("whisper-large-v3"), Some("whisper-onnx"));
+        assert_eq!(onnx_custom_kind("nemo_transducer"), Some("parakeet-onnx"));
+        assert_eq!(
+            onnx_custom_kind("EncDecRNNTBPEModel"),
+            Some("parakeet-onnx")
+        );
+        assert_eq!(onnx_custom_kind("resnet50"), None);
+        assert_eq!(onnx_custom_kind(""), None);
+    }
+
+    #[test]
+    fn onnx_metadata_probe_falls_back_to_the_matching_encoder() {
+        let dir = std::env::temp_dir().join(format!("wisp-onnx-probe-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let decoder = dir.join("decoder.int8.onnx");
+        let encoder = dir.join("encoder.int8.onnx");
+        fs::write(&decoder, b"decoder").unwrap();
+        fs::write(&encoder, b"encoder").unwrap();
+
+        assert_eq!(onnx_metadata_probe_paths(&decoder), vec![decoder, encoder]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn onnx_metadata_reader_opens_real_graph_without_guessing_non_asr_models() {
+        let vad = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/silero_vad.onnx");
+        let model_type = read_onnx_model_type(&vad).unwrap().unwrap();
+        assert_eq!(model_type, "silero-vad");
+        assert_eq!(onnx_custom_kind(&model_type), None);
+    }
+
+    /// Optional heavyweight smoke test: point this at an official sherpa-onnx graph to exercise the
+    /// exact import discovery, descriptor, recognizer initialization, and one inference call.
+    #[test]
+    fn onnx_import_runs_real_asr_model_when_fixture_is_provided() {
+        let Ok(path) = std::env::var("WISP_TEST_ONNX_MODEL") else {
+            return;
+        };
+        let path = PathBuf::from(path);
+        let model_type = read_onnx_model_type(&path).unwrap().unwrap();
+        let kind = onnx_custom_kind(&model_type).expect("supported sherpa-onnx ASR model");
+        let files = discover_onnx_bundle_files(&path, kind).unwrap();
+        let model = CustomModel {
+            id: "custom-smoke".to_owned(),
+            name: "ONNX import smoke".to_owned(),
+            kind: kind.to_owned(),
+            files: files
+                .iter()
+                .map(|file| file.file_name().unwrap().to_string_lossy().into_owned())
+                .collect(),
+            size_bytes: files
+                .iter()
+                .map(|file| fs::metadata(file).unwrap().len())
+                .sum(),
+        };
+        let descriptor = custom_descriptor(&model).unwrap();
+        let mut engine = build_engine(&descriptor, path.parent().unwrap(), "").unwrap();
+        assert!(!engine.info().name.is_empty());
+        assert!(!engine.info().streaming);
+        engine.transcribe(&vec![0.0; 16_000], 16_000).unwrap();
+    }
+
+    #[test]
+    fn onnx_bundle_discovers_single_file_model_and_tokens() {
+        let dir = std::env::temp_dir().join(format!("wisp-onnx-single-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("model.int8.onnx");
+        fs::write(&model, b"onnx").unwrap();
+        fs::write(dir.join("tokens.txt"), b"a 0\n").unwrap();
+
+        let files = discover_onnx_bundle_files(&model, "sense-voice-onnx").unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, ["model.int8.onnx", "tokens.txt"]);
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn onnx_bundle_discovers_matching_whisper_pair_and_prefixed_tokens() {
+        let dir = std::env::temp_dir().join(format!("wisp-onnx-whisper-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let encoder = dir.join("tiny-encoder.int8.onnx");
+        fs::write(&encoder, b"encoder").unwrap();
+        fs::write(dir.join("tiny-decoder.int8.onnx"), b"decoder").unwrap();
+        fs::write(dir.join("tiny-tokens.txt"), b"a 0\n").unwrap();
+        fs::write(dir.join("tiny-encoder.weights"), b"weights").unwrap();
+        fs::write(dir.join("tiny-decoder.weights"), b"weights").unwrap();
+        fs::write(dir.join("large-encoder.int8.onnx"), b"other").unwrap();
+        fs::write(dir.join("large-decoder.int8.onnx"), b"other").unwrap();
+        fs::write(dir.join("large-encoder.weights"), b"other").unwrap();
+
+        let files = discover_onnx_bundle_files(&encoder, "whisper-onnx").unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "tiny-encoder.int8.onnx",
+                "tiny-decoder.int8.onnx",
+                "tiny-tokens.txt",
+                "tiny-decoder.weights",
+                "tiny-encoder.weights"
+            ]
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn onnx_bundle_discovers_matching_parakeet_triplet() {
+        let dir = std::env::temp_dir().join(format!("wisp-onnx-parakeet-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let joiner = dir.join("joiner.int8.onnx");
+        fs::write(dir.join("encoder.int8.onnx"), b"encoder").unwrap();
+        fs::write(dir.join("decoder.int8.onnx"), b"decoder").unwrap();
+        fs::write(&joiner, b"joiner").unwrap();
+        fs::write(dir.join("tokens.txt"), b"a 0\n").unwrap();
+
+        let files = discover_onnx_bundle_files(&joiner, "parakeet-onnx").unwrap();
+        let names: Vec<_> = files
+            .iter()
+            .map(|p| p.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            names,
+            [
+                "encoder.int8.onnx",
+                "decoder.int8.onnx",
+                "joiner.int8.onnx",
+                "tokens.txt"
+            ]
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn onnx_bundle_rejects_missing_tokens() {
+        let dir = std::env::temp_dir().join(format!("wisp-onnx-no-tokens-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let model = dir.join("model.onnx");
+        fs::write(&model, b"onnx").unwrap();
+
+        let error = discover_onnx_bundle_files(&model, "sense-voice-onnx").unwrap_err();
+        assert!(error.contains("tokens"), "{error}");
+
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn unique_custom_id_slugs_and_disambiguates() {
         let existing = vec![CustomModel {
             id: "custom-my-model".to_owned(),
             name: "My Model".to_owned(),
             kind: "whisper-cpp".to_owned(),
             files: vec![],
+            size_bytes: 0,
         }];
         // Sanitised to a filesystem-safe slug (non-alphanumerics collapse, edges trimmed).
         assert_eq!(unique_custom_id("My Model!", &[]), "custom-my-model");
@@ -5176,6 +5678,7 @@ mod tests {
             name: "X".to_owned(),
             kind: "whisper-cpp".to_owned(),
             files: vec!["ggml-x.bin".to_owned()],
+            size_bytes: 123,
         }];
         save_custom_models(&dir, &models);
         assert_eq!(load_custom_models(&dir), models);

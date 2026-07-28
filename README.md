@@ -120,6 +120,7 @@ The engine, model, and decoding cadence are **auto-selected to your machine** (c
 No mandatory engine downloads. No forced multi-gigabyte "summary engine" gating you before you can start. Wisp runs immediately, and **you** decide what to add:
 
 - **Pick any model** from the catalog — speed-first or accuracy-first — and switch per mode (Live vs File).
+- **Import your own speech models** — select a sherpa-onnx `.onnx` graph or Whisper GGML/GGUF file; Wisp validates it and automatically brings along matching tokens, encoder/decoder/joiner graphs, and external weights.
 - **Delete models** you don't need, right from the picker, to reclaim disk in one click.
 - **Configure everything** — transcription language, accuracy/speed profile, VAD gating, denoising, decoding thresholds, diarization, custom vocabulary — instead of being locked to one preset.
 - **Honest picker** — models your machine can't run are clearly marked, with size and hardware hints *before* you download.
