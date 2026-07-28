@@ -19,7 +19,7 @@ whisper-vulkan = []
 [dependencies]
 wisp-core = { path = "../wisp-core" }
 sha2 = "0.10"
-ureq = { version = "2", optional = true }
+ureq = { version = "2", optional = true, features = ["proxy-from-env", "socks-proxy"] }
 # Unzips the Core ML encoder archive (a `.mlmodelc` directory) next to a whisper.cpp model.
 zip = { version = "2", default-features = false, features = ["deflate"] }
 

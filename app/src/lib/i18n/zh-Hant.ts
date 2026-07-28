@@ -242,6 +242,25 @@ export const zhHant: Messages = {
   settings: {
     aiModels: "AI 模型",
     search: "筆記搜尋",
+    downloads: "模型下載",
+    downloadsIntro:
+      "為不同地區提供更可靠的下載。自動模式會在 Hugging Face 與鏡像之間切換；網路中斷後會續傳，不再從零開始。",
+    downloadSource: "下載來源",
+    downloadSourceAuto: "自動 · 失敗時切換",
+    downloadSourceOfficial: "僅 Hugging Face",
+    downloadSourceMirror: "鏡像優先",
+    downloadMirror: "Hugging Face 鏡像",
+    downloadMirrorHint:
+      "只用於 Hugging Face 模型檔案。預設值是面向中國大陸的第三方公共鏡像；有合規要求時請填寫組織自己的 HTTPS 鏡像。",
+    downloadProxy: "代理",
+    downloadProxySystem: "環境變數",
+    downloadProxyDirect: "直接連線",
+    downloadProxyCustom: "自訂代理",
+    downloadProxyUrl: "代理 URL",
+    downloadProxyHint: "支援 HTTP、SOCKS4、SOCKS4A 和 SOCKS5，也支援帶驗證資訊的 URL。",
+    downloadSettingsSave: "儲存下載設定",
+    downloadSettingsSaving: "儲存中…",
+    downloadSettingsSaved: "已儲存 · 下次請求立即生效",
     searchIntro:
       "筆記庫如何搜尋你儲存的筆記。語意與混合搜尋理解語意（不只是字面比對）—— 需要一個本機嵌入模型，下載一次後全程在裝置端執行。",
     searchMode: "搜尋模式",

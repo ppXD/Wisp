@@ -6750,6 +6750,7 @@ dependencies = [
  "tokenizers",
  "ureq",
  "wisp-library",
+ "wisp-models",
 ]
 
 [[package]]

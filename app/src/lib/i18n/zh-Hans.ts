@@ -242,6 +242,25 @@ export const zhHans: Messages = {
   settings: {
     aiModels: "AI 模型",
     search: "笔记搜索",
+    downloads: "模型下载",
+    downloadsIntro:
+      "为不同地区提供更可靠的下载。自动模式会在 Hugging Face 与镜像之间切换；网络中断后会续传，不再从零开始。",
+    downloadSource: "下载源",
+    downloadSourceAuto: "自动 · 失败时切换",
+    downloadSourceOfficial: "仅 Hugging Face",
+    downloadSourceMirror: "镜像优先",
+    downloadMirror: "Hugging Face 镜像",
+    downloadMirrorHint:
+      "只用于 Hugging Face 模型文件。默认值是面向中国大陆的第三方公共镜像；有合规要求时请填写组织自己的 HTTPS 镜像。",
+    downloadProxy: "代理",
+    downloadProxySystem: "环境变量",
+    downloadProxyDirect: "直接连接",
+    downloadProxyCustom: "自定义代理",
+    downloadProxyUrl: "代理 URL",
+    downloadProxyHint: "支持 HTTP、SOCKS4、SOCKS4A 和 SOCKS5，也支持带认证信息的 URL。",
+    downloadSettingsSave: "保存下载设置",
+    downloadSettingsSaving: "保存中…",
+    downloadSettingsSaved: "已保存 · 下次请求立即生效",
     searchIntro:
       "笔记库如何搜索你保存的笔记。语义与混合搜索理解语义（不只是字面匹配）—— 需要一个本地嵌入模型，下载一次后全程在设备端运行。",
     searchMode: "搜索模式",
