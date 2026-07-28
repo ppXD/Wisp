@@ -1359,10 +1359,24 @@
     ensureProgressListener();
     ensureFileListeners();
     syncRunning();
+    // The packaged Windows test waits for this native title marker before it accepts startup. Two
+    // animation frames prove Svelte mounted and WebView2 completed a real paint; a white/hung
+    // renderer never reaches the command. Outside that opt-in test the backend leaves the title
+    // unchanged.
+    let readyFrame = requestAnimationFrame(() => {
+      readyFrame = requestAnimationFrame(() => {
+        void invoke("frontend_ready").catch(() => {
+          /* diagnostic-only handshake; never disrupt the real UI */
+        });
+      });
+    });
     // Re-check when the window regains focus, so granting in System Settings clears the banner.
     const onFocus = () => checkPermissions();
     window.addEventListener("focus", onFocus);
-    return () => window.removeEventListener("focus", onFocus);
+    return () => {
+      cancelAnimationFrame(readyFrame);
+      window.removeEventListener("focus", onFocus);
+    };
   });
   onDestroy(() => {
     unlisten?.();

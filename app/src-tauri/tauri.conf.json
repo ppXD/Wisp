@@ -17,7 +17,8 @@
         "width": 1040,
         "height": 740,
         "minWidth": 820,
-        "minHeight": 640
+        "minHeight": 640,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --disable-gpu"
       }
     ],
     "security": {
@@ -27,6 +28,9 @@
   "bundle": {
     "active": true,
     "targets": ["nsis", "dmg"],
+    "windows": {
+      "minimumWebview2Version": "120.0.2210.61"
+    },
     "resources": [
       "resources/silero_vad.onnx"
     ],

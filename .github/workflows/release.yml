@@ -168,7 +168,7 @@ jobs:
         shell: bash
         run: ./scripts/verify-windows-runtime.sh D:/b/release/bundle/nsis/Wisp_*-setup.exe --require-vulkan
 
-      - name: Smoke-test the packaged Windows app
+      - name: Smoke-test the packaged Windows frontend and close behavior
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
