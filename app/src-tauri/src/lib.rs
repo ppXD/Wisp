@@ -4508,6 +4508,19 @@ fn set_search_mode(state: State<'_, AppState>, mode: String) -> Result<(), Strin
     Ok(())
 }
 
+/// Marks the first rendered frontend frame for the packaged Windows smoke test. Normal users keep
+/// the regular title; CI opts in with an environment variable so it can distinguish a working UI
+/// from a white WebView process that merely stayed alive.
+#[tauri::command]
+fn frontend_ready(window: tauri::WebviewWindow) -> Result<(), String> {
+    if std::env::var_os("WISP_SMOKE_TEST").is_some() {
+        window
+            .set_title("Wisp [ready]")
+            .map_err(|e| format!("could not mark the frontend ready: {e}"))?;
+    }
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -4694,7 +4707,8 @@ pub fn run() {
             set_embedding_model,
             delete_embedding_model,
             search_mode,
-            set_search_mode
+            set_search_mode,
+            frontend_ready
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")

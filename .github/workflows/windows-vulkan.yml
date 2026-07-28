@@ -78,7 +78,7 @@ jobs:
       - name: Verify the installer runtime
         shell: bash
         run: ./scripts/verify-windows-runtime.sh D:/b/release/bundle/nsis/Wisp_*-setup.exe --require-vulkan
-      - name: Smoke-test the packaged app
+      - name: Smoke-test the packaged frontend and close behavior
         shell: pwsh
         run: |
           $installer = Get-ChildItem 'D:\b\release\bundle\nsis\Wisp_*-setup.exe' | Select-Object -First 1
