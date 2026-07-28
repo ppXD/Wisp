@@ -72,6 +72,12 @@ for expected in "${files[@]}"; do
   name=${expected%%:*}
   minimum=${expected##*:}
   file="$runtime_dir/$name"
+  # build.rs keeps the discovered MSVC files in a subdirectory so its stale-file cleanup cannot
+  # remove sherpa DLLs. Tauri flattens that resource directory into the installer root, so accept
+  # both the pre-package staging layout and the extracted/installed package layout.
+  if [[ ! -f "$file" && -f "$runtime_dir/msvc/$name" ]]; then
+    file="$runtime_dir/msvc/$name"
+  fi
   if [[ ! -f "$file" ]]; then
     echo "Missing Windows package file: $name" >&2
     exit 1
