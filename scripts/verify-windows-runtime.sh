@@ -50,6 +50,9 @@ files=(
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 msvc_manifest="$script_dir/../app/src-tauri/msvc-runtime-required.txt"
 while IFS= read -r expected; do
+  # Git may materialize this manifest with CRLF on Windows. Strip the carriage return before using
+  # the minimum size in Bash arithmetic.
+  expected=${expected%$'\r'}
   [[ -z "$expected" || "$expected" == \#* ]] && continue
   files+=("$expected")
 done < "$msvc_manifest"

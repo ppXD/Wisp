@@ -17,9 +17,11 @@ $previousSmokeTest = $env:WISP_SMOKE_TEST
 try {
     # Exercise the actual NSIS install path. Extracting the archive directly can miss install-time
     # placement/renaming mistakes and does not reproduce the way users launch Wisp.
+    # NSIS requires /D=<path> to be the final argument and does not accept quotes around it. The
+    # generated smoke path contains no spaces, so pass the switch verbatim.
     $installerProcess = Start-Process `
         -FilePath $Installer `
-        -ArgumentList @("/S", "/D=`"$installDirectory`"") `
+        -ArgumentList @("/S", "/D=$installDirectory") `
         -PassThru `
         -Wait `
         -WindowStyle Hidden
@@ -52,10 +54,19 @@ try {
     }
 
     # Do not let a current GitHub runner hide a missing redistributable. Every VC++ runtime module
-    # loaded at startup must come from the app directory, regardless of the current MSVC toolset's
-    # exact DLL set.
+    # that is bundled for the current toolset and loaded at startup must come from the app
+    # directory. Match against the discovered package set instead of a broad prefix: Windows itself
+    # supplies msvcp_win.dll as part of the UCRT, and it must remain machine-wide.
+    $bundledRuntimeNames = @{}
+    Get-ChildItem -LiteralPath $installDirectory -File -Filter "*.dll" |
+        Where-Object {
+            $_.Name -match "^(concrt|msvcp|vcamp|vccorlib|vcomp|vcruntime).*\.dll$"
+        } |
+        ForEach-Object {
+            $bundledRuntimeNames[$_.Name] = $true
+        }
     $runtimeModules = @($process.Modules | Where-Object {
-        $_.ModuleName -match "^(concrt|msvcp|vcamp|vccorlib|vcomp|vcruntime).*\.dll$"
+        $bundledRuntimeNames.ContainsKey($_.ModuleName)
     })
     if (-not ($runtimeModules | Where-Object { $_.ModuleName -ieq "msvcp140.dll" })) {
         throw "Packaged Wisp.exe did not load msvcp140.dll"
