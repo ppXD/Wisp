@@ -38,10 +38,21 @@ else
 fi
 
 files=(
+  "cargs.dll:10000"
   "onnxruntime.dll:1000000"
   "onnxruntime_providers_shared.dll:1000"
   "sherpa-onnx-c-api.dll:1000000"
 )
+
+# whisper.cpp is compiled with the runner's current MSVC toolset. These app-local copies are
+# load-bearing: relying on an older machine-wide VC++ runtime can crash in C++ static
+# initialization before Tauri/WebView2 starts. The same manifest drives build.rs.
+script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+msvc_manifest="$script_dir/../app/src-tauri/msvc-runtime-dlls.txt"
+while IFS= read -r expected; do
+  [[ -z "$expected" || "$expected" == \#* ]] && continue
+  files+=("$expected")
+done < "$msvc_manifest"
 
 if [[ $require_vulkan == true ]]; then
   files+=(

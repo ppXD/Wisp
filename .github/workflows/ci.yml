@@ -81,6 +81,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # Exposes VCToolsRedistDir so build.rs can app-local deploy the exact VC++ runtime used by the
+      # release compiler. The packaging smoke test rejects any fallback to the runner's System32.
+      - name: Set up the MSVC build environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -89,6 +95,8 @@ jobs:
         run: |
           npm ci
           npm run build
+      - name: Verify Windows runtime config
+        run: node scripts/verify-windows-runtime-config.mjs
       # Build the sherpa engine first so sherpa-rs-sys drops the onnxruntime / sherpa DLLs into the
       # target dir before the app's build.rs stages them for tauri's `resources` check. Cargo doesn't
       # order one build script before a dependent's, so a single `cargo build` can run the app's
