@@ -3,14 +3,16 @@ resolver = "2"
 members = ["crates/*"]
 # Kept out of the library CI build: the Tauri app, and the per-OS native crates (heavy vendored
 # libs built at compile time — sherpa/onnxruntime, whisper.cpp/Metal — or OS frameworks:
-# ScreenCaptureKit, WebRTC AEC3, WASAPI loopback). The Windows one is covered by the app build on
-# the Windows CI runner; the macOS ones by running the app on a Mac.
+# ScreenCaptureKit, WebRTC AEC3, WASAPI loopback, PulseAudio monitor). The Windows one is covered
+# by the app build on the Windows CI runner; the macOS ones by running the app on a Mac; the Linux
+# one by the app build on the Linux release runner.
 exclude = [
     "app/src-tauri",
     "crates/wisp-engine-sherpa",
     "crates/wisp-engine-whisper-cpp",
     "crates/wisp-screencapture",
     "crates/wisp-loopback",
+    "crates/wisp-pulseaudio",
     "crates/wisp-aec",
     "crates/wisp-embed",
 ]

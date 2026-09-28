@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr_in_place, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
@@ -57,6 +57,8 @@ use wisp_pipeline::{
     remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, LiveStream,
     Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
 };
+#[cfg(target_os = "linux")]
+use wisp_pulseaudio::PulseMonitorSource;
 #[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
 
@@ -99,7 +101,8 @@ const FILE_PROGRESS_EVENT: &str = "file://progress";
 const FILE_SEGMENT_EVENT: &str = "file://segment";
 const FILE_DONE_EVENT: &str = "file://done";
 
-/// Sentinel "device" id selecting one-click system-audio capture (ScreenCaptureKit, no setup).
+/// Sentinel "device" id selecting one-click system-audio capture — ScreenCaptureKit on macOS,
+/// WASAPI loopback on Windows, the PulseAudio/PipeWire monitor on Linux; no setup on any of them.
 /// Must match the value used by the UI.
 const SYSTEM_CAPTURE_ID: &str = "__wisp_system_audio__";
 
@@ -611,11 +614,15 @@ fn coerce_param(raw: &serde_json::Value, kind: &ParamKind) -> Option<ParamValue>
     }
 }
 
-/// Builds the GPU whisper.cpp engine from a downloaded GGUF model — Metal on macOS, Vulkan on Windows
-/// (under the `whisper-vulkan` feature). Where the engine isn't built, the stub below reports it.
+/// Builds the GPU whisper.cpp engine from a downloaded GGUF model — Metal on macOS, Vulkan on
+/// Windows and Linux (under the `whisper-vulkan` feature). Where the engine isn't built, the stub
+/// below reports it.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "whisper-vulkan")
+    all(
+        any(target_os = "windows", target_os = "linux"),
+        feature = "whisper-vulkan"
+    )
 ))]
 fn build_whisper_cpp_engine(
     descriptor: &ModelDescriptor,
@@ -634,7 +641,10 @@ fn build_whisper_cpp_engine(
 
 #[cfg(not(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "whisper-vulkan")
+    all(
+        any(target_os = "windows", target_os = "linux"),
+        feature = "whisper-vulkan"
+    )
 )))]
 fn build_whisper_cpp_engine(
     _descriptor: &ModelDescriptor,
@@ -642,7 +652,7 @@ fn build_whisper_cpp_engine(
     _language: &str,
 ) -> WispResult<Box<dyn AsrEngine>> {
     Err(WispError::Engine(
-        "the whisper.cpp GPU engine is only available on macOS, and on Windows GPU builds"
+        "the whisper.cpp GPU engine is only available on macOS, and on Windows/Linux GPU builds"
             .to_owned(),
     ))
 }
@@ -1111,9 +1121,10 @@ fn machine_ram_bytes() -> u64 {
     16 * 1024 * 1024 * 1024
 }
 
-/// The best ASR accelerator on this host. macOS uses the Apple GPU via Metal (whisper.cpp); other
-/// platforms run ONNX on the CPU today, so they report `Cpu` until a Windows/Linux GPU engine is
-/// wired (then this grows to CUDA/Vulkan/DirectML and the recommender follows automatically).
+/// The best ASR accelerator on this host. macOS uses the Apple GPU via Metal (whisper.cpp); the
+/// Windows/Linux Vulkan builds can run whisper.cpp too (with a CPU fallback — see
+/// `family_runnable`), but this still reports `Cpu` until real GPU probing lands, so the
+/// recommender never auto-picks a GPU model off-Metal.
 #[cfg(target_os = "macos")]
 fn host_accelerator() -> Accelerator {
     Accelerator::Metal
@@ -1163,8 +1174,9 @@ fn sysctl_string(name: &std::ffi::CStr) -> Option<String> {
 
 /// The GPU power tier. On Apple Silicon it's the chip class parsed from the CPU brand string
 /// ("Apple M2 Max" → High, "… Ultra" → Ultra, "… Pro" → Standard, plain "Apple M_" → Entry), the
-/// signal that decides which Whisper this Mac can run live. Other platforms report `None` until a
-/// GPU ASR engine is wired for them.
+/// signal that decides which Whisper this Mac can run live. Other platforms report `None` — the
+/// Vulkan whisper.cpp builds don't probe the GPU tier, so the recommender stays conservative
+/// off-Metal.
 #[cfg(target_os = "macos")]
 fn host_gpu_tier() -> GpuTier {
     let brand = sysctl_string(c"machdep.cpu.brand_string").unwrap_or_default();
@@ -1215,7 +1227,13 @@ fn to_model_info(
     let size_bytes = d.total_size_bytes();
     let deletable = model_deletable(!d.files.is_empty(), store.local_path(&d.id).is_some());
 
-    let coreml = coreml_asset(&d);
+    // Core ML only accelerates the whisper.cpp Metal engine, which exists on macOS alone — the
+    // Windows/Linux Vulkan builds must not advertise a ~1 GB encoder download they can't use.
+    let coreml = if cfg!(target_os = "macos") {
+        coreml_asset(&d)
+    } else {
+        None
+    };
     let coreml_installed = coreml
         .as_ref()
         .is_some_and(|a| store.coreml_installed(&d.id, a));
@@ -2940,6 +2958,9 @@ async fn download_coreml(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<(), String> {
+    if !cfg!(target_os = "macos") {
+        return Err("Core ML acceleration is only available on macOS".to_owned());
+    }
     let store = Arc::clone(&state.store);
     let model_id = ModelId(id.clone());
     let asset = state
@@ -3162,8 +3183,9 @@ fn set_devices(
 }
 
 /// Opens the system-audio capture source for this platform, or an error so the caller degrades to
-/// mic-only. macOS uses ScreenCaptureKit and Windows uses WASAPI loopback — both one-click, no
-/// virtual device; other platforms report unavailable until their own is added.
+/// mic-only. Each desktop platform has a one-click source — ScreenCaptureKit on macOS, WASAPI
+/// loopback on Windows, the PulseAudio/PipeWire monitor on Linux; other platforms report
+/// unavailable until their own is added.
 #[cfg(target_os = "macos")]
 fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
     ScreenCaptureSource::new()
@@ -3178,7 +3200,16 @@ fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Linux captures the default output's monitor through the PulseAudio/PipeWire server — one
+/// click, no virtual device, like ScreenCaptureKit and WASAPI loopback.
+#[cfg(target_os = "linux")]
+fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
+    PulseMonitorSource::new()
+        .map(|s| Box::new(s) as Box<dyn AudioSource>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
     Err("system-audio capture isn't available on this platform yet".to_owned())
 }
@@ -3204,17 +3235,24 @@ fn open_mic_within(device: Option<String>) -> Result<Box<dyn AudioSource>, Strin
         },
     )
     .unwrap_or_else(|| {
+        let reset_hint = if cfg!(target_os = "linux") {
+            "systemctl --user restart pipewire pipewire-pulse"
+        } else if cfg!(target_os = "windows") {
+            "net stop audiosrv && net start audiosrv"
+        } else {
+            "sudo killall coreaudiod"
+        };
         Err(format!(
-            "microphone didn't start within {MIC_STARTUP_TIMEOUT:?} — it may be held by another app or the audio system is wedged. Restart the app, or reset audio with: sudo killall coreaudiod"
+            "microphone didn't start within {MIC_STARTUP_TIMEOUT:?} — it may be held by another app or the audio system is wedged. Restart the app, or reset audio with: {reset_hint}"
         ))
     })
 }
 
-/// The echo canceller for this platform: WebRTC AEC on macOS (falling back to passthrough if it
-/// won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>` lets the dual-stream
-/// path stay identical on every platform — the cross-stream dedup handles residual echo where there
-/// is no real AEC.
-#[cfg(target_os = "macos")]
+/// The echo canceller for this platform: WebRTC AEC on macOS and Linux (falling back to
+/// passthrough if it won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>`
+/// lets the dual-stream path stay identical on every platform — the cross-stream dedup handles
+/// residual echo where there is no real AEC.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn echo_canceller() -> Box<dyn EchoCanceller> {
     match WebrtcEchoCanceller::new() {
         Ok(c) => Box::new(c),
@@ -3225,7 +3263,7 @@ fn echo_canceller() -> Box<dyn EchoCanceller> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn echo_canceller() -> Box<dyn EchoCanceller> {
     Box::new(PassthroughEchoCanceller)
 }
@@ -3439,9 +3477,10 @@ fn start_session_blocking(app: AppHandle, options: LiveOptions) -> Result<Option
         .lock()
         .map_err(|_| "state lock poisoned".to_owned())?
         .clone();
-    // System audio is best-effort: if ScreenCaptureKit can't start (a macOS that doesn't support
-    // it, no Screen Recording permission, no display), fall back to mic-only rather than failing
-    // the whole session — so live transcription works on every Mac, just without meeting audio.
+    // System audio is best-effort: if the platform's capture can't start (a macOS that doesn't
+    // support ScreenCaptureKit, no Screen Recording permission, no default output on Linux),
+    // fall back to mic-only rather than failing the whole session — live transcription still
+    // works, just without meeting audio.
     let mut degraded_notice: Option<String> = None;
     let system_source: Option<Box<dyn AudioSource>> = match system_device {
         Some(name) if name == SYSTEM_CAPTURE_ID => match open_system_capture() {

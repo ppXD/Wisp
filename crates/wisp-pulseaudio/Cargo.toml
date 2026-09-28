@@ -1,0 +1,14 @@
+[package]
+name = "wisp-pulseaudio"
+version = "0.0.0"
+description = "Linux system-audio capture for Wisp via the PulseAudio/PipeWire monitor source (no virtual device)"
+edition = "2021"
+license = "MIT"
+
+[dependencies]
+wisp-core = { path = "../wisp-core" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Async PulseAudio client API — reaches the sound server (PulseAudio itself, or PipeWire's
+# pipewire-pulse compat) to record the default sink's `.monitor` source.
+libpulse-binding = "2.30"

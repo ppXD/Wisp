@@ -2,6 +2,9 @@
 /target
 **/target
 
+# Build-time staging dir for the sherpa/onnxruntime .so copies the Linux bundle ships
+/app/src-tauri/linux-runtime/
+
 # Node / frontend
 node_modules/
 dist/

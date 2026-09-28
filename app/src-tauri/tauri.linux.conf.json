@@ -1,0 +1,34 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/silero_vad.onnx": "resources/silero_vad.onnx",
+      "linux-runtime/*.so*": "",
+      "linux-runtime/*.txt": ""
+    },
+    "linux": {
+      "deb": {
+        "section": "utils",
+        "depends": [
+          "libwebkit2gtk-4.1-0",
+          "libjavascriptcoregtk-4.1-0",
+          "libgtk-3-0",
+          "libglib2.0-0",
+          "libsoup-3.0-0",
+          "libcairo2",
+          "libgdk-pixbuf-2.0-0",
+          "libdbus-1-3",
+          "libayatana-appindicator3-1",
+          "libpulse0",
+          "libasound2",
+          "libvulkan1",
+          "libstdc++6"
+        ],
+        "files": {
+          "/usr/share/doc/wisp/copyright": "../../LICENSE"
+        }
+      }
+    },
+    "category": "Utility"
+  }
+}

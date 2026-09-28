@@ -3,10 +3,12 @@
 #
 #   macOS:   Wisp_<ver>_aarch64.dmg   (Apple Silicon only)
 #   Windows: Wisp_<ver>_x64-setup.exe (NSIS, smaller) + Wisp_<ver>_x64_en-US.msi
+#   Linux:   Wisp_<ver>_amd64.deb + Wisp_<ver>_amd64.AppImage
 #
 # Intel macOS is intentionally unsupported (Metal/screencapture need the macOS 15 SDK no Intel runner
-# provides; WebRTC AEC won't cross-compile from Apple Silicon). The Windows build is mic + sherpa-onnx
-# (system audio / AEC / Metal are macOS-only and degrade gracefully).
+# provides; WebRTC AEC won't cross-compile from Apple Silicon). The Windows and Linux builds are the
+# universal GPU installers (whisper.cpp on Vulkan, with ggml's CPU fallback when there's no Vulkan
+# device; sherpa stays CPU).
 #
 # Trigger: push a `v*` tag (e.g. `git tag v0.2.0 && git push --tags`), or run manually with a tag.
 #
@@ -57,6 +59,12 @@ jobs:
           - os: windows-latest
             label: Windows x64
             args: "--features whisper-vulkan --config src-tauri/tauri.vulkan.conf.json"
+          # Same universal GPU build on Linux (Vulkan whisper.cpp + PulseAudio monitor system audio +
+          # WebRTC AEC). 22.04 keeps the glibc floor usable on the oldest supported Ubuntu LTS; the
+          # Vulkan loader is bundled into the artifacts like the Windows installer's vulkan-1.dll.
+          - os: ubuntu-22.04
+            label: Linux x64
+            args: "--features whisper-vulkan"
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
@@ -80,10 +88,32 @@ jobs:
         with:
           node-version: 20
 
-      # The WebRTC AEC crate's bundled build compiles vendored WebRTC with meson + ninja (macOS only).
+      # The WebRTC AEC crate's bundled build compiles vendored WebRTC with meson + ninja.
       - name: Install meson + ninja
         if: runner.os == 'macOS'
         run: brew install meson ninja
+
+      # Linux system deps: Tauri's webkit/gtk stack, ALSA for cpal mic capture, libpulse for the
+      # monitor system-audio source, meson+ninja for the WebRTC AEC build, and the Vulkan SDK for
+      # the whisper.cpp Vulkan backend. glslc is not packaged on Ubuntu 22.04, so the Vulkan pieces
+      # come from LunarG's official jammy repo. At package time `app/src-tauri/build.rs` bundles the
+      # loader (`libvulkan.so.1`) into the artifacts — the same approach as `vulkan-1.dll` on Windows —
+      # and the deb also declares `libvulkan1` as a dependency.
+      - name: Install Linux system deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config curl wget file gnupg ca-certificates \
+            libwebkit2gtk-4.1-dev librsvg2-dev patchelf \
+            libasound2-dev libpulse-dev meson ninja-build libclang-dev \
+            libayatana-appindicator3-dev
+          wget -qO /tmp/lunarg.asc https://packages.lunarg.com/lunarg-signing-key-pub.asc
+          wget -qO /tmp/lunarg.list https://packages.lunarg.com/vulkan/lunarg-vulkan-jammy.list
+          sudo install -m644 /tmp/lunarg.asc /etc/apt/trusted.gpg.d/lunarg.asc
+          sudo install -m644 /tmp/lunarg.list /etc/apt/sources.list.d/lunarg-vulkan-jammy.list
+          sudo apt-get update
+          sudo apt-get install -y vulkan-sdk
 
       # Windows ships the universal GPU installer (whisper.cpp + Vulkan). ggml-vulkan's vulkan-shaders-gen
       # sub-build nests deeply and overruns Windows' 260-char MAX_PATH from the default target dir, so

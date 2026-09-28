@@ -39,8 +39,9 @@ sherpa-cpu = ["wisp-engine-sherpa/download-binaries"]
 # weekly smoke workflow (cargo build --no-default-features --features sherpa-gpu) — a ~2h compile,
 # too slow to gate every PR. Mutually exclusive with sherpa-cpu (sherpa-rs-sys enforces this).
 sherpa-gpu = ["wisp-engine-sherpa/directml"]
-# whisper.cpp with the Vulkan GPU backend on Windows (generic GPU — AMD/Intel/NVIDIA — with a CPU
-# fallback). Off by default; the Windows GPU release turns it on. No effect on macOS (always Metal).
+# whisper.cpp with the Vulkan GPU backend on Windows and Linux (generic GPU — AMD/Intel/NVIDIA —
+# with a CPU fallback). Off by default; the Windows and Linux GPU releases turn it on. No effect on
+# macOS (always Metal).
 whisper-vulkan = ["wisp-engine-whisper-cpp/vulkan", "wisp-models/whisper-vulkan"]
 
 [build-dependencies]
@@ -100,3 +101,13 @@ wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }
 # Total physical memory (GlobalMemoryStatusEx) to recommend a machine-appropriate model. Same
 # `windows` major as wisp-loopback, so no extra version in the tree.
 windows = { version = "0.61", features = ["Win32_System_SystemInformation"] }
+
+# Linux-only native deps. System-audio capture via the PulseAudio/PipeWire monitor — the counterpart
+# to macOS ScreenCaptureKit and Windows WASAPI loopback, the same one-click "capture the meeting"
+# experience — plus WebRTC AEC3 echo cancellation (also used on macOS).
+[target.'cfg(target_os = "linux")'.dependencies]
+wisp-pulseaudio = { path = "../../crates/wisp-pulseaudio" }
+wisp-aec = { path = "../../crates/wisp-aec" }
+# whisper.cpp ASR engine — built with the Vulkan GPU backend only under the `whisper-vulkan` feature
+# (generic GPU + CPU fallback); an empty shell in the default CPU build.
+wisp-engine-whisper-cpp = { path = "../../crates/wisp-engine-whisper-cpp" }

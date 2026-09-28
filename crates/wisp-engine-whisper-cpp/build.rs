@@ -1,9 +1,9 @@
 //! Builds the vendored whisper.cpp and generates Rust bindings for its C API.
 //!
 //! - **macOS**: Metal + Core ML backend (always).
-//! - **Windows**: Vulkan backend — generic GPU across AMD/Intel/NVIDIA, with ggml's built-in CPU
-//!   fallback — but only when the `vulkan` feature is on, so the default Windows build stays a no-op
-//!   shell and needs no Vulkan SDK.
+//! - **Windows / Linux**: Vulkan backend — generic GPU across AMD/Intel/NVIDIA, with ggml's
+//!   built-in CPU fallback — but only when the `vulkan` feature is on, so the default build stays
+//!   a no-op shell and needs no Vulkan SDK.
 //! - **Other targets**: a no-op, so the crate is an empty shell.
 
 use std::env;
@@ -11,9 +11,10 @@ use std::path::{Path, PathBuf};
 
 fn main() {
     let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
-    let windows_vulkan = target_os == "windows" && env::var("CARGO_FEATURE_VULKAN").is_ok();
+    let unix_vulkan = matches!(target_os.as_str(), "windows" | "linux")
+        && env::var("CARGO_FEATURE_VULKAN").is_ok();
 
-    if target_os != "macos" && !windows_vulkan {
+    if target_os != "macos" && !unix_vulkan {
         return;
     }
 
@@ -26,8 +27,10 @@ fn main() {
 
     if target_os == "macos" {
         build_macos(&src);
-    } else {
+    } else if target_os == "windows" {
         build_windows_vulkan(&src);
+    } else {
+        build_linux_vulkan(&src);
     }
 
     generate_bindings(&src);
@@ -158,6 +161,46 @@ fn build_windows_vulkan(src: &Path) {
         println!("cargo:rustc-link-search=native={}\\Lib", sdk);
     }
     println!("cargo:rustc-link-lib=vulkan-1");
+}
+
+/// Builds whisper.cpp + ggml as static libs with the Vulkan backend on Linux (generic GPU —
+/// AMD/Intel/NVIDIA — with ggml's built-in CPU fallback). Requires Vulkan headers + loader and
+/// `glslc` (shaderc, compiles ggml's compute shaders) at build time — the LunarG `vulkan-sdk`
+/// package provides both (glslc isn't packaged on Ubuntu 22.04). Because the loader becomes a hard
+/// DT_NEEDED, `app/src-tauri/build.rs` bundles `libvulkan.so.1` into the installer — the same
+/// approach the Windows installer takes with `vulkan-1.dll`.
+fn build_linux_vulkan(src: &Path) {
+    let dst = cmake::Config::new(src)
+        .profile("Release")
+        .define("BUILD_SHARED_LIBS", "OFF")
+        .define("WHISPER_BUILD_EXAMPLES", "OFF")
+        .define("WHISPER_BUILD_TESTS", "OFF")
+        .define("WHISPER_BUILD_SERVER", "OFF")
+        .define("GGML_VULKAN", "ON")
+        .define("GGML_OPENMP", "OFF")
+        .build();
+
+    // The static libs land in the install prefix and/or the build tree (single-config generator —
+    // no per-config subdirs like MSVC's Release).
+    let build = dst.join("build");
+    for dir in [
+        dst.join("lib"),
+        build.join("src"),
+        build.join("ggml/src"),
+        build.join("ggml/src/ggml-vulkan"),
+    ] {
+        println!("cargo:rustc-link-search=native={}", dir.display());
+    }
+
+    for lib in ["whisper", "ggml", "ggml-cpu", "ggml-vulkan", "ggml-base"] {
+        println!("cargo:rustc-link-lib=static={lib}");
+    }
+
+    // The Vulkan loader (`libvulkan.so` — the `vulkan-sdk`/`libvulkan-dev` link-time symlink; the
+    // packaged app resolves the bundled `libvulkan.so.1` copy) and the C++ standard library the
+    // vendored C++ code needs.
+    println!("cargo:rustc-link-lib=vulkan");
+    println!("cargo:rustc-link-lib=stdc++");
 }
 
 /// Generates the Rust FFI bindings for whisper.cpp's C API. Platform-independent — it only parses the

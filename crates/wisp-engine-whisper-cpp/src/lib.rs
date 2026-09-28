@@ -1,12 +1,15 @@
-//! whisper.cpp ASR engine with GPU acceleration — Metal on macOS, Vulkan on Windows.
+//! whisper.cpp ASR engine with GPU acceleration — Metal on macOS, Vulkan on Windows/Linux.
 //!
 //! Wraps the vendored whisper.cpp behind [`wisp_core::AsrEngine`] so it drops into the pipeline
 //! like the sherpa engines — but runs on the GPU (Apple Metal, or Vulkan across AMD/Intel/NVIDIA)
 //! instead of CPU-only ONNX, which makes large models (e.g. large-v3-turbo) usable in real time.
 
-// macOS always builds the Metal + Core ML backend; Windows builds the Vulkan backend only under the
-// `vulkan` feature (see build.rs). Elsewhere this crate is an empty shell.
-#![cfg(any(target_os = "macos", all(target_os = "windows", feature = "vulkan")))]
+// macOS always builds the Metal + Core ML backend; Windows and Linux build the Vulkan backend only
+// under the `vulkan` feature (see build.rs). Elsewhere this crate is an empty shell.
+#![cfg(any(
+    target_os = "macos",
+    all(any(target_os = "windows", target_os = "linux"), feature = "vulkan")
+))]
 
 mod sys {
     #![allow(
@@ -215,7 +218,13 @@ fn combined_prompt(hints: &str, context: &str) -> String {
 impl AsrEngine for WhisperCppEngine {
     fn info(&self) -> EngineInfo {
         EngineInfo {
-            name: "whisper.cpp-metal".to_owned(),
+            // The backend this build actually links: Metal on macOS, Vulkan on Windows/Linux.
+            name: if cfg!(target_os = "macos") {
+                "whisper.cpp-metal"
+            } else {
+                "whisper.cpp-vulkan"
+            }
+            .to_owned(),
             streaming: false,
         }
     }

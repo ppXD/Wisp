@@ -24,7 +24,157 @@ fn main() {
     #[cfg(target_os = "windows")]
     stage_windows_runtime_libs();
 
+    #[cfg(target_os = "linux")]
+    {
+        // The sherpa-onnx + onnxruntime shared libs the binary links against land in the cargo
+        // target dir at build time. `tauri dev` finds them via `$ORIGIN`; the .deb/AppImage ship
+        // them under <prefix>/lib/Wisp (the Tauri resource dir). Emit RPATH (not the modern
+        // RUNPATH, which does not apply transitively) so libsherpa-onnx-c-api.so also resolves
+        // its own dep — the unversioned libonnxruntime.so — from the same directory.
+        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/Wisp");
+        stage_linux_runtime_libs();
+        stage_linux_vulkan_loader();
+    }
+
     tauri_build::build()
+}
+
+/// Copies the sherpa-onnx + onnxruntime runtime libs from the cargo target dir into
+/// `linux-runtime/` (next to this build script) so `tauri.linux.conf.json` can bundle them into
+/// the installer's resource dir. Every `lib*.so*` the binary needs is staged flat, so the
+/// `$ORIGIN/../lib/Wisp` rpath finds each DT_NEEDED name (the sherpa-rs-sys prebuilt libs are
+/// unversioned — plain `libonnxruntime.so`, `libsherpa-onnx-c-api.so`, `libsherpa-onnx-cxx-api.so`).
+#[cfg(target_os = "linux")]
+fn stage_linux_runtime_libs() {
+    use std::path::Path;
+
+    let target_dir = cargo_target_dir_linux();
+    let staged = Path::new(env!("CARGO_MANIFEST_DIR")).join("linux-runtime");
+    std::fs::create_dir_all(&staged).expect("create linux-runtime dir");
+
+    let mut staged_any = false;
+    let mut seen = std::collections::HashSet::new();
+    for entry in std::fs::read_dir(&target_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", target_dir.display()))
+    {
+        let entry = entry.expect("read target dir entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_runtime_lib = (name.starts_with("libsherpa-onnx") || name.starts_with("libonnxruntime"))
+            && name.contains(".so")
+            // The C++ wrapper lib is unused — the Rust FFI binds the C API only, and neither the
+            // macOS nor the Windows upstream installer ships it.
+            && name != "libsherpa-onnx-cxx-api.so";
+        if !is_runtime_lib {
+            continue;
+        }
+        let src = entry.path();
+        if !src.is_file() {
+            continue; // dirs, fifos etc. — a soname symlink resolves through and copies under its link name
+        }
+        let dst = staged.join(&name);
+        let stale = match (dst.metadata(), src.metadata()) {
+            (Ok(d), Ok(s)) => d.len() != s.len() || s.modified().ok() > d.modified().ok(),
+            _ => true,
+        };
+        if stale {
+            std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("stage {}: {e}", src.display()));
+        }
+        seen.insert(name);
+        staged_any = true;
+    }
+
+    // Drop staged libs the target dir no longer produces (e.g. after a sherpa version bump), so
+    // linux-runtime can't keep shipping stale copies.
+    for entry in std::fs::read_dir(&staged)
+        .unwrap_or_else(|e| panic!("read {}: {e}", staged.display()))
+        .flatten()
+    {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let stale_lib = (name.starts_with("libsherpa-onnx") || name.starts_with("libonnxruntime"))
+            && name.contains(".so")
+            && !seen.contains(&name);
+        if stale_lib {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+
+    assert!(
+        staged_any,
+        "no sherpa/onnxruntime shared libs found in {} — build wisp-engine-sherpa first",
+        target_dir.display()
+    );
+}
+
+/// Upstream ships the Vulkan runtime (`vulkan-1.dll` + license) inside the Windows installer —
+/// see `scripts/stage-vulkan-loader.sh` — so the whisper.cpp Vulkan build launches even with no
+/// Vulkan loader installed; the loader then discovers whatever ICD the GPU driver provides.
+/// Mirror that here: with `whisper-vulkan` enabled the binary has a hard `DT_NEEDED` on
+/// `libvulkan.so.1`, and the loader is a separate package (`libvulkan1`/`vulkan-loader`), not part
+/// of the GPU driver — absent on minimal installs it would stop the app before `main`, making
+/// ggml's CPU fallback unreachable. Stage the build host's loader next to the sherpa libs so the
+/// `$ORIGIN/../lib/Wisp` rpath always finds one; a bundled loader still loads the host's ICDs.
+#[cfg(target_os = "linux")]
+fn stage_linux_vulkan_loader() {
+    use std::path::Path;
+
+    if std::env::var_os("CARGO_FEATURE_WHISPER_VULKAN").is_none() {
+        return;
+    }
+    let staged = Path::new(env!("CARGO_MANIFEST_DIR")).join("linux-runtime");
+    for dir in [
+        "/usr/lib/x86_64-linux-gnu",
+        "/lib/x86_64-linux-gnu",
+        "/usr/lib64",
+        "/usr/lib",
+    ] {
+        let src = Path::new(dir).join("libvulkan.so.1");
+        if !src.is_file() {
+            continue;
+        }
+        // Resolve the soname symlink and stage the real loader under the NEEDED name.
+        let real = std::fs::canonicalize(&src).unwrap_or(src);
+        let dst = staged.join("libvulkan.so.1");
+        let stale = dst
+            .metadata()
+            .map(|m| m.len() != real.metadata().map(|s| s.len()).unwrap_or(0))
+            .unwrap_or(true);
+        if stale {
+            std::fs::copy(&real, &dst).unwrap_or_else(|e| panic!("stage {}: {e}", real.display()));
+        }
+        std::fs::write(
+            staged.join("VULKAN_LOADER_LICENSE.txt"),
+            "The bundled libvulkan.so.1 is the Khronos Vulkan loader (Vulkan-Loader),\n\
+             copyright the Khronos Group and contributors, licensed under Apache-2.0.\n\
+             Source: https://github.com/KhronosGroup/Vulkan-Loader\n",
+        )
+        .expect("write Vulkan loader attribution");
+        return;
+    }
+    panic!(
+        "the whisper-vulkan build links libvulkan.so.1 but none was found on the build host — \
+         install libvulkan1 or the LunarG vulkan-sdk so the loader can be bundled"
+    );
+}
+
+/// The cargo `target/<profile>` dir, found by walking up from `OUT_DIR` — the same place
+/// sherpa-rs-sys copies its shared libs to. Same logic as the Windows `cargo_target_dir` below.
+#[cfg(target_os = "linux")]
+fn cargo_target_dir_linux() -> std::path::PathBuf {
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let profile = std::env::var("PROFILE").unwrap();
+    let mut dir = out_dir.as_path();
+    while let Some(parent) = dir.parent() {
+        if parent.ends_with(&profile) {
+            return parent.to_path_buf();
+        }
+        dir = parent;
+    }
+    panic!(
+        "could not find target/{profile} above OUT_DIR {}",
+        out_dir.display()
+    );
 }
 
 /// Copies the sherpa-onnx + onnxruntime runtime DLLs from the cargo target dir into
