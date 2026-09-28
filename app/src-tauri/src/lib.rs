@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 use tauri::{path::BaseDirectory, AppHandle, Emitter, Manager, State};
 
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use wisp_aec::WebrtcEchoCanceller;
 use wisp_audio::{
     normalize_for_asr_in_place, tee, to_mono_16k, ChannelSource, EchoCancellingSource, MediaSource,
@@ -57,6 +57,8 @@ use wisp_pipeline::{
     remap_to_original, transcribe_in_windows, EnergySegmenter, EnergyVad, GatedClip, LiveStream,
     Segmenter, Session, Transcriber, Vad, DEFAULT_SILENCE_HANGOVER,
 };
+#[cfg(target_os = "linux")]
+use wisp_pulseaudio::PulseMonitorSource;
 #[cfg(target_os = "macos")]
 use wisp_screencapture::ScreenCaptureSource;
 
@@ -611,11 +613,15 @@ fn coerce_param(raw: &serde_json::Value, kind: &ParamKind) -> Option<ParamValue>
     }
 }
 
-/// Builds the GPU whisper.cpp engine from a downloaded GGUF model — Metal on macOS, Vulkan on Windows
-/// (under the `whisper-vulkan` feature). Where the engine isn't built, the stub below reports it.
+/// Builds the GPU whisper.cpp engine from a downloaded GGUF model — Metal on macOS, Vulkan on
+/// Windows and Linux (under the `whisper-vulkan` feature). Where the engine isn't built, the stub
+/// below reports it.
 #[cfg(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "whisper-vulkan")
+    all(
+        any(target_os = "windows", target_os = "linux"),
+        feature = "whisper-vulkan"
+    )
 ))]
 fn build_whisper_cpp_engine(
     descriptor: &ModelDescriptor,
@@ -634,7 +640,10 @@ fn build_whisper_cpp_engine(
 
 #[cfg(not(any(
     target_os = "macos",
-    all(target_os = "windows", feature = "whisper-vulkan")
+    all(
+        any(target_os = "windows", target_os = "linux"),
+        feature = "whisper-vulkan"
+    )
 )))]
 fn build_whisper_cpp_engine(
     _descriptor: &ModelDescriptor,
@@ -642,7 +651,7 @@ fn build_whisper_cpp_engine(
     _language: &str,
 ) -> WispResult<Box<dyn AsrEngine>> {
     Err(WispError::Engine(
-        "the whisper.cpp GPU engine is only available on macOS, and on Windows GPU builds"
+        "the whisper.cpp GPU engine is only available on macOS, and on Windows/Linux GPU builds"
             .to_owned(),
     ))
 }
@@ -3178,7 +3187,16 @@ fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
         .map_err(|e| e.to_string())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+/// Linux captures the default output's monitor through the PulseAudio/PipeWire server — one
+/// click, no virtual device, like ScreenCaptureKit and WASAPI loopback.
+#[cfg(target_os = "linux")]
+fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
+    PulseMonitorSource::new()
+        .map(|s| Box::new(s) as Box<dyn AudioSource>)
+        .map_err(|e| e.to_string())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn open_system_capture() -> Result<Box<dyn AudioSource>, String> {
     Err("system-audio capture isn't available on this platform yet".to_owned())
 }
@@ -3210,11 +3228,11 @@ fn open_mic_within(device: Option<String>) -> Result<Box<dyn AudioSource>, Strin
     })
 }
 
-/// The echo canceller for this platform: WebRTC AEC on macOS (falling back to passthrough if it
-/// won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>` lets the dual-stream
-/// path stay identical on every platform — the cross-stream dedup handles residual echo where there
-/// is no real AEC.
-#[cfg(target_os = "macos")]
+/// The echo canceller for this platform: WebRTC AEC on macOS and Linux (falling back to
+/// passthrough if it won't init), passthrough elsewhere. Keeping it a `Box<dyn EchoCanceller>`
+/// lets the dual-stream path stay identical on every platform — the cross-stream dedup handles
+/// residual echo where there is no real AEC.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn echo_canceller() -> Box<dyn EchoCanceller> {
     match WebrtcEchoCanceller::new() {
         Ok(c) => Box::new(c),
@@ -3225,7 +3243,7 @@ fn echo_canceller() -> Box<dyn EchoCanceller> {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn echo_canceller() -> Box<dyn EchoCanceller> {
     Box::new(PassthroughEchoCanceller)
 }

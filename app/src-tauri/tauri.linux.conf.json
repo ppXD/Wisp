@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "resources/silero_vad.onnx": "resources/silero_vad.onnx",
+      "linux-runtime/*.so*": ""
+    }
+  }
+}

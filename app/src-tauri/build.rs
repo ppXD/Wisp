@@ -24,7 +24,87 @@ fn main() {
     #[cfg(target_os = "windows")]
     stage_windows_runtime_libs();
 
+    #[cfg(target_os = "linux")]
+    {
+        // The sherpa-onnx + onnxruntime shared libs the binary links against land in the cargo
+        // target dir at build time. `tauri dev` finds them via `$ORIGIN`; the .deb/AppImage ship
+        // them under <prefix>/lib/Wisp (the Tauri resource dir). Emit RPATH (not the modern
+        // RUNPATH, which does not apply transitively) so libsherpa-onnx-c-api.so also resolves
+        // its own deps — libonnxruntime.so.1 and libcargs.so — from the same directory.
+        println!("cargo:rustc-link-arg=-Wl,--disable-new-dtags");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,$ORIGIN/../lib/Wisp");
+        stage_linux_runtime_libs();
+    }
+
     tauri_build::build()
+}
+
+/// Copies the sherpa-onnx + onnxruntime runtime libs from the cargo target dir into
+/// `linux-runtime/` (next to this build script) so `tauri.linux.conf.json` can bundle them into
+/// the installer's resource dir. Every `lib*.so*` the binary needs is staged flat, so the
+/// `$ORIGIN/../lib/Wisp` rpath finds each DT_NEEDED name — including the versioned sonames
+/// (`libonnxruntime.so.1`) the prebuilt libs require.
+#[cfg(target_os = "linux")]
+fn stage_linux_runtime_libs() {
+    use std::path::Path;
+
+    let target_dir = cargo_target_dir_linux();
+    let staged = Path::new(env!("CARGO_MANIFEST_DIR")).join("linux-runtime");
+    std::fs::create_dir_all(&staged).expect("create linux-runtime dir");
+
+    let mut staged_any = false;
+    for entry in std::fs::read_dir(&target_dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", target_dir.display()))
+    {
+        let entry = entry.expect("read target dir entry");
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let is_runtime_lib = (name.starts_with("libsherpa-onnx")
+            || name.starts_with("libcargs")
+            || name.starts_with("libonnxruntime"))
+            && name.contains(".so");
+        if !is_runtime_lib {
+            continue;
+        }
+        let src = entry.path();
+        if !src.is_file() {
+            continue; // skip soname symlinks — the real lib is staged under its own name
+        }
+        let dst = staged.join(&name);
+        let stale = dst
+            .metadata()
+            .map(|m| m.len() != src.metadata().map(|s| s.len()).unwrap_or(0))
+            .unwrap_or(true);
+        if stale {
+            std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("stage {}: {e}", src.display()));
+        }
+        staged_any = true;
+    }
+
+    assert!(
+        staged_any,
+        "no sherpa/onnxruntime shared libs found in {} — build wisp-engine-sherpa first",
+        target_dir.display()
+    );
+}
+
+/// The cargo `target/<profile>` dir, found by walking up from `OUT_DIR` — the same place
+/// sherpa-rs-sys copies its shared libs to. Same logic as the Windows `cargo_target_dir` below.
+#[cfg(target_os = "linux")]
+fn cargo_target_dir_linux() -> std::path::PathBuf {
+    let out_dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let profile = std::env::var("PROFILE").unwrap();
+    let mut dir = out_dir.as_path();
+    while let Some(parent) = dir.parent() {
+        if parent.ends_with(&profile) {
+            return parent.to_path_buf();
+        }
+        dir = parent;
+    }
+    panic!(
+        "could not find target/{profile} above OUT_DIR {}",
+        out_dir.display()
+    );
 }
 
 /// Copies the sherpa-onnx + onnxruntime runtime DLLs from the cargo target dir into

@@ -169,12 +169,13 @@ fn resolve(ideal: &str, catalog: &[ModelDescriptor]) -> ModelId {
 /// scattered `cfg` checks.
 pub fn family_runnable(family: ModelFamily, accelerator: Accelerator) -> bool {
     match family {
-        // whisper.cpp runs on the Apple GPU (Metal), or — in a Windows GPU build — on Vulkan with a
-        // built-in CPU fallback, so it's offered on Windows too (no GPU required to run, just to
-        // accelerate). Apple on-device speech stays macOS/Metal-only.
+        // whisper.cpp runs on the Apple GPU (Metal), or — in a Windows/Linux GPU build — on Vulkan
+        // with a built-in CPU fallback, so it's offered on those platforms too (no GPU required to
+        // run, just to accelerate). Apple on-device speech stays macOS/Metal-only.
         ModelFamily::WhisperCpp => {
             accelerator == Accelerator::Metal
-                || (cfg!(target_os = "windows") && cfg!(feature = "whisper-vulkan"))
+                || (cfg!(any(target_os = "windows", target_os = "linux"))
+                    && cfg!(feature = "whisper-vulkan"))
         }
         ModelFamily::AppleSpeech => accelerator == Accelerator::Metal,
         _ => true,
@@ -220,7 +221,9 @@ pub fn model_fit(descriptor: &ModelDescriptor, profile: &MachineProfile) -> Mode
 /// Why a family can't run on a host lacking its accelerator — the text shown on the greyed entry.
 fn platform_block_reason(family: ModelFamily) -> String {
     match family {
-        ModelFamily::WhisperCpp => "Needs a macOS Metal GPU".to_owned(),
+        ModelFamily::WhisperCpp => {
+            "Needs a macOS Metal GPU, or a Windows/Linux Vulkan GPU build".to_owned()
+        }
         ModelFamily::AppleSpeech => "Needs macOS".to_owned(),
         _ => "Not supported on this machine".to_owned(),
     }
@@ -292,9 +295,30 @@ mod tests {
     }
 
     #[test]
-    fn whisper_cpp_runs_only_on_metal() {
-        // The GPU whisper.cpp engine is macOS/Metal only — every other accelerator must hide it.
+    fn whisper_cpp_runs_only_on_metal_or_vulkan_builds() {
+        // whisper.cpp's GPU engine is Metal on macOS; Windows/Linux get it under the
+        // `whisper-vulkan` feature, where ggml Vulkan accelerates on any GPU and falls back to
+        // CPU — there it's runnable regardless of the reported accelerator.
         assert!(family_runnable(ModelFamily::WhisperCpp, Accelerator::Metal));
+        #[cfg(all(
+            any(target_os = "windows", target_os = "linux"),
+            feature = "whisper-vulkan"
+        ))]
+        for accel in [
+            Accelerator::Cpu,
+            Accelerator::Cuda,
+            Accelerator::Vulkan,
+            Accelerator::DirectMl,
+        ] {
+            assert!(
+                family_runnable(ModelFamily::WhisperCpp, accel),
+                "{accel:?} on a Vulkan build should still run whisper.cpp (CPU fallback)"
+            );
+        }
+        #[cfg(not(all(
+            any(target_os = "windows", target_os = "linux"),
+            feature = "whisper-vulkan"
+        )))]
         for accel in [
             Accelerator::Cpu,
             Accelerator::Cuda,
@@ -303,7 +327,7 @@ mod tests {
         ] {
             assert!(
                 !family_runnable(ModelFamily::WhisperCpp, accel),
-                "{accel:?} has no Metal whisper.cpp engine"
+                "{accel:?} has no whisper.cpp GPU engine"
             );
         }
     }
@@ -333,16 +357,25 @@ mod tests {
     fn model_fit_blocks_metal_only_families_off_metal() {
         let catalog = builtin_catalog();
         let cpu = MachineProfile::new(Accelerator::Cpu, 16 * GIB);
-        for d in catalog
-            .iter()
-            .filter(|d| d.family == ModelFamily::WhisperCpp || d.family == ModelFamily::AppleSpeech)
-        {
+        let mut checked_any = false;
+        for d in catalog.iter().filter(|d| {
+            let gpu_engine_here = d.family == ModelFamily::WhisperCpp
+                && cfg!(all(
+                    any(target_os = "windows", target_os = "linux"),
+                    feature = "whisper-vulkan"
+                ));
+            // WhisperCpp is only Metal-blocked when this build has no Vulkan whisper.cpp.
+            (d.family == ModelFamily::WhisperCpp && !gpu_engine_here)
+                || d.family == ModelFamily::AppleSpeech
+        }) {
+            checked_any = true;
             assert!(
                 matches!(model_fit(d, &cpu), ModelFit::Blocked(_)),
                 "{:?} should be blocked off Metal",
                 d.id
             );
         }
+        assert!(checked_any, "catalog must contain a Metal-only family");
     }
 
     #[test]
